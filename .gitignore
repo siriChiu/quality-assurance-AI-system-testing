@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+
+# Build outputs
+build/
+dist/
+
+# Project overlays generated in host repositories; do not commit them here.
+.qa-aist/
+.qa-aist.yaml
+.qa-aist.local.yaml
+.qa-aist.secret.yaml
+.qa-aist.cache/
