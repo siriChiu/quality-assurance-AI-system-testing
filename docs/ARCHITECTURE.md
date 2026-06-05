@@ -53,6 +53,10 @@ invariants:
   write_gate_required: true
   closed_tracker_items_are_not_active: true
   issue_retest_contract_must_match: true
+  bug_fixes_expand_to_swqa_patterns: true
+  sibling_surface_scan_required: true
+  boundary_invalid_value_tests_required: true
+  side_effect_safe_repro_required: true
   raw_secrets_in_repo: false
   project_state_inside_tool_repo: false
 ```

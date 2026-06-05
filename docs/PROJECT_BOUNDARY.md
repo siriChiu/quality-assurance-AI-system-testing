@@ -36,12 +36,12 @@ Target repositories should store project-owned assets outside the QA-AIST tool c
 
 ```text
 .qa-aist.yaml
-.qa-aist/cases/
-.qa-aist/runners/
-.qa-aist/rules/
-.qa-aist/state/      # usually ignored
-.qa-aist/evidence/   # ignored
-.qa-aist/reports/    # generated
+.qa-aist-project/cases/
+.qa-aist-project/runners/
+.qa-aist-project/rules/
+.qa-aist-project/state/      # usually ignored
+.qa-aist-project/evidence/   # ignored
+.qa-aist-project/reports/    # generated
 ```
 
 ## Review checklist before commit

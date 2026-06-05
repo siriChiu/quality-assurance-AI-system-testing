@@ -3,8 +3,8 @@
 Implemented starter commands:
 
 ```bash
-qa-aist init-project --root <target-repo>
-qa-aist status --root <target-repo>
+qa-aist init-project --root <target-repo> --workspace .qa-aist-project
+qa-aist status --root <target-repo> --workspace .qa-aist-project
 qa-aist config validate --config <target-repo>/.qa-aist.yaml
 ```
 
@@ -32,3 +32,5 @@ commands:
 ```
 
 All commands must accept explicit paths so the tool can run from a submodule, package install, or separate checkout without writing project data into the QA-AIST repository.
+
+`init-project` refuses to use a workspace that is itself a QA-AIST source checkout. This prevents embedded-tool layouts such as `<target-repo>/.qa-aist/` from receiving host-project cases or runtime state.

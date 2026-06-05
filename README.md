@@ -27,7 +27,7 @@ When a target project uses QA-AIST, keep reusable tool code separate from projec
 <target-repo>/
   tools/qa-aist/          # optional submodule or vendored checkout of this repo
   .qa-aist.yaml           # project config, safe to review before committing
-  .qa-aist/
+  .qa-aist-project/
     cases/                # project-owned case contracts
     runners/              # project-owned runner scripts
     rules/                # project-owned rules
@@ -37,6 +37,7 @@ When a target project uses QA-AIST, keep reusable tool code separate from projec
 ```
 
 The tool may be mounted at another path, but project-owned files should stay in the host project, not inside the QA-AIST repository.
+If the tool source itself is embedded at `<target-repo>/.qa-aist/`, keep host-project assets in `<target-repo>/.qa-aist-project/` and do not write cases, runners, state, or evidence into the tool checkout.
 
 ## Quick start
 
@@ -58,4 +59,5 @@ qa-aist status --root /path/to/target-repo
 2. Tracker writes must pass a deterministic write gate.
 3. Closed tracker issues are not active work items.
 4. Retest comments must use the same canonical contract as the issue body.
-5. Secrets live in environment variables or secret stores, never in this repo.
+5. Every confirmed bug must expand into sibling-surface, boundary, invalid-value, and side-effect-safe regression coverage.
+6. Secrets live in environment variables or secret stores, never in this repo.
