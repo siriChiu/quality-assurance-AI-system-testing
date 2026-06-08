@@ -170,6 +170,49 @@ class HermesDispatchTest(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(json.loads(buf.getvalue())["status"], "ok")
 
+    def test_install_skill_creates_hermes_skill_slash_command(self) -> None:
+        with tempfile.TemporaryDirectory() as skills_tmp:
+            payload = hermes.install_skill(
+                skills_tmp,
+                runner_command="/usr/bin/env PYTHONPATH=/repo/QA-AIST/src python3 -m qa_aist.hermes",
+            )
+            self.assertEqual(payload["status"], "ok")
+            skill_path = Path(payload["skill_path"])
+            self.assertTrue(skill_path.exists())
+            text = skill_path.read_text(encoding="utf-8")
+            self.assertIn("name: qa-aist", text)
+            self.assertIn("QA-AIST Hermes Skill", text)
+            self.assertIn("/usr/bin/env PYTHONPATH=/repo/QA-AIST/src python3 -m qa_aist.hermes", text)
+
+            status = hermes.skill_status(skills_tmp)
+            self.assertEqual(status["status"], "ok")
+            self.assertTrue(status["skill_valid"])
+
+            duplicate = hermes.install_skill(skills_tmp)
+            self.assertEqual(duplicate["status"], "error")
+            self.assertEqual(duplicate["error"], "skill_exists")
+
+    def test_skill_console_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as skills_tmp:
+            buf = StringIO()
+            with redirect_stdout(buf):
+                code = hermes.main([
+                    "install-skill",
+                    "--skills-dir",
+                    skills_tmp,
+                    "--runner-command",
+                    "qa-aist-hermes",
+                ])
+            self.assertEqual(code, 0)
+            payload = json.loads(buf.getvalue())
+            self.assertEqual(payload["command_prefix"], "/qa-aist")
+
+            buf = StringIO()
+            with redirect_stdout(buf):
+                code = hermes.main(["skill-status", "--skills-dir", skills_tmp])
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(buf.getvalue())["status"], "ok")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -326,47 +326,50 @@ qa-aist-hermes --root /path/to/product-repo /qa-aist status
 
 這一層只做三件事：驗證 `/qa-aist` prefix、自動補上 repo context、把指令轉給 `qa-aist ... --json` engine。它不會自行執行任意聊天文字，也不會繞過 write gate。
 
-### Install Into Hermes Agent
+### Install Into Hermes Slash Command
 
-如果 Hermes 使用 agent directory / manifest registry 的整合方式，QA-AIST 可以把 portable agent files 安裝到指定目錄：
+這台 Hermes 的 `/xxx` 動態指令是由 `~/.hermes/skills/**/SKILL.md` 產生的。要讓 Hermes 認得 `/qa-aist`，請安裝 QA-AIST skill：
 
 ```bash
-qa-aist-hermes install --agent-dir /path/to/hermes/agents/qa-aist
+PYTHONPATH=/path/to/QA-AIST/src python3 -m qa_aist.hermes install-skill \
+  --runner-command "/usr/bin/env PYTHONPATH=/path/to/QA-AIST/src python3 -m qa_aist.hermes"
 ```
 
 這會建立：
 
 ```text
-/path/to/hermes/agents/qa-aist/
-  qa-aist.agent.json            # portable Hermes agent manifest
-  qa-aist-agent.sh              # wrapper that dispatches /qa-aist to qa-aist-hermes
+~/.hermes/skills/qa-aist/
+  SKILL.md                      # Hermes dynamic skill slash command
 ```
 
 檢查安裝狀態：
 
 ```bash
-qa-aist-hermes status --agent-dir /path/to/hermes/agents/qa-aist
+PYTHONPATH=/path/to/QA-AIST/src python3 -m qa_aist.hermes skill-status
 ```
 
-只輸出 manifest、不寫檔：
+重新載入 Hermes skills：
+
+```text
+/reload-skills
+```
+
+之後 Hermes 會把 `/qa-aist ...` 當成 skill slash command。注意：這是 Hermes skill-mediated flow，Hermes 會載入 `SKILL.md` 指示 agent 去呼叫 deterministic QA-AIST dispatcher；不是 Hermes 原生 Python router 直接執行外部命令。
+
+如果你已經把 QA-AIST 安裝進 Hermes 使用的 Python 環境，也可以用較短的指令：
 
 ```bash
-qa-aist-hermes manifest
+qa-aist-hermes install-skill
 ```
 
-Hermes 端需要提供：
-
-- `HERMES_PROJECT_ROOT`：目前產品 repo root。
-- `HERMES_MESSAGE` 或 argv：使用者輸入的 `/qa-aist ...` 訊息。
-
-Wrapper 也可以直接 smoke test：
+不經 Hermes，直接 smoke test dispatcher：
 
 ```bash
-HERMES_PROJECT_ROOT=/path/to/product-repo \
-  /path/to/hermes/agents/qa-aist/qa-aist-agent.sh /qa-aist doctor
+PYTHONPATH=/path/to/QA-AIST/src python3 -m qa_aist.hermes \
+  --root /path/to/product-repo /qa-aist doctor
 ```
 
-若 Hermes 已有自己的 plugin schema，可以讀 `qa-aist.agent.json` 內的 `command_prefix`、`entrypoint`、`python_api`、`permissions`、`security` 欄位，轉成 Hermes 原生 registry entry。
+QA-AIST 仍保留 `qa-aist-hermes install --agent-dir ...` portable manifest/wrapper 模式，但這不是目前 Hermes dynamic slash command 的主要安裝方式。
 
 ## Developer / CI Usage
 

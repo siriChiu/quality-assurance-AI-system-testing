@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import sys
 from contextlib import redirect_stderr, redirect_stdout
@@ -19,6 +20,8 @@ ACCEPTED_PREFIXES = {PRIMARY_PREFIX, ALIAS_PREFIX}
 ROOT_COMMANDS = {"init-project", "setup", "status", "doctor", "qa-test", "close-loop", "report", "tracker"}
 AGENT_MANIFEST_NAME = "qa-aist.agent.json"
 AGENT_WRAPPER_NAME = "qa-aist-agent.sh"
+HERMES_SKILL_NAME = "qa-aist"
+HERMES_SKILL_FILE_NAME = "SKILL.md"
 
 
 @dataclass(frozen=True)
@@ -256,6 +259,129 @@ def agent_status(agent_dir: str | Path) -> dict[str, Any]:
     }
 
 
+def default_skills_dir() -> Path:
+    hermes_home = os.getenv("HERMES_HOME")
+    if hermes_home:
+        return Path(hermes_home).expanduser() / "skills"
+    return Path.home() / ".hermes" / "skills"
+
+
+def build_skill_markdown(*, runner_command: str = "qa-aist-hermes") -> str:
+    return f"""---
+name: qa-aist
+description: "QA-AIST: deterministic QA setup, tests, evidence, reports, and write-gated tracker plans."
+version: {__version__}
+author: QA-AIST contributors
+license: MIT
+platforms: [linux, macos]
+metadata:
+  hermes:
+    tags: [qa, testing, deterministic, evidence, write-gate, tracker]
+---
+
+# QA-AIST Hermes Skill
+
+This skill makes `/qa-aist ...` visible to Hermes as a dynamic skill slash command.
+
+Important boundary: Hermes skill slash commands are prompt-mediated. This skill tells the agent exactly how to call the deterministic QA-AIST dispatcher, but Hermes itself still routes this as a skill invocation unless a native plugin/router is installed.
+
+## Required Behavior
+
+When the user invokes `/qa-aist <arguments>`:
+
+1. Treat `<arguments>` as a QA-AIST command, for example `doctor`, `qa-test list`, or `close-loop run-once`.
+2. Do not answer from memory.
+3. Run the QA-AIST dispatcher through the terminal from the current product repository root.
+4. Read the returned JSON.
+5. Reply with the `chat_response` field. If the JSON has no `chat_response`, summarize `payload.status`, `payload.error`, and any report/evidence paths.
+
+Use this command shape:
+
+```bash
+{runner_command} --root "$PWD" /qa-aist <arguments>
+```
+
+Examples:
+
+```bash
+{runner_command} --root "$PWD" /qa-aist status
+{runner_command} --root "$PWD" /qa-aist doctor
+{runner_command} --root "$PWD" /qa-aist qa-test list
+{runner_command} --root "$PWD" /qa-aist qa-test run-one EXAMPLE-001
+{runner_command} --root "$PWD" /qa-aist close-loop run-once
+{runner_command} --root "$PWD" /qa-aist tracker plan-write
+```
+
+## Safety Rules
+
+- Do not directly write tracker comments, reopen issues, close issues, or create issue text.
+- Do not reorder the QA-AIST close-loop pipeline.
+- Do not invent evidence paths.
+- Do not print raw secrets.
+- Tracker writes in QA-AIST V1 are dry-run plans only.
+
+## If The Dispatcher Is Missing
+
+If `{runner_command}` is not found, tell the user to install QA-AIST into the same environment Hermes uses, or reinstall this skill with a runner command such as:
+
+```bash
+PYTHONPATH=/path/to/QA-AIST/src python3 -m qa_aist.hermes install-skill --force --runner-command "/usr/bin/env PYTHONPATH=/path/to/QA-AIST/src python3 -m qa_aist.hermes"
+```
+"""
+
+
+def install_skill(
+    skills_dir: str | Path | None = None,
+    *,
+    force: bool = False,
+    runner_command: str = "qa-aist-hermes",
+) -> dict[str, Any]:
+    base = Path(skills_dir).expanduser().resolve() if skills_dir else default_skills_dir().expanduser().resolve()
+    skill_dir = base / HERMES_SKILL_NAME
+    skill_path = skill_dir / HERMES_SKILL_FILE_NAME
+    if skill_path.exists() and not force:
+        return {
+            "status": "error",
+            "error": "skill_exists",
+            "message": "Hermes QA-AIST skill already exists. Re-run with --force to overwrite.",
+            "skills_dir": str(base),
+            "skill_dir": str(skill_dir),
+            "skill_path": str(skill_path),
+            "command_prefix": PRIMARY_PREFIX,
+        }
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    skill_path.write_text(build_skill_markdown(runner_command=runner_command), encoding="utf-8")
+    return {
+        "status": "ok",
+        "skills_dir": str(base),
+        "skill_dir": str(skill_dir),
+        "skill_path": str(skill_path),
+        "command_prefix": PRIMARY_PREFIX,
+        "reload_command": "/reload-skills",
+        "runner_command": runner_command,
+    }
+
+
+def skill_status(skills_dir: str | Path | None = None) -> dict[str, Any]:
+    base = Path(skills_dir).expanduser().resolve() if skills_dir else default_skills_dir().expanduser().resolve()
+    skill_dir = base / HERMES_SKILL_NAME
+    skill_path = skill_dir / HERMES_SKILL_FILE_NAME
+    exists = skill_path.exists()
+    valid = False
+    if exists:
+        text = skill_path.read_text(encoding="utf-8")
+        valid = "name: qa-aist" in text and "QA-AIST Hermes Skill" in text
+    return {
+        "status": "ok" if valid else "missing",
+        "skills_dir": str(base),
+        "skill_dir": str(skill_dir),
+        "skill_path": str(skill_path),
+        "skill_exists": exists,
+        "skill_valid": valid,
+        "command_prefix": PRIMARY_PREFIX if valid else None,
+    }
+
+
 def _inject_project_context(engine_argv: list[str], root: Path) -> None:
     path = _command_path(engine_argv)
     if len(path) >= 2 and path[0] == "config" and path[1] == "validate":
@@ -335,7 +461,7 @@ exec {runner_argv} --root "$root" "$@"
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(argv if argv is not None else sys.argv[1:])
-    if argv and argv[0] in {"manifest", "install", "status"}:
+    if argv and argv[0] in {"manifest", "install", "status", "install-skill", "skill-status"}:
         return _main_agent_command(argv)
     parser = argparse.ArgumentParser(prog="qa-aist-hermes", description="Dispatch a Hermes /qa-aist chat command to the QA-AIST engine")
     parser.add_argument("--root", default=".", help="Product repository root provided by Hermes context")
@@ -364,6 +490,22 @@ def _main_agent_command(argv: list[str]) -> int:
         payload = install_agent(args.agent_dir, force=args.force, runner_command=args.runner_command)
         print(json_dumps(payload))
         return 0 if payload["status"] == "ok" else 4
+    if command == "install-skill":
+        parser = argparse.ArgumentParser(prog="qa-aist-hermes install-skill", description="Install QA-AIST as a Hermes dynamic skill slash command")
+        parser.add_argument("--skills-dir", default=None, help="Hermes skills directory; defaults to $HERMES_HOME/skills or ~/.hermes/skills")
+        parser.add_argument("--runner-command", default="qa-aist-hermes")
+        parser.add_argument("--force", action="store_true", help="Overwrite an existing QA-AIST skill")
+        args = parser.parse_args(argv[1:])
+        payload = install_skill(args.skills_dir, force=args.force, runner_command=args.runner_command)
+        print(json_dumps(payload))
+        return 0 if payload["status"] == "ok" else 4
+    if command == "skill-status":
+        parser = argparse.ArgumentParser(prog="qa-aist-hermes skill-status", description="Check QA-AIST Hermes skill installation")
+        parser.add_argument("--skills-dir", default=None, help="Hermes skills directory; defaults to $HERMES_HOME/skills or ~/.hermes/skills")
+        args = parser.parse_args(argv[1:])
+        payload = skill_status(args.skills_dir)
+        print(json_dumps(payload))
+        return 0 if payload["status"] == "ok" else 2
     parser = argparse.ArgumentParser(prog="qa-aist-hermes status", description="Check QA-AIST Hermes agent installation")
     parser.add_argument("--agent-dir", required=True, help="Hermes agents directory")
     args = parser.parse_args(argv[1:])

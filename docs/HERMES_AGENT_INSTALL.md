@@ -1,227 +1,155 @@
 # Hermes Agent Installation
 
-This guide explains how to make `/qa-aist ...` work inside a Hermes chat window.
+This guide is written for the Hermes Agent installed on this machine.
 
-Short version: QA-AIST cannot create a Hermes slash command by itself. Hermes must have a message router, plugin registry, agent registry, or tool configuration that maps `/qa-aist` to QA-AIST.
-
-## What Must Be True
-
-For a user to type this in Hermes:
+Important correction: Hermes does not load QA-AIST by reading `qa-aist.agent.json` from `/usr/local/lib/hermes-agent/agent`. Hermes dynamic slash commands are generated from skills under:
 
 ```text
-/qa-aist doctor
+~/.hermes/skills/**/SKILL.md
 ```
 
-Hermes must do this internally:
+So the practical way to make `/qa-aist ...` visible in Hermes is to install QA-AIST as a Hermes skill.
 
-```text
-chat message "/qa-aist doctor"
-  -> Hermes detects prefix "/qa-aist"
-  -> Hermes calls QA-AIST adapter
-  -> QA-AIST runs qa-aist engine with the current project root
-  -> Hermes displays result.chat_response
-```
+## What This Gives You
 
-QA-AIST provides the adapter. Hermes still needs to register it.
-
-## Step 1: Install QA-AIST Where Hermes Can Run It
-
-Install QA-AIST into the same Python environment that Hermes uses, or into a Python environment that Hermes can execute.
-
-From a local checkout:
-
-```bash
-cd /path/to/qa-aist
-python3 -m pip install .
-```
-
-Verify the package tools exist:
-
-```bash
-qa-aist --help
-qa-aist-hermes --help
-```
-
-If Hermes runs inside a venv, activate that venv before installing:
-
-```bash
-source /path/to/hermes/.venv/bin/activate
-cd /path/to/qa-aist
-python3 -m pip install .
-```
-
-## Step 2: Verify QA-AIST Without Hermes
-
-Use any product repo as the target root:
-
-```bash
-qa-aist-hermes --root /path/to/product-repo /qa-aist setup
-qa-aist-hermes --root /path/to/product-repo /qa-aist doctor
-```
-
-Expected behavior:
-
-- The command exits `0`.
-- Output is JSON.
-- The JSON contains `interface: hermes`.
-- The JSON contains `chat_response`.
-
-If this does not work, fix QA-AIST installation before touching Hermes.
-
-## Step 3: Pick Your Hermes Integration Mode
-
-Different Hermes installations expose different plugin surfaces. Pick the mode your Hermes actually supports.
-
-| Hermes supports | Use this mode | What to register |
-|---|---|---|
-| External command/tool process | Process wrapper | `qa-aist-agent.sh` |
-| Python plugin/callable | Python API | `qa_aist.hermes.dispatch_chat_command` |
-| Manifest/agent directory | Portable manifest | `qa-aist.agent.json` |
-| No plugin/tool/router support | Not directly possible | Use terminal/CI fallback or modify Hermes router |
-
-## Mode A: External Process Wrapper
-
-Generate the wrapper and manifest:
-
-```bash
-qa-aist-hermes install --agent-dir /path/to/hermes/agents/qa-aist
-```
-
-This creates:
-
-```text
-/path/to/hermes/agents/qa-aist/
-  qa-aist.agent.json
-  qa-aist-agent.sh
-```
-
-Register this in Hermes:
-
-```yaml
-name: qa-aist
-trigger: /qa-aist
-command: /path/to/hermes/agents/qa-aist/qa-aist-agent.sh
-env:
-  HERMES_PROJECT_ROOT: <current workspace root>
-message:
-  pass_as: argv
-```
-
-The YAML above is intentionally generic. Translate it to your Hermes config format.
-
-Smoke test the wrapper:
-
-```bash
-HERMES_PROJECT_ROOT=/path/to/product-repo \
-  /path/to/hermes/agents/qa-aist/qa-aist-agent.sh /qa-aist doctor
-```
-
-If Hermes passes the message through an environment variable instead of argv:
-
-```bash
-HERMES_PROJECT_ROOT=/path/to/product-repo \
-HERMES_MESSAGE="/qa-aist doctor" \
-  /path/to/hermes/agents/qa-aist/qa-aist-agent.sh
-```
-
-## Mode B: Python Plugin
-
-If Hermes can import Python callables, register this callable:
-
-```python
-from qa_aist.hermes import dispatch_chat_command
-
-def handle_message(message, session):
-    if not message.startswith("/qa-aist "):
-        return None
-
-    result = dispatch_chat_command(
-        message,
-        root=session.project_root,
-    )
-    return result["chat_response"]
-```
-
-Hermes must provide:
-
-- `message`: the full chat text, for example `/qa-aist doctor`.
-- `session.project_root`: the current product repo root.
-
-## Mode C: Manifest / Agent Directory
-
-If Hermes can load a manifest, generate one:
-
-```bash
-qa-aist-hermes manifest
-```
-
-Or install files into an agent directory:
-
-```bash
-qa-aist-hermes install --agent-dir /path/to/hermes/agents/qa-aist
-```
-
-Then point Hermes at:
-
-```text
-/path/to/hermes/agents/qa-aist/qa-aist.agent.json
-```
-
-Important: `qa-aist.agent.json` is a portable manifest, not proof that your Hermes already understands this exact schema. If Hermes has its own schema, map these fields:
-
-| QA-AIST manifest field | Hermes meaning |
-|---|---|
-| `command_prefix` | Chat trigger `/qa-aist` |
-| `entrypoint.command` | Process command or wrapper |
-| `entrypoint.root_env` | Env var for current project root |
-| `entrypoint.message_env` | Env var for full chat message |
-| `python_api` | Python callable mode |
-| `permissions` | Filesystem/network/tracker permissions |
-| `outputs.chat_response_field` | Text to display in chat |
-
-## If Hermes Has No Plugin System
-
-Then `/qa-aist ...` cannot work as a native chat command yet.
-
-You still have two fallback options:
-
-1. Use Hermes to run an external command manually:
-
-```bash
-qa-aist-hermes --root /path/to/product-repo /qa-aist doctor
-```
-
-2. Add a tiny router to Hermes:
-
-```python
-from qa_aist.hermes import dispatch_chat_command
-
-def on_chat_message(message, session):
-    if message.startswith("/qa-aist "):
-        result = dispatch_chat_command(message, root=session.project_root)
-        return result["chat_response"]
-    return normal_hermes_flow(message, session)
-```
-
-## Final Verification
-
-After registration, test in this order:
+After installation, Hermes will recognize:
 
 ```text
 /qa-aist status
 /qa-aist doctor
 /qa-aist qa-test list
-/qa-aist qa-test run-one EXAMPLE-001
 /qa-aist close-loop run-once
 ```
 
-If `/qa-aist` is not recognized by Hermes, the failure is in Hermes registration, not in QA-AIST engine.
+Boundary: this is a Hermes skill slash command. Hermes converts `/qa-aist ...` into a skill invocation message, and the skill instructs the agent to call QA-AIST's deterministic dispatcher. This is not the same as a native Hermes Python router directly executing QA-AIST before the LLM sees the turn.
 
-If Hermes recognizes `/qa-aist` but QA-AIST returns JSON with `status: error`, inspect `payload.error`.
+## Install Without System pip
 
-If the command works outside Hermes but not inside Hermes, check:
+On Ubuntu, system Python may reject `pip install .` with `externally-managed-environment`. You can still install the Hermes skill directly from the QA-AIST checkout.
 
-- Hermes is using the same Python environment where QA-AIST is installed.
-- Hermes passes the current product repo root.
-- Hermes passes the full message, including `/qa-aist`.
-- Hermes displays `chat_response` from the returned JSON.
+From the QA-AIST repo:
+
+```bash
+cd /root/repo/QA-AIST
+PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes install-skill --force \
+  --runner-command "/usr/bin/env PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes"
+```
+
+This creates:
+
+```text
+/root/.hermes/skills/qa-aist/SKILL.md
+```
+
+Check it:
+
+```bash
+PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes skill-status
+```
+
+Expected:
+
+```json
+{
+  "status": "ok",
+  "command_prefix": "/qa-aist",
+  "skill_valid": true
+}
+```
+
+Then reload skills inside Hermes:
+
+```text
+/reload-skills
+```
+
+Now try:
+
+```text
+/qa-aist doctor
+```
+
+## Verify Hermes Can See It
+
+From a terminal, you can ask Hermes' own skill scanner whether `/qa-aist` exists:
+
+```bash
+PYTHONPATH=/usr/local/lib/hermes-agent python3 - <<'PY'
+from agent.skill_commands import scan_skill_commands
+cmds = scan_skill_commands()
+print("/qa-aist" in cmds)
+print(cmds.get("/qa-aist"))
+PY
+```
+
+Expected first line:
+
+```text
+True
+```
+
+## Verify QA-AIST Dispatcher Directly
+
+Before blaming Hermes, check QA-AIST itself:
+
+```bash
+cd /path/to/product-repo
+PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes --root "$PWD" /qa-aist doctor
+```
+
+If the product repo has not been initialized yet, run:
+
+```bash
+PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes --root "$PWD" /qa-aist setup
+PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes --root "$PWD" /qa-aist doctor
+```
+
+## If You Want Real Console Scripts
+
+The shorter command:
+
+```bash
+qa-aist-hermes install-skill
+```
+
+works only after QA-AIST is installed into the Python environment Hermes uses.
+
+If `qa-aist-hermes: command not found`, either use the `PYTHONPATH=... python3 -m qa_aist.hermes ...` form above, or install into a venv/pipx environment and ensure Hermes can see that command.
+
+## Why `/usr/local/lib/hermes-agent/agent` Was Wrong
+
+`/usr/local/lib/hermes-agent/agent` contains Hermes Agent Python source files. Dropping `qa-aist.agent.json` into that directory does not register a slash command.
+
+Hermes dynamic slash commands come from:
+
+```text
+~/.hermes/skills/<skill-name>/SKILL.md
+```
+
+The command name is derived from the skill frontmatter:
+
+```yaml
+---
+name: qa-aist
+description: ...
+---
+```
+
+That is why QA-AIST now provides:
+
+```bash
+python3 -m qa_aist.hermes install-skill
+```
+
+## If You Need Native Deterministic Routing
+
+The skill route still depends on the Hermes agent following the skill instructions and using the terminal tool. For a fully native deterministic route, Hermes itself must add a slash command handler that calls:
+
+```python
+from qa_aist.hermes import dispatch_chat_command
+
+result = dispatch_chat_command("/qa-aist doctor", root=session.project_root)
+return result["chat_response"]
+```
+
+That requires a Hermes code/plugin change. The skill installation is the working no-Hermes-code-change path.
