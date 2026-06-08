@@ -21,6 +21,7 @@ dependencies = [
 
 [project.scripts]
 qa-aist = "qa_aist.cli:main"
+qa-aist-hermes = "qa_aist.hermes:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
