@@ -1,0 +1,318 @@
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from .config import ProjectConfig, json_dumps
+from .gitea import GiteaClient, GiteaError, gitea_config_from_project, issue_number
+from .runner import utc_now
+
+ISSUE_SNAPSHOT_NAME = "issues-snapshot.json"
+
+
+class IssueSyncError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class NormalizedIssue:
+    issue_id: int
+    state: str
+    title: str
+    body: str
+    html_url: str
+    updated_at: str
+    labels: list[str]
+    comments: list[dict[str, Any]]
+    pull_requests: list[dict[str, Any]]
+    raw: dict[str, Any]
+
+    @property
+    def open(self) -> bool:
+        return self.state == "open"
+
+
+def sync_issues(
+    config: ProjectConfig,
+    *,
+    issues_json: str | Path | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    issues = _load_input_issues(config, issues_json)
+    normalized = [normalize_issue(issue) for issue in issues]
+    config.paths.issues.mkdir(parents=True, exist_ok=True)
+    config.paths.state.mkdir(parents=True, exist_ok=True)
+
+    open_issues = [issue for issue in normalized if issue.open]
+    closed_ids = sorted(issue.issue_id for issue in normalized if not issue.open)
+    existing_mirrors = {int(path.stem): path for path in config.paths.issues.glob("*.md") if path.stem.isdigit()}
+    removed: list[int] = []
+    mirror_paths: list[str] = []
+
+    for issue_id in closed_ids:
+        path = existing_mirrors.get(issue_id)
+        if path and path.exists():
+            removed.append(issue_id)
+            if not dry_run:
+                path.unlink()
+
+    for issue in open_issues:
+        path = issue_mirror_path(config, issue.issue_id)
+        mirror_paths.append(_relative_or_str(path, config.root))
+        if not dry_run:
+            path.write_text(render_issue_mirror(issue, config), encoding="utf-8")
+
+    snapshot = build_issue_snapshot(config, open_issues)
+    snapshot_path = issue_snapshot_path(config)
+    if not dry_run:
+        snapshot_path.write_text(json_dumps(snapshot) + "\n", encoding="utf-8")
+
+    return {
+        "status": "dry_run" if dry_run else "ok",
+        "source": "json" if issues_json else "gitea",
+        "snapshot_path": _relative_or_str(snapshot_path, config.root),
+        "issues_dir": _relative_or_str(config.paths.issues, config.root),
+        "open_active_issue_ids": [issue.issue_id for issue in open_issues],
+        "closed_issue_ids": closed_ids,
+        "removed_mirror_ids": removed,
+        "mirror_paths": mirror_paths,
+        "open_count": len(open_issues),
+        "closed_count": len(closed_ids),
+    }
+
+
+def issue_status(config: ProjectConfig) -> dict[str, Any]:
+    snapshot = load_issue_snapshot(config)
+    mirrors = sorted(path for path in config.paths.issues.glob("*.md")) if config.paths.issues.exists() else []
+    return {
+        "status": "ok",
+        "snapshot_exists": issue_snapshot_path(config).exists(),
+        "snapshot_path": _relative_or_str(issue_snapshot_path(config), config.root),
+        "issues_dir": _relative_or_str(config.paths.issues, config.root),
+        "open_count": len(snapshot.get("items", [])),
+        "mirror_count": len(mirrors),
+        "open_active_issue_ids": [item.get("issue_id") for item in snapshot.get("items", [])],
+        "synced_at": snapshot.get("synced_at"),
+    }
+
+
+def show_issue(config: ProjectConfig, issue_id: int) -> dict[str, Any]:
+    mirror = issue_mirror_path(config, issue_id)
+    if not mirror.exists():
+        return {
+            "status": "error",
+            "error": "issue_mirror_not_found",
+            "issue_id": issue_id,
+            "mirror_path": _relative_or_str(mirror, config.root),
+        }
+    snapshot_item = next((item for item in load_issue_snapshot(config).get("items", []) if int(item.get("issue_id", -1)) == issue_id), None)
+    return {
+        "status": "ok",
+        "issue_id": issue_id,
+        "mirror_path": _relative_or_str(mirror, config.root),
+        "snapshot_item": snapshot_item,
+        "content": mirror.read_text(encoding="utf-8"),
+    }
+
+
+def dedupe_issues(config: ProjectConfig) -> dict[str, Any]:
+    snapshot = load_issue_snapshot(config)
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for item in snapshot.get("items", []):
+        if not isinstance(item, dict):
+            continue
+        fingerprint = issue_fingerprint(str(item.get("title", "")), str(item.get("body", "")))
+        groups.setdefault(fingerprint, []).append(item)
+    duplicates = [
+        {
+            "fingerprint": fingerprint,
+            "issue_ids": [item.get("issue_id") for item in items],
+            "titles": [item.get("title") for item in items],
+        }
+        for fingerprint, items in sorted(groups.items())
+        if fingerprint and len(items) > 1
+    ]
+    return {
+        "status": "ok",
+        "duplicate_count": len(duplicates),
+        "duplicates": duplicates,
+        "snapshot_path": _relative_or_str(issue_snapshot_path(config), config.root),
+    }
+
+
+def normalize_issue(raw: dict[str, Any]) -> NormalizedIssue:
+    number = issue_number(raw)
+    if number is None:
+        raise IssueSyncError(f"issue entry has no number/index/id: {raw!r}")
+    labels = raw.get("labels") or []
+    if isinstance(labels, list):
+        label_names = [str(label.get("name") if isinstance(label, dict) else label) for label in labels]
+    else:
+        label_names = [str(labels)]
+    comments = raw.get("comments") if isinstance(raw.get("comments"), list) else []
+    pull_requests_raw = raw.get("pull_requests") if isinstance(raw.get("pull_requests"), list) else []
+    if isinstance(raw.get("pull_request"), dict):
+        pull_requests_raw = [raw["pull_request"], *pull_requests_raw]
+    return NormalizedIssue(
+        issue_id=number,
+        state=str(raw.get("state") or "").strip().lower() or "unknown",
+        title=str(raw.get("title") or ""),
+        body=str(raw.get("body") or ""),
+        html_url=str(raw.get("html_url") or raw.get("url") or ""),
+        updated_at=str(raw.get("updated_at") or ""),
+        labels=label_names,
+        comments=[comment for comment in comments if isinstance(comment, dict)],
+        pull_requests=[pr for pr in pull_requests_raw if isinstance(pr, dict)],
+        raw=raw,
+    )
+
+
+def build_issue_snapshot(config: ProjectConfig, open_issues: list[NormalizedIssue]) -> dict[str, Any]:
+    gitea = gitea_config_from_project(config.data)
+    return {
+        "schema": "qa-aist.issue-snapshot.v1",
+        "synced_at": utc_now(),
+        "provider": "gitea",
+        "repo": gitea.repo or config.data.get("tracker", {}).get("project", ""),
+        "source_of_truth": "Gitea live issue state",
+        "closed_issue_policy": "remove_all_local_references",
+        "items": [
+            {
+                "issue_id": issue.issue_id,
+                "state": "open",
+                "title": issue.title,
+                "body": issue.body,
+                "url": issue.html_url,
+                "updated_at": issue.updated_at,
+                "labels": issue.labels,
+                "comment_count": len(issue.comments),
+                "pull_requests": issue.pull_requests,
+                "mirror": _relative_or_str(issue_mirror_path(config, issue.issue_id), config.root),
+                "case_id": case_id_for_issue(issue),
+                "fingerprint": issue_fingerprint(issue.title, issue.body),
+            }
+            for issue in sorted(open_issues, key=lambda item: item.issue_id)
+        ],
+    }
+
+
+def render_issue_mirror(issue: NormalizedIssue, config: ProjectConfig) -> str:
+    labels = ", ".join(issue.labels) if issue.labels else "-"
+    comments = render_comments(issue.comments)
+    return "\n".join(
+        [
+            f"# Gitea issue #{issue.issue_id}: {issue.title}",
+            "",
+            f"- URL: {issue.html_url or '-'}",
+            "- State: open",
+            f"- Synced at: {utc_now()}",
+            f"- Updated at: {issue.updated_at or '-'}",
+            f"- Labels: {labels}",
+            f"- Pull requests: {len(issue.pull_requests)}",
+            f"- Suggested case: {case_id_for_issue(issue)}",
+            "",
+            "## Body",
+            "",
+            issue.body.strip() or "_No issue body._",
+            "",
+            "## Comments",
+            "",
+            comments,
+            "",
+            "## Pull Requests",
+            "",
+            render_pull_requests(issue.pull_requests),
+            "",
+            "## QA-AIST Notes",
+            "",
+            "- Source of truth is the live Gitea issue state.",
+            "- Closed issues are removed from active mirrors and must not be reopened automatically.",
+            "- Use `/qa-aist cases generate --from-issues` to create or refresh draft case contracts.",
+            "",
+        ]
+    )
+
+
+def render_comments(comments: list[dict[str, Any]]) -> str:
+    if not comments:
+        return "_No comments synced._"
+    out: list[str] = []
+    for comment in comments:
+        user = comment.get("user") if isinstance(comment.get("user"), dict) else {}
+        author = user.get("login") or user.get("username") or comment.get("author") or "unknown"
+        created = comment.get("created_at") or comment.get("updated_at") or "-"
+        out.extend([f"### {author} at {created}", "", str(comment.get("body") or "").strip() or "_No body._", ""])
+    return "\n".join(out).rstrip()
+
+
+def render_pull_requests(pull_requests: list[dict[str, Any]]) -> str:
+    if not pull_requests:
+        return "_No pull request references synced._"
+    out: list[str] = []
+    for pr in pull_requests:
+        number = pr.get("number") or pr.get("index") or pr.get("id") or "-"
+        title = pr.get("title") or pr.get("html_url") or pr.get("url") or ""
+        state = pr.get("state") or "-"
+        out.append(f"- PR {number}: {title} ({state})")
+    return "\n".join(out)
+
+
+def load_issue_snapshot(config: ProjectConfig) -> dict[str, Any]:
+    path = issue_snapshot_path(config)
+    if not path.exists():
+        return {"schema": "qa-aist.issue-snapshot.v1", "items": []}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise IssueSyncError(f"invalid issue snapshot JSON: {path}") from exc
+    return loaded if isinstance(loaded, dict) else {"schema": "qa-aist.issue-snapshot.v1", "items": []}
+
+
+def issue_snapshot_path(config: ProjectConfig) -> Path:
+    return config.paths.state / ISSUE_SNAPSHOT_NAME
+
+
+def issue_mirror_path(config: ProjectConfig, issue_id: int) -> Path:
+    return config.paths.issues / f"{issue_id}.md"
+
+
+def case_id_for_issue(issue: NormalizedIssue | dict[str, Any]) -> str:
+    title = issue.title if isinstance(issue, NormalizedIssue) else str(issue.get("title", ""))
+    body = issue.body if isinstance(issue, NormalizedIssue) else str(issue.get("body", ""))
+    match = re.search(r"\bTC-[A-Z0-9][A-Z0-9-]*\b", f"{title}\n{body}")
+    if match:
+        return match.group(0)
+    issue_id = issue.issue_id if isinstance(issue, NormalizedIssue) else int(issue.get("issue_id", issue.get("number", 0)))
+    return f"ISSUE-{issue_id}"
+
+
+def issue_fingerprint(title: str, body: str) -> str:
+    text = re.sub(r"https?://\S+", "", f"{title}\n{body}".lower())
+    text = re.sub(r"#[0-9]+", "", text)
+    words = re.findall(r"[a-z0-9_/-]+", text)
+    return " ".join(words[:24])
+
+
+def _load_input_issues(config: ProjectConfig, issues_json: str | Path | None) -> list[dict[str, Any]]:
+    if issues_json:
+        loaded = json.loads(Path(issues_json).read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            loaded = loaded.get("issues", loaded.get("result", []))
+        if not isinstance(loaded, list):
+            raise IssueSyncError("issues JSON must be a list or an object with an issues list")
+        return [item for item in loaded if isinstance(item, dict)]
+
+    gitea_cfg = gitea_config_from_project(config.data)
+    if not gitea_cfg.configured:
+        raise GiteaError(f"Gitea is not configured or token env is missing: {gitea_cfg.token_env}")
+    return GiteaClient(gitea_cfg).list_issues(state="all", include_comments=True)
+
+
+def _relative_or_str(path: Path, root: Path) -> str:
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)

@@ -6,6 +6,7 @@ paths:
   cases: .qa-aist-project/cases
   runners: .qa-aist-project/runners
   rules: .qa-aist-project/rules
+  issues: .qa-aist-project/issues
   state: .qa-aist-project/state
   evidence: .qa-aist-project/evidence
   reports: .qa-aist-project/reports
@@ -13,6 +14,12 @@ tracker:
   provider: none
   project: ""
   api_token_env: QA_AIST_TRACKER_TOKEN
+  gitea:
+    base_url: ""
+    repo: ""
+    token_env: QA_AIST_GITEA_TOKEN
+    wiki_page: "Test status"
+    branch_prefix: "qa-aist/issue-"
 policy:
   deterministic_first: true
   require_write_gate: true

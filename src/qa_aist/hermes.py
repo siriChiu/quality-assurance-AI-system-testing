@@ -17,8 +17,23 @@ from .config import CONFIG_FILE, json_dumps
 PRIMARY_PREFIX = "/qa-aist"
 ALIAS_PREFIX = "qa-aist"
 ACCEPTED_PREFIXES = {PRIMARY_PREFIX, ALIAS_PREFIX}
-ROOT_COMMANDS = {"init-project", "setup", "status", "doctor", "qa-test", "close-loop", "report", "tracker"}
-HELP_TOPICS = {"qa-test"}
+ROOT_COMMANDS = {
+    "init-project",
+    "setup",
+    "status",
+    "doctor",
+    "issues",
+    "cases",
+    "qa-test",
+    "publish",
+    "fix-issues",
+    "close-loop",
+    "report",
+    "tracker",
+    "sync-gitea",
+    "find-new-issues",
+}
+HELP_TOPICS = {"issues", "cases", "qa-test", "publish", "fix-issues"}
 AGENT_MANIFEST_NAME = "qa-aist.agent.json"
 AGENT_WRAPPER_NAME = "qa-aist-agent.sh"
 HERMES_SKILL_NAME = "qa-aist"
@@ -146,6 +161,14 @@ def render_chat_response(payload: dict[str, Any], *, exit_code: int = 0) -> str:
         lines.append(f"         tracker_writes.blocked_by_gate: {blocked}")
     if isinstance(payload.get("write_gate_result"), dict):
         lines.append(f"         write_gate: {payload['write_gate_result'].get('reason')}")
+    if "open_count" in payload:
+        lines.append(f"         open_issues: {payload.get('open_count')}")
+    if "generated" in payload and isinstance(payload.get("generated"), list):
+        lines.append(f"         generated_cases: {len(payload.get('generated', []))}")
+    if "plan_path" in payload:
+        lines.append(f"         plan: {payload.get('plan_path')}")
+    if "blocked_by_gate" in payload:
+        lines.append(f"         blocked_by_gate: {payload.get('blocked_by_gate')}")
 
     first_result = _first_result(payload)
     if first_result:
@@ -165,7 +188,7 @@ def build_agent_manifest(*, wrapper_path: str | None = None, runner_command: str
         "name": "qa-aist",
         "display_name": "QA-AIST",
         "version": __version__,
-        "description": "Hermes-first deterministic QA automation agent/plugin.",
+        "description": "Hermes-first deterministic QA lifecycle agent/plugin for Gitea issue sync, tests, publishing, and PR flow.",
         "command_prefix": PRIMARY_PREFIX,
         "aliases": [ALIAS_PREFIX],
         "entrypoint": {
@@ -193,12 +216,26 @@ def build_agent_manifest(*, wrapper_path: str | None = None, runner_command: str
             f"{PRIMARY_PREFIX} doctor",
             f"{PRIMARY_PREFIX} config show",
             f"{PRIMARY_PREFIX} config validate",
+            f"{PRIMARY_PREFIX} issues sync",
+            f"{PRIMARY_PREFIX} issues status",
+            f"{PRIMARY_PREFIX} issues show <issue_id>",
+            f"{PRIMARY_PREFIX} issues dedupe",
+            f"{PRIMARY_PREFIX} cases generate --from-issues",
+            f"{PRIMARY_PREFIX} cases review",
+            f"{PRIMARY_PREFIX} cases validate",
             f"{PRIMARY_PREFIX} qa-test list",
             f"{PRIMARY_PREFIX} qa-test validate",
             f"{PRIMARY_PREFIX} qa-test dry-run",
             f"{PRIMARY_PREFIX} qa-test run",
             f"{PRIMARY_PREFIX} qa-test run-one <case_id>",
             f"{PRIMARY_PREFIX} qa-test help",
+            f"{PRIMARY_PREFIX} publish plan",
+            f"{PRIMARY_PREFIX} publish apply",
+            f"{PRIMARY_PREFIX} publish status",
+            f"{PRIMARY_PREFIX} fix-issues plan --issue <id>",
+            f"{PRIMARY_PREFIX} fix-issues run --issue <id>",
+            f"{PRIMARY_PREFIX} fix-issues submit-pr --issue <id>",
+            f"{PRIMARY_PREFIX} fix-issues status",
             f"{PRIMARY_PREFIX} close-loop status",
             f"{PRIMARY_PREFIX} close-loop run-once",
             f"{PRIMARY_PREFIX} report status",
@@ -207,8 +244,8 @@ def build_agent_manifest(*, wrapper_path: str | None = None, runner_command: str
         ],
         "permissions": {
             "filesystem": ["project_root"],
-            "network": [],
-            "tracker_write": "never_in_v1",
+            "network": ["gitea_when_apply_or_submit_pr"],
+            "tracker_write": "write_gate_apply_only",
         },
         "security": {
             "deterministic_write_gate_required": True,
@@ -289,7 +326,7 @@ def default_skills_dir() -> Path:
 def build_skill_markdown(*, runner_command: str = "qa-aist-hermes") -> str:
     return f"""---
 name: qa-aist
-description: "QA-AIST dynamic skill: call the deterministic QA engine for setup, tests, evidence, reports, and write-gated tracker plans."
+description: "QA-AIST dynamic skill: call the deterministic QA lifecycle engine for Gitea issue sync, case generation, tests, evidence, publishing, and PR flow."
 version: {__version__}
 author: QA-AIST contributors
 license: MIT
@@ -304,6 +341,8 @@ metadata:
 This SKILL.md is the current Hermes integration for QA-AIST.
 
 It makes `/qa-aist ...` visible to Hermes as a dynamic skill slash command, then instructs the Hermes agent to call the deterministic QA-AIST dispatcher. This is skill-mediated. It is not a native Hermes router, not a pre-LLM command hook, and not a Python package autoload mechanism.
+
+QA-AIST is responsible for issue sync, case contracts, test execution, evidence, write gate, Gitea wiki/issues publishing, and Gitea PR creation. Hermes may answer questions and make code changes, but it must not bypass QA-AIST for tracker/wiki/PR decisions.
 
 ## Required Behavior For Every `/qa-aist` Turn
 
@@ -333,11 +372,17 @@ Examples:
 {runner_command} --root "$PWD" /qa-aist setup
 {runner_command} --root "$PWD" /qa-aist status
 {runner_command} --root "$PWD" /qa-aist doctor
+{runner_command} --root "$PWD" /qa-aist issues sync
+{runner_command} --root "$PWD" /qa-aist cases generate --from-issues
 {runner_command} --root "$PWD" /qa-aist qa-test list
+{runner_command} --root "$PWD" /qa-aist qa-test
 {runner_command} --root "$PWD" /qa-aist qa-test run-one EXAMPLE-001
+{runner_command} --root "$PWD" /qa-aist publish plan
+{runner_command} --root "$PWD" /qa-aist publish apply
+{runner_command} --root "$PWD" /qa-aist fix-issues plan --issue 123
+{runner_command} --root "$PWD" /qa-aist fix-issues submit-pr --issue 123
 {runner_command} --root "$PWD" /qa-aist close-loop run-once
 {runner_command} --root "$PWD" /qa-aist report status
-{runner_command} --root "$PWD" /qa-aist tracker plan-write
 ```
 
 ## Supported User-facing Commands
@@ -349,12 +394,26 @@ Examples:
 - `/qa-aist doctor`
 - `/qa-aist config show`
 - `/qa-aist config validate`
+- `/qa-aist issues sync`
+- `/qa-aist issues status`
+- `/qa-aist issues show <issue_id>`
+- `/qa-aist issues dedupe`
+- `/qa-aist cases generate --from-issues`
+- `/qa-aist cases review`
+- `/qa-aist cases validate`
 - `/qa-aist qa-test list`
 - `/qa-aist qa-test validate`
 - `/qa-aist qa-test dry-run`
 - `/qa-aist qa-test run`
 - `/qa-aist qa-test run-one <case_id>`
 - `/qa-aist qa-test help`
+- `/qa-aist publish plan`
+- `/qa-aist publish apply`
+- `/qa-aist publish status`
+- `/qa-aist fix-issues plan --issue <id>`
+- `/qa-aist fix-issues run --issue <id>`
+- `/qa-aist fix-issues submit-pr --issue <id>`
+- `/qa-aist fix-issues status`
 - `/qa-aist close-loop status`
 - `/qa-aist close-loop run-once`
 - `/qa-aist report status`
@@ -363,12 +422,14 @@ Examples:
 
 ## Safety Rules
 
-- Do not directly write tracker comments, reopen issues, close issues, or create issue text. QA-AIST V1 only creates gated dry-run tracker plans.
+- Do not directly write Gitea comments, issues, wiki pages, or PRs. Remote writes are allowed only by `/qa-aist publish apply` or `/qa-aist fix-issues submit-pr` after QA-AIST write gate passes.
 - Do not reorder the QA-AIST close-loop pipeline.
 - Do not invent evidence paths.
 - Do not print raw secrets.
 - Do not run arbitrary shell commands assembled from chat. The only command you should run for `/qa-aist ...` is the dispatcher command above with the user's QA-AIST arguments.
-- Do not bypass `write_gate`, even if the user asks you to write tracker output directly.
+- Do not bypass `write_gate`, issue sync, duplicate checks, or case contracts, even if the user asks you to write tracker output directly.
+- If `/qa-aist cases generate --from-issues` returns questions, ask those questions in Traditional Chinese and wait for answers before treating a draft as runnable.
+- If the user types `/qa-aist qa-test` without a subcommand, show the QA test help instead of guessing.
 
 ## Expected Human Reply
 
@@ -460,10 +521,12 @@ def _help_payload(engine_argv: list[str]) -> dict[str, Any] | None:
         topic = args[1] if len(args) > 1 else "overview"
         if topic in {"overview", "commands", "command", "all"}:
             return _overview_help_payload()
-        if topic in HELP_TOPICS:
+        if topic == "qa-test":
             return _qa_test_help_payload()
+        if topic in HELP_TOPICS:
+            return _workflow_help_payload(topic)
         return _unknown_help_payload(topic)
-    if len(args) >= 2 and args[0] == "qa-test" and args[1] in {"help", "-h", "--help", "?"}:
+    if args[0] == "qa-test" and (len(args) == 1 or (len(args) >= 2 and args[1] in {"help", "-h", "--help", "?"})):
         return _qa_test_help_payload()
     return None
 
@@ -477,17 +540,31 @@ def _overview_help_payload() -> dict[str, Any]:
         {"command": "/qa-aist status", "purpose": "查看 workspace、case 數量、latest run"},
         {"command": "/qa-aist config show", "purpose": "顯示目前解析後的 QA-AIST 設定"},
         {"command": "/qa-aist config validate", "purpose": "驗證 .qa-aist.yaml 是否完整且沒有 raw secret"},
+        {"command": "/qa-aist issues sync", "purpose": "從 Gitea 同步 open/closed issues 到本地 mirror"},
+        {"command": "/qa-aist issues status", "purpose": "查看本地 issue snapshot 是否已同步"},
+        {"command": "/qa-aist issues show <issue_id>", "purpose": "查看單一 issue mirror"},
+        {"command": "/qa-aist issues dedupe", "purpose": "檢查本地 active issues 是否疑似重複"},
+        {"command": "/qa-aist cases generate --from-issues", "purpose": "依 synced issues 產生 draft test cases，缺資訊會列問題"},
+        {"command": "/qa-aist cases review", "purpose": "查看 draft cases 與待回答問題"},
+        {"command": "/qa-aist cases validate", "purpose": "驗證 generated case YAML 是否可被 qa-test 執行"},
         {"command": "/qa-aist qa-test list", "purpose": "列出可以跑的測試 case"},
         {"command": "/qa-aist qa-test validate", "purpose": "檢查 case YAML 格式是否正確"},
         {"command": "/qa-aist qa-test dry-run", "purpose": "預覽會執行哪些 command，但不真的跑"},
         {"command": "/qa-aist qa-test help", "purpose": "等同 /qa-aist help qa-test"},
         {"command": "/qa-aist qa-test run-one <case_id>", "purpose": "只跑一個 case，最適合第一次測試"},
         {"command": "/qa-aist qa-test run", "purpose": "跑全部 case"},
+        {"command": "/qa-aist publish plan", "purpose": "把 latest run 轉成 wiki/issue write plan 並跑 gate"},
+        {"command": "/qa-aist publish apply", "purpose": "gate 通過後真的寫 Gitea wiki/issues"},
+        {"command": "/qa-aist publish status", "purpose": "查看最新 publish plan/apply 結果"},
+        {"command": "/qa-aist fix-issues plan --issue <id>", "purpose": "修復前同步/去重/檢查 open issue"},
+        {"command": "/qa-aist fix-issues run --issue <id>", "purpose": "產生給 Hermes 的最小修復 handoff"},
+        {"command": "/qa-aist fix-issues submit-pr --issue <id>", "purpose": "push branch 並用 Gitea API 建 PR"},
+        {"command": "/qa-aist fix-issues status", "purpose": "查看修復/PR lifecycle 狀態"},
         {"command": "/qa-aist close-loop status", "purpose": "查看 close-loop pipeline 順序與 latest run"},
         {"command": "/qa-aist close-loop run-once", "purpose": "跑完整 pipeline：檢查、測試、write gate、報告、保存 state"},
         {"command": "/qa-aist report status", "purpose": "產生 Markdown report"},
         {"command": "/qa-aist report json", "purpose": "輸出 latest run JSON"},
-        {"command": "/qa-aist tracker plan-write", "purpose": "只規劃 tracker 寫入；V1 不會真的寫 tracker"},
+        {"command": "/qa-aist tracker plan-write", "purpose": "相容舊版：只檢查單一 tracker write gate"},
     ]
     return {
         "status": "ok",
@@ -558,17 +635,57 @@ def _overview_help_text(commands: list[dict[str, str]]) -> str:
             "第一次使用建議流程：",
             "1. `/qa-aist setup`：初始化目前產品 repo。",
             "2. `/qa-aist doctor`：確認設定和目錄健康。",
-            "3. `/qa-aist qa-test list`：看看有哪些 case 可以跑。",
-            "4. `/qa-aist qa-test run-one EXAMPLE-001`：先跑一個範例 case。",
-            "5. `/qa-aist report status`：產生報告。",
+            "3. `/qa-aist issues sync`：同步 Gitea issues 到本地 mirror。",
+            "4. `/qa-aist cases generate --from-issues`：依 issue 產生 draft cases。",
+            "5. `/qa-aist cases review`：回答缺少的測試輸入問題。",
+            "6. `/qa-aist qa-test run-one <case_id>`：先跑一個 case。",
+            "7. `/qa-aist publish plan`：產生 wiki/issues 寫入計畫並通過 gate。",
+            "8. `/qa-aist publish apply`：明確要求後才真的寫 Gitea。",
             "",
             "常用指令：",
             *command_lines,
             "",
             "qa-test 看不懂時，直接輸入：",
             "`/qa-aist help qa-test`",
+            "",
+            "完整 lifecycle topic：",
+            "`/qa-aist help issues`、`/qa-aist help cases`、`/qa-aist help publish`、`/qa-aist help fix-issues`",
         ]
     )
+
+
+def _workflow_help_payload(topic: str) -> dict[str, Any]:
+    topic_text = {
+        "issues": [
+            "issues 用來同步 Gitea 遠端狀態到 `.qa-aist-project/issues`。",
+            "先跑 `/qa-aist issues sync`，closed issue 會從 active mirror 移除。",
+            "再用 `/qa-aist issues dedupe` 確認沒有重複 active issue。",
+        ],
+        "cases": [
+            "cases 用來從 synced issues 產生可審查的 test case contract。",
+            "先跑 `/qa-aist cases generate --from-issues`。",
+            "如果輸出 questions，Hermes 必須用繁中問答補齊 fixture、輸入檔、成功條件和副作用邊界。",
+        ],
+        "publish": [
+            "publish 用來把 latest run 變成 Gitea wiki/issues 寫入。",
+            "`publish plan` 只產生 gated plan；`publish apply` 才真的寫遠端。",
+            "gate blocked 時，Hermes 不得自己改用 curl 或 API 繞過。",
+        ],
+        "fix-issues": [
+            "fix-issues 用來修復 synced open issue 並送 PR。",
+            "先跑 `fix-issues plan --issue <id>` 確認 sync、dedupe、case/evidence 狀態。",
+            "Hermes 修碼後再跑測試、publish plan，最後 `submit-pr` 建 Gitea PR。",
+        ],
+    }
+    lines = topic_text[topic]
+    return {
+        "status": "ok",
+        "tool": "qa-aist",
+        "command_group": "help",
+        "topic": topic,
+        "language": "zh-Hant",
+        "help_text": "\n".join(["qa-aist> HELP", f"{topic} 使用說明", "", *lines]),
+    }
 
 
 def _qa_test_help_text(steps: list[str], commands: list[dict[str, str]]) -> str:
@@ -611,7 +728,38 @@ def _qa_test_help_text(steps: list[str], commands: list[dict[str, str]]) -> str:
 
 
 def _positional_args(argv: list[str]) -> list[str]:
-    return [item for item in argv if item != "--json" and not item.startswith("-")]
+    value_options = {
+        "--agent-dir",
+        "--case-id",
+        "--config",
+        "--expected-contract-hash",
+        "--issue",
+        "--issues-json",
+        "--latest-run",
+        "--plan",
+        "--result",
+        "--root",
+        "--runner-command",
+        "--skills-dir",
+        "--target-state",
+        "--workspace",
+    }
+    out: list[str] = []
+    skip_next = False
+    for item in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if item == "--json":
+            continue
+        if item.startswith("--"):
+            option = item.split("=", 1)[0]
+            skip_next = option in value_options and "=" not in item
+            continue
+        if item.startswith("-"):
+            continue
+        out.append(item)
+    return out
 
 
 def _inject_project_context(engine_argv: list[str], root: Path) -> None:

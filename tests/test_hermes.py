@@ -147,7 +147,7 @@ class HermesDispatchTest(unittest.TestCase):
             self.assertIn("/qa-aist help", manifest["commands"])
             self.assertIn("/qa-aist help qa-test", manifest["commands"])
             self.assertIn("/qa-aist qa-test help", manifest["commands"])
-            self.assertEqual(manifest["permissions"]["tracker_write"], "never_in_v1")
+            self.assertEqual(manifest["permissions"]["tracker_write"], "write_gate_apply_only")
 
             installed = hermes.install_agent(agent_tmp, runner_command=f"{os.sys.executable} -m qa_aist.hermes")
             self.assertEqual(installed["status"], "ok")

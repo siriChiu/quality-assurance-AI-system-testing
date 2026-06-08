@@ -22,12 +22,19 @@
 /qa-aist help
 /qa-aist status
 /qa-aist doctor
-/qa-aist help qa-test
+/qa-aist issues sync
+/qa-aist cases generate --from-issues
 /qa-aist qa-test list
-/qa-aist close-loop run-once
+/qa-aist qa-test
+/qa-aist publish plan
+/qa-aist publish apply
+/qa-aist fix-issues plan --issue 123
+/qa-aist fix-issues submit-pr --issue 123
 ```
 
 邊界請講清楚：這是 **skill-mediated flow**。Hermes 會把 `/qa-aist ...` 轉成 skill invocation，agent 再依 `SKILL.md` 的指示執行 QA-AIST dispatcher。這不是 native Hermes router，也不是 LLM 前置的 deterministic command hook。
+
+QA-AIST 可以真實寫 Gitea，但只有在 `/qa-aist publish apply` 或 `/qa-aist fix-issues submit-pr` 明確執行、且 deterministic write gate 通過、且 token env 存在時才會碰遠端。Hermes 不可以自己用 curl/API 繞過 QA-AIST。
 
 ## Install From Source Checkout
 
@@ -172,7 +179,7 @@ result = dispatch_chat_command("/qa-aist doctor", root=session.project_root)
 return result["chat_response"]
 ```
 
-這條路徑目前尚未實作在 QA-AIST V1。現階段可交付、可驗證的是 Hermes dynamic skill。
+這條路徑目前尚未實作。現階段可交付、可驗證的是 Hermes dynamic skill。
 
 ## Troubleshooting
 
@@ -183,4 +190,6 @@ return result["chat_response"]
 | scanner 顯示 `False` | skill path/frontmatter/HERMES_HOME 不對 | 檢查 `name: qa-aist` 與 Hermes 的 skills 目錄。 |
 | `/qa-aist` 有觸發但沒跑測試 | agent 沒遵守 SKILL | 要求 agent 依 SKILL 執行 dispatcher terminal command。 |
 | `config_not_found` | root 指到錯的 repo 或尚未 setup | 回到產品 repo root，執行 `/qa-aist setup`。 |
-| `tracker_disabled` | V1 預期結果 | QA-AIST 只產生 gated write plan，不做真實 tracker 寫入。 |
+| `tracker_disabled` | provider 未啟用 | 設定 `tracker.provider: gitea` 與 `tracker.gitea.*`。 |
+| `gitea_not_configured` | apply/submit-pr 缺 token 或 repo 設定 | 設定 `QA_AIST_GITEA_TOKEN` 與 `.qa-aist.yaml`。 |
+| `write_gate_blocked` | QA-AIST 拒絕遠端寫入 | 先修 sync/evidence/contract/duplicate/secret 問題，不要繞過 gate。 |

@@ -16,6 +16,7 @@ LEGACY_PROJECT_WORKSPACE = ".qa-aist"
 CONFIG_FILE = ".qa-aist.yaml"
 
 REQUIRED_CONFIG_PATHS = ["workspace", "cases", "runners", "rules", "state", "evidence", "reports"]
+OPTIONAL_CONFIG_PATHS = ["issues"]
 SECRET_KEY_RE = re.compile(r"(token|password|passwd|secret|api[_-]?key)", re.IGNORECASE)
 ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 
@@ -36,6 +37,7 @@ class ProjectPaths:
     cases: Path
     runners: Path
     rules: Path
+    issues: Path
     state: Path
     evidence: Path
     reports: Path
@@ -48,6 +50,7 @@ class ProjectPaths:
             "cases": self.cases,
             "runners": self.runners,
             "rules": self.rules,
+            "issues": self.issues,
             "state": self.state,
             "evidence": self.evidence,
             "reports": self.reports,
@@ -74,6 +77,7 @@ paths:
   cases: {workspace}/cases
   runners: {workspace}/runners
   rules: {workspace}/rules
+  issues: {workspace}/issues
   state: {workspace}/state
   evidence: {workspace}/evidence
   reports: {workspace}/reports
@@ -82,6 +86,12 @@ tracker:
   provider: none
   project: ""
   api_token_env: QA_AIST_TRACKER_TOKEN
+  gitea:
+    base_url: ""
+    repo: ""
+    token_env: QA_AIST_GITEA_TOKEN
+    wiki_page: "Test status"
+    branch_prefix: "qa-aist/issue-"
 
 policy:
   deterministic_first: true
@@ -112,6 +122,7 @@ def project_paths(root: Path, workspace: str | Path = DEFAULT_PROJECT_WORKSPACE)
         cases=resolved_workspace / "cases",
         runners=resolved_workspace / "runners",
         rules=resolved_workspace / "rules",
+        issues=resolved_workspace / "issues",
         state=resolved_workspace / "state",
         evidence=resolved_workspace / "evidence",
         reports=resolved_workspace / "reports",
@@ -254,6 +265,7 @@ def load_project_config(root: Path, config_path: str | Path | None = None) -> Pr
         cases=_resolve_project_path(root, paths_data["cases"]),
         runners=_resolve_project_path(root, paths_data["runners"]),
         rules=_resolve_project_path(root, paths_data["rules"]),
+        issues=_resolve_project_path(root, paths_data.get("issues", f"{paths_data['workspace']}/issues")),
         state=_resolve_project_path(root, paths_data["state"]),
         evidence=_resolve_project_path(root, paths_data["evidence"]),
         reports=_resolve_project_path(root, paths_data["reports"]),

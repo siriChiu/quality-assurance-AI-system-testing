@@ -19,8 +19,18 @@ from .config import (
     validate_config_data,
     write_if_missing,
 )
+from .case_generation import (
+    CaseGenerationError,
+    generate_cases_from_issues,
+    review_generated_cases,
+    validate_generated_cases,
+)
 from .contracts import ContractError, list_contract_paths, load_contract, load_contracts, select_contracts
+from .fix_issues import FixIssueError, fix_status, plan_fix_issue, run_fix_issue, submit_fix_pr
+from .gitea import GiteaError
+from .issues import IssueSyncError, dedupe_issues, issue_status, show_issue, sync_issues
 from .pipeline import PIPELINE_ORDER, run_close_loop
+from .publishing import PublishError, apply_publish_plan, plan_publish, publish_status
 from .reports import load_latest_results, render_status_report
 from .runner import RunContext, run_case
 from .templates import EXAMPLE_CONTRACT, EXAMPLE_RUNNER, SWQA_TEST_DESIGN_RULE
@@ -45,7 +55,7 @@ def cmd_init_project(args: argparse.Namespace) -> int:
             "message": "Refusing to write host-project assets into a QA-AIST source checkout. Use --workspace .qa-aist-project or another host-owned overlay path.",
         }, exit_code=4)
 
-    for path in [paths.cases, paths.runners, paths.rules, paths.state, paths.evidence, paths.reports]:
+    for path in [paths.cases, paths.runners, paths.rules, paths.issues, paths.state, paths.evidence, paths.reports]:
         path.mkdir(parents=True, exist_ok=True)
 
     created = []
@@ -169,6 +179,150 @@ def cmd_qa_test_run_one(args: argparse.Namespace) -> int:
     return _run_cases(args, dry_run=False, one=True)
 
 
+def cmd_issues_sync(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        payload = sync_issues(config, issues_json=args.issues_json, dry_run=args.dry_run)
+    except (QAConfigError, IssueSyncError, GiteaError) as exc:
+        return _error_payload(exc)
+    return print_json(payload)
+
+
+def cmd_issues_status(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        payload = issue_status(config)
+    except (QAConfigError, IssueSyncError) as exc:
+        return _error_payload(exc)
+    return print_json(payload)
+
+
+def cmd_issues_show(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        payload = show_issue(config, args.issue_id)
+    except (QAConfigError, IssueSyncError) as exc:
+        return _error_payload(exc)
+    return print_json(payload, exit_code=0 if payload.get("status") == "ok" else 2)
+
+
+def cmd_issues_dedupe(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        payload = dedupe_issues(config)
+    except (QAConfigError, IssueSyncError) as exc:
+        return _error_payload(exc)
+    return print_json(payload)
+
+
+def cmd_cases_generate(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        if not args.from_issues:
+            return print_json({"status": "error", "error": "generation_source_required", "message": "Use --from-issues for V1."}, exit_code=2)
+        payload = generate_cases_from_issues(config, issue_id=args.issue, force=args.force)
+    except (QAConfigError, CaseGenerationError, IssueSyncError) as exc:
+        return _error_payload(exc)
+    return print_json(payload, exit_code=0 if payload.get("status") != "error" else 2)
+
+
+def cmd_cases_review(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        payload = review_generated_cases(config)
+    except (QAConfigError, CaseGenerationError) as exc:
+        return _error_payload(exc)
+    return print_json(payload)
+
+
+def cmd_cases_validate(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        payload = validate_generated_cases(config)
+    except (QAConfigError, CaseGenerationError) as exc:
+        return _error_payload(exc)
+    return print_json(payload, exit_code=0 if payload.get("status") == "ok" else 3)
+
+
+def cmd_publish_plan(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        payload = plan_publish(config, latest_run=args.latest_run)
+    except (QAConfigError, PublishError, IssueSyncError) as exc:
+        return _error_payload(exc)
+    return print_json(payload)
+
+
+def cmd_publish_apply(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        payload = apply_publish_plan(config, plan_path=args.plan)
+    except (QAConfigError, PublishError, GiteaError) as exc:
+        return _error_payload(exc)
+    return print_json(payload, exit_code=0 if payload.get("status") == "ok" else 4)
+
+
+def cmd_publish_status(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        payload = publish_status(config)
+    except QAConfigError as exc:
+        return _error_payload(exc)
+    return print_json(payload)
+
+
+def cmd_fix_issues_plan(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        payload = plan_fix_issue(config, issue_id=args.issue)
+    except (QAConfigError, FixIssueError, IssueSyncError) as exc:
+        return _error_payload(exc)
+    return print_json(payload, exit_code=0 if payload.get("status") != "error" else 2)
+
+
+def cmd_fix_issues_run(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        payload = run_fix_issue(config, issue_id=args.issue)
+    except (QAConfigError, FixIssueError, IssueSyncError) as exc:
+        return _error_payload(exc)
+    return print_json(payload, exit_code=0 if payload.get("status") != "blocked" else 4)
+
+
+def cmd_fix_issues_submit_pr(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        payload = submit_fix_pr(config, issue_id=args.issue, dry_run=args.dry_run)
+    except (QAConfigError, FixIssueError, GiteaError, IssueSyncError) as exc:
+        return _error_payload(exc)
+    return print_json(payload, exit_code=0 if payload.get("status") in {"ok", "dry_run"} else 4)
+
+
+def cmd_fix_issues_status(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        payload = fix_status(config)
+    except QAConfigError as exc:
+        return _error_payload(exc)
+    return print_json(payload)
+
+
+def cmd_sync_gitea_pull(args: argparse.Namespace) -> int:
+    return cmd_issues_sync(args)
+
+
+def cmd_sync_gitea_status(args: argparse.Namespace) -> int:
+    return cmd_issues_status(args)
+
+
+def cmd_sync_gitea_validate(args: argparse.Namespace) -> int:
+    return cmd_issues_status(args)
+
+
+def cmd_find_new_issues_run(args: argparse.Namespace) -> int:
+    return cmd_publish_plan(args)
+
+
 def _run_cases(args: argparse.Namespace, *, dry_run: bool, one: bool) -> int:
     try:
         config = load_project_config(Path(args.root), args.config)
@@ -264,6 +418,8 @@ def _error_payload(exc: Exception) -> int:
         if exc.path:
             payload["path"] = exc.path
         return print_json(payload, exit_code=3)
+    if isinstance(exc, (IssueSyncError, GiteaError, CaseGenerationError, PublishError, FixIssueError)):
+        return print_json({"status": "error", "error": type(exc).__name__, "message": str(exc)}, exit_code=2)
     return print_json({"status": "error", "error": type(exc).__name__, "message": str(exc)}, exit_code=1)
 
 
@@ -315,6 +471,39 @@ def build_parser() -> argparse.ArgumentParser:
     run_one.add_argument("case_id")
     run_one.set_defaults(func=cmd_qa_test_run_one)
 
+    issues = sub.add_parser("issues", help="Gitea issue mirror and dedupe commands")
+    issues_sub = issues.add_subparsers(dest="issues_command", required=True)
+    issues_sync = issues_sub.add_parser("sync", help="Sync local issue mirrors from Gitea or an issues JSON file")
+    _add_root_config(issues_sync)
+    issues_sync.add_argument("--issues-json", default=None, help="Offline JSON input for tests or manual sync")
+    issues_sync.add_argument("--dry-run", action="store_true", help="Preview mirror/snapshot changes without writing")
+    issues_sync.set_defaults(func=cmd_issues_sync)
+    issues_status = issues_sub.add_parser("status", help="Show local issue sync state")
+    _add_root_config(issues_status)
+    issues_status.set_defaults(func=cmd_issues_status)
+    issues_show = issues_sub.add_parser("show", help="Show one local issue mirror")
+    _add_root_config(issues_show)
+    issues_show.add_argument("issue_id", type=int)
+    issues_show.set_defaults(func=cmd_issues_show)
+    issues_dedupe = issues_sub.add_parser("dedupe", help="Detect duplicate active issue mirrors")
+    _add_root_config(issues_dedupe)
+    issues_dedupe.set_defaults(func=cmd_issues_dedupe)
+
+    cases = sub.add_parser("cases", help="Generate, review, and validate case contracts")
+    cases_sub = cases.add_subparsers(dest="cases_command", required=True)
+    cases_generate = cases_sub.add_parser("generate", help="Generate draft case contracts from synced issues")
+    _add_root_config(cases_generate)
+    cases_generate.add_argument("--from-issues", action="store_true", help="Generate from local issue mirrors/snapshot")
+    cases_generate.add_argument("--issue", type=int, default=None, help="Generate only one issue")
+    cases_generate.add_argument("--force", action="store_true", help="Overwrite existing generated case YAML")
+    cases_generate.set_defaults(func=cmd_cases_generate)
+    cases_review = cases_sub.add_parser("review", help="List generated drafts and Q&A prompts")
+    _add_root_config(cases_review)
+    cases_review.set_defaults(func=cmd_cases_review)
+    cases_validate = cases_sub.add_parser("validate", help="Validate generated case contracts")
+    _add_root_config(cases_validate)
+    cases_validate.set_defaults(func=cmd_cases_validate)
+
     close_loop = sub.add_parser("close-loop", help="Fixed QA close-loop pipeline")
     close_sub = close_loop.add_subparsers(dest="close_command", required=True)
     close_status = close_sub.add_parser("status", help="Show pipeline order and latest run")
@@ -343,6 +532,59 @@ def build_parser() -> argparse.ArgumentParser:
     plan_write.add_argument("--target-state", default="unknown", choices=["open", "closed", "missing", "unknown"])
     plan_write.add_argument("--expected-contract-hash", default=None)
     plan_write.set_defaults(func=cmd_tracker_plan_write)
+
+    publish = sub.add_parser("publish", help="Plan or apply gated Gitea wiki/issues writes")
+    publish_sub = publish.add_subparsers(dest="publish_command", required=True)
+    publish_plan = publish_sub.add_parser("plan", help="Create a gated publish plan from latest run")
+    _add_root_config(publish_plan)
+    publish_plan.add_argument("--latest-run", default=None)
+    publish_plan.set_defaults(func=cmd_publish_plan)
+    publish_apply = publish_sub.add_parser("apply", help="Apply a publish plan to Gitea after write gate passes")
+    _add_root_config(publish_apply)
+    publish_apply.add_argument("--plan", default=None)
+    publish_apply.set_defaults(func=cmd_publish_apply)
+    publish_status_cmd = publish_sub.add_parser("status", help="Show publish plan/apply status")
+    _add_root_config(publish_status_cmd)
+    publish_status_cmd.set_defaults(func=cmd_publish_status)
+
+    fix_issues = sub.add_parser("fix-issues", help="Plan, hand off, and submit PRs for synced Gitea issues")
+    fix_sub = fix_issues.add_subparsers(dest="fix_command", required=True)
+    fix_plan = fix_sub.add_parser("plan", help="Preflight one issue before repair")
+    _add_root_config(fix_plan)
+    fix_plan.add_argument("--issue", type=int, required=True)
+    fix_plan.set_defaults(func=cmd_fix_issues_plan)
+    fix_run = fix_sub.add_parser("run", help="Create a Hermes handoff for minimal repair")
+    _add_root_config(fix_run)
+    fix_run.add_argument("--issue", type=int, required=True)
+    fix_run.set_defaults(func=cmd_fix_issues_run)
+    fix_pr = fix_sub.add_parser("submit-pr", help="Push planned branch and create a Gitea pull request")
+    _add_root_config(fix_pr)
+    fix_pr.add_argument("--issue", type=int, required=True)
+    fix_pr.add_argument("--dry-run", action="store_true", help="Render PR payload without pushing or calling Gitea")
+    fix_pr.set_defaults(func=cmd_fix_issues_submit_pr)
+    fix_status_cmd = fix_sub.add_parser("status", help="Show latest fix plan/handoff/PR result")
+    _add_root_config(fix_status_cmd)
+    fix_status_cmd.set_defaults(func=cmd_fix_issues_status)
+
+    sync_gitea = sub.add_parser("sync-gitea", help="Legacy alias for issues sync/status")
+    sync_sub = sync_gitea.add_subparsers(dest="sync_gitea_command", required=True)
+    sync_pull = sync_sub.add_parser("pull", help="Alias for issues sync")
+    _add_root_config(sync_pull)
+    sync_pull.add_argument("--issues-json", default=None)
+    sync_pull.add_argument("--dry-run", action="store_true")
+    sync_pull.set_defaults(func=cmd_sync_gitea_pull)
+    for name, func in [("status", cmd_sync_gitea_status), ("validate", cmd_sync_gitea_validate)]:
+        command = sync_sub.add_parser(name, help=f"Alias for issues {name}")
+        _add_root_config(command)
+        command.set_defaults(func=func)
+
+    find_new = sub.add_parser("find-new-issues", help="Legacy alias for publish plan")
+    find_sub = find_new.add_subparsers(dest="find_command", required=True)
+    for name in ["run", "dry-run"]:
+        command = find_sub.add_parser(name, help="Alias for publish plan")
+        _add_root_config(command)
+        command.add_argument("--latest-run", default=None)
+        command.set_defaults(func=cmd_find_new_issues_run)
 
     return parser
 
