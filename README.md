@@ -53,7 +53,7 @@ flowchart LR
 
 ## Quick Start
 
-下面的指令是輸入在 Hermes 聊天視窗，不是在 terminal。Hermes integration 會提供目前產品 repo 的 root/context；如果你在本機或 CI 直接呼叫 engine，請看後面的 Developer / CI Usage。
+下面的指令是在 Hermes 已經註冊 QA-AIST agent/plugin 後，輸入在 Hermes 聊天視窗，不是在 terminal。若 Hermes 還沒有註冊 `/qa-aist`，請先看 [Hermes Agent Installation](docs/HERMES_AGENT_INSTALL.md)；如果你在本機或 CI 直接呼叫 engine，請看後面的 Developer / CI Usage。
 
 | Step | 在 Hermes 輸入 | 你會得到什麼 |
 |---:|---|---|
@@ -280,6 +280,8 @@ Hermes integration 的責任很小、很清楚：
 3. 提供目前產品 repo root/context。
 4. 讀取 QA-AIST 的 JSON output、evidence path、report path。
 5. 在聊天 UI 裡呈現結果。
+
+重要前提：`/qa-aist` 必須先被 Hermes 的 message router、plugin registry、agent registry 或 tool config 註冊。只安裝 QA-AIST Python package 不會自動修改 Hermes 聊天室。完整安裝判斷流程請看 [Hermes Agent Installation](docs/HERMES_AGENT_INSTALL.md)。
 
 Hermes 不應該：
 
