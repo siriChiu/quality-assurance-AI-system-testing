@@ -269,31 +269,33 @@ def default_skills_dir() -> Path:
 def build_skill_markdown(*, runner_command: str = "qa-aist-hermes") -> str:
     return f"""---
 name: qa-aist
-description: "QA-AIST: deterministic QA setup, tests, evidence, reports, and write-gated tracker plans."
+description: "QA-AIST dynamic skill: call the deterministic QA engine for setup, tests, evidence, reports, and write-gated tracker plans."
 version: {__version__}
 author: QA-AIST contributors
 license: MIT
 platforms: [linux, macos]
 metadata:
   hermes:
-    tags: [qa, testing, deterministic, evidence, write-gate, tracker]
+    tags: [qa, testing, deterministic, evidence, write-gate, tracker, dynamic-skill]
 ---
 
 # QA-AIST Hermes Skill
 
-This skill makes `/qa-aist ...` visible to Hermes as a dynamic skill slash command.
+This SKILL.md is the current Hermes integration for QA-AIST.
 
-Important boundary: Hermes skill slash commands are prompt-mediated. This skill tells the agent exactly how to call the deterministic QA-AIST dispatcher, but Hermes itself still routes this as a skill invocation unless a native plugin/router is installed.
+It makes `/qa-aist ...` visible to Hermes as a dynamic skill slash command, then instructs the Hermes agent to call the deterministic QA-AIST dispatcher. This is skill-mediated. It is not a native Hermes router, not a pre-LLM command hook, and not a Python package autoload mechanism.
 
-## Required Behavior
+## Required Behavior For Every `/qa-aist` Turn
 
-When the user invokes `/qa-aist <arguments>`:
+When the user invokes `/qa-aist <arguments>`, you must:
 
-1. Treat `<arguments>` as a QA-AIST command, for example `doctor`, `qa-test list`, or `close-loop run-once`.
-2. Do not answer from memory.
-3. Run the QA-AIST dispatcher through the terminal from the current product repository root.
+1. Treat everything after `/qa-aist` as QA-AIST dispatcher arguments.
+2. Use the current product repository root as `--root`. Do not use the QA-AIST source checkout as root unless the user is working on QA-AIST itself.
+3. Execute the dispatcher through the terminal. Do not answer from memory.
 4. Read the returned JSON.
-5. Reply with the `chat_response` field. If the JSON has no `chat_response`, summarize `payload.status`, `payload.error`, and any report/evidence paths.
+5. Reply primarily with the JSON `chat_response` field.
+6. If `chat_response` is missing, summarize `status`, `payload.status`, `payload.error`, `payload.message`, `latest_run_json`, `report_path`, and evidence paths.
+7. Preserve failures. If the dispatcher exits non-zero or emits invalid JSON, tell the user the exit code and useful stderr/stdout details.
 
 Use this command shape:
 
@@ -301,31 +303,74 @@ Use this command shape:
 {runner_command} --root "$PWD" /qa-aist <arguments>
 ```
 
+`$PWD` must be the user's product repository root. If the active root is unclear, inspect the current workspace/cwd. If it is still unclear, ask the user for the product repo path instead of creating `.qa-aist-project` in the wrong directory.
+
 Examples:
 
 ```bash
+{runner_command} --root "$PWD" /qa-aist setup
 {runner_command} --root "$PWD" /qa-aist status
 {runner_command} --root "$PWD" /qa-aist doctor
 {runner_command} --root "$PWD" /qa-aist qa-test list
 {runner_command} --root "$PWD" /qa-aist qa-test run-one EXAMPLE-001
 {runner_command} --root "$PWD" /qa-aist close-loop run-once
+{runner_command} --root "$PWD" /qa-aist report status
 {runner_command} --root "$PWD" /qa-aist tracker plan-write
 ```
 
+## Supported User-facing Commands
+
+- `/qa-aist setup`
+- `/qa-aist status`
+- `/qa-aist doctor`
+- `/qa-aist config show`
+- `/qa-aist config validate`
+- `/qa-aist qa-test list`
+- `/qa-aist qa-test validate`
+- `/qa-aist qa-test dry-run`
+- `/qa-aist qa-test run`
+- `/qa-aist qa-test run-one <case_id>`
+- `/qa-aist close-loop status`
+- `/qa-aist close-loop run-once`
+- `/qa-aist report status`
+- `/qa-aist report json`
+- `/qa-aist tracker plan-write`
+
 ## Safety Rules
 
-- Do not directly write tracker comments, reopen issues, close issues, or create issue text.
+- Do not directly write tracker comments, reopen issues, close issues, or create issue text. QA-AIST V1 only creates gated dry-run tracker plans.
 - Do not reorder the QA-AIST close-loop pipeline.
 - Do not invent evidence paths.
 - Do not print raw secrets.
-- Tracker writes in QA-AIST V1 are dry-run plans only.
+- Do not run arbitrary shell commands assembled from chat. The only command you should run for `/qa-aist ...` is the dispatcher command above with the user's QA-AIST arguments.
+- Do not bypass `write_gate`, even if the user asks you to write tracker output directly.
 
-## If The Dispatcher Is Missing
+## Expected Human Reply
 
-If `{runner_command}` is not found, tell the user to install QA-AIST into the same environment Hermes uses, or reinstall this skill with a runner command such as:
+Prefer concise replies like:
+
+```text
+qa-aist> PASS
+         cases: 1
+         runners: 1
+         latest_run_json: .qa-aist-project/state/latest-run.json
+         report: .qa-aist-project/reports/status.md
+```
+
+If the result is blocked, failed, or invalid, include the reason and the next actionable command, for example `/qa-aist setup`, `/qa-aist config validate`, or `/qa-aist qa-test list`.
+
+## If The Dispatcher Is Missing Or Broken
+
+If `{runner_command}` is not found, tell the user that the console script may not be installed. Recommend reinstalling this skill from the QA-AIST source checkout with an explicit runner command:
 
 ```bash
 PYTHONPATH=/path/to/QA-AIST/src python3 -m qa_aist.hermes install-skill --force --runner-command "/usr/bin/env PYTHONPATH=/path/to/QA-AIST/src python3 -m qa_aist.hermes"
+```
+
+If direct dispatcher verification is needed, tell the user to run this from the product repo root:
+
+```bash
+PYTHONPATH=/path/to/QA-AIST/src python3 -m qa_aist.hermes --root "$PWD" /qa-aist doctor
 ```
 """
 

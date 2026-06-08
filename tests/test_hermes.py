@@ -182,6 +182,11 @@ class HermesDispatchTest(unittest.TestCase):
             text = skill_path.read_text(encoding="utf-8")
             self.assertIn("name: qa-aist", text)
             self.assertIn("QA-AIST Hermes Skill", text)
+            self.assertIn("skill-mediated", text)
+            self.assertIn("not a native Hermes router", text)
+            self.assertIn("Do not answer from memory", text)
+            self.assertIn("chat_response", text)
+            self.assertIn("product repository root", text)
             self.assertIn("/usr/bin/env PYTHONPATH=/repo/QA-AIST/src python3 -m qa_aist.hermes", text)
 
             status = hermes.skill_status(skills_tmp)

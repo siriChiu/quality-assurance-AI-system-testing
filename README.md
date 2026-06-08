@@ -2,144 +2,202 @@
 
 ![Status](https://img.shields.io/badge/status-V1%20productization-green)
 ![Python](https://img.shields.io/badge/python-%3E%3D3.10-blue)
+![Hermes](https://img.shields.io/badge/hermes-dynamic%20skill-purple)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
-![Hermes](https://img.shields.io/badge/interface-Hermes%20chat-purple)
 
-QA-AIST 是給 Hermes 使用的 QA agent/plugin：使用者在 Hermes 聊天視窗輸入 `/qa-aist ...`，QA-AIST 會初始化專案、驗證設定、執行測試 case、保存 evidence、產生 report，並在任何 tracker 動作前套用 deterministic write gate。
+QA-AIST 是給 Hermes agent 使用的 QA 自動化 skill：使用者在 Hermes 聊天視窗輸入 `/qa-aist ...`，Hermes 透過 `~/.hermes/skills/qa-aist/SKILL.md` 載入操作規則，再由 agent 呼叫 QA-AIST 的 deterministic Python engine 來初始化專案、跑測試、保存 evidence、產生 report、規劃 tracker write plan。
 
-English summary: QA-AIST is a Hermes-first QA automation agent/plugin. Users operate it from Hermes chat with `/qa-aist ...`; the Python CLI package is the deterministic execution engine behind the agent and for CI/local debugging.
+English summary: QA-AIST is a Hermes dynamic skill backed by a deterministic Python QA engine. It exposes `/qa-aist ...` in Hermes chat through `SKILL.md`; the engine remains the stable CLI/API used by Hermes, CI, and local debugging.
+
+**目前最重要的邊界**
+
+QA-AIST V1 不是 Hermes 原生 router，也不是把 Python package 安裝好就會自動出現 `/qa-aist`。目前可運作的 Hermes 整合方式是 **dynamic skill slash command**：Hermes 看到 `/qa-aist ...` 後載入 skill 指示，agent 必須依照 SKILL 內容呼叫 QA-AIST dispatcher。若你需要完全不經 LLM/agent 的 native slash command，必須另外修改 Hermes router 或 plugin。
 
 ## What Is QA-AIST?
 
-QA-AIST 把「測試怎麼跑、證據存哪裡、什麼時候可以寫 tracker」變成一條固定、可檢查、可重跑的流程。一般使用者不需要直接操作 Python package，也不需要自己判斷能不能留言、reopen 或 close issue；Hermes 只要把 `/qa-aist` 指令交給 QA-AIST engine，並把結果呈現在聊天室。
+QA-AIST 把「測試怎麼跑、證據存哪裡、什麼時候可以規劃 tracker 寫入」變成一條固定、可檢查、可重跑的流程。一般使用者只需要在 Hermes 聊天室下 `/qa-aist ...`，不需要自己拼 shell command、tracker comment、reopen 或 close issue。
 
-QA-AIST 適合導入到任何產品 repo。工具本體可以安裝、vendored 或由 Hermes 管理；產品專案自己的 config、cases、runners、evidence、reports 都固定放在 host repo 的 `.qa-aist-project`。
+QA-AIST 適合導入到不同產品 repo。工具本體可以是獨立 checkout、套件安裝，或 vendored 到產品 repo；產品專案自己的 config、cases、runners、evidence、reports 固定放在 host repo 的 `.qa-aist-project`。
 
-## Current Status
+## Integration Modes
 
-| Area | V1 status |
-|---|---|
-| Hermes command interface | `/qa-aist ...` as the public user-facing interface |
-| Python CLI engine | Implemented as `qa-aist ...` for Hermes dispatch, CI, and local debugging |
-| Case contracts | YAML ordered commands with deterministic contract hash |
-| Evidence and reports | stdout, stderr, return code, metadata, result JSON, latest run JSON, Markdown report |
-| Tracker writes | Dry-run plan only; no real tracker write in V1 |
-| Write gate | Deterministic deny/allow checks before any future tracker write |
+| Mode | 目前狀態 | 使用者看到的介面 | 說明 |
+|---|---|---|---|
+| Hermes dynamic skill | 支援 | `/qa-aist ...` | 目前主路徑。安裝 `~/.hermes/skills/qa-aist/SKILL.md`，Hermes agent 依 skill 指示呼叫 engine。 |
+| Direct engine | 支援 | `python3 -m qa_aist.hermes ...` or `qa-aist ...` | 給 CI、本機除錯、Hermes skill 背後實際執行用。 |
+| Native Hermes router/plugin | 尚未實作 | `/qa-aist ...` | 需要 Hermes 本體或 plugin router 在 LLM 前直接呼叫 `dispatch_chat_command()`。 |
 
 ## How It Works
 
 ```mermaid
 flowchart LR
-  user["User<br/>Hermes chat"] --> hermes["Hermes dispatcher"]
-  hermes --> agent["QA-AIST agent/plugin<br/>/qa-aist ..."]
-  agent --> engine["QA-AIST engine<br/>Python package + stable JSON"]
-  engine --> config["Host config<br/>.qa-aist.yaml"]
-  engine --> workspace["Host runtime data<br/>.qa-aist-project/"]
+  user["User<br/>Hermes chat"] --> slash["/qa-aist ..."]
+  slash --> skill["Hermes dynamic skill<br/>~/.hermes/skills/qa-aist/SKILL.md"]
+  skill --> agent["Hermes agent<br/>runs terminal command"]
+  agent --> dispatcher["QA-AIST dispatcher<br/>python3 -m qa_aist.hermes"]
+  dispatcher --> engine["QA-AIST engine<br/>stable JSON"]
+  engine --> config[".qa-aist.yaml"]
+  engine --> workspace[".qa-aist-project/"]
   workspace --> cases["cases + runners"]
   workspace --> evidence["evidence + state"]
   workspace --> reports["reports"]
-  engine --> gate["Deterministic write gate"]
-  gate --> plan["Tracker write plan<br/>V1 dry-run only"]
+  engine --> gate["deterministic write gate"]
+  gate --> plan["tracker write plan<br/>V1 dry-run only"]
 ```
 
-簡單講：
+實際流程：
 
-1. 你在 Hermes 聊天室輸入 `/qa-aist ...`。
-2. Hermes 把指令交給 QA-AIST agent/plugin。
-3. QA-AIST engine 讀取 `.qa-aist.yaml` 和 `.qa-aist-project`。
-4. QA-AIST 按固定 pipeline 執行 case contract。
-5. QA-AIST 產出 evidence、report、latest state。
-6. 需要 tracker 動作時，先產生 gated write plan；V1 不會真的寫 tracker。
+1. 使用者在 Hermes 聊天室輸入 `/qa-aist doctor`。
+2. Hermes 透過 skill scanner 找到 `~/.hermes/skills/qa-aist/SKILL.md`。
+3. SKILL 指示 agent 從目前產品 repo root 執行 QA-AIST dispatcher。
+4. Dispatcher 呼叫 deterministic engine，輸出 stable JSON。
+5. Agent 回覆 JSON 裡的 `chat_response`，並保留 report/evidence path。
 
-## Quick Start
+## 5-minute Quick Start
 
-下面的指令是在 Hermes 已經註冊 QA-AIST agent/plugin 後，輸入在 Hermes 聊天視窗，不是在 terminal。若 Hermes 還沒有註冊 `/qa-aist`，請先看 [Hermes Agent Installation](docs/HERMES_AGENT_INSTALL.md)；如果你在本機或 CI 直接呼叫 engine，請看後面的 Developer / CI Usage。
+前提：你已經有 Hermes agent，並且有一個要導入 QA-AIST 的產品 repo。以下假設 QA-AIST source checkout 在 `/root/repo/QA-AIST`；如果你的路徑不同，把路徑換掉。
 
-| Step | 在 Hermes 輸入 | 你會得到什麼 |
-|---:|---|---|
-| 1 | `/qa-aist setup` | 建立 `.qa-aist.yaml` 和 `.qa-aist-project` starter files |
-| 2 | `/qa-aist doctor` | 檢查 config、workspace、paths、secret references |
-| 3 | `/qa-aist qa-test list` | 列出目前可執行的 case contracts |
-| 4 | `/qa-aist qa-test run-one EXAMPLE-001` | 執行單一 case 並保存 evidence |
-| 5 | `/qa-aist close-loop run-once` | 跑完整 QA close-loop pipeline |
-| 6 | `/qa-aist report status` | 產生或更新 Markdown status report |
-| 7 | `/qa-aist tracker plan-write` | 只產生 tracker write plan，不真的寫 tracker |
+### 1. 安裝 Hermes skill
 
-聊天室裡的操作大概會像這樣：
+在 terminal 執行一次：
+
+```bash
+cd /root/repo/QA-AIST
+PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes install-skill --force \
+  --runner-command "/usr/bin/env PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes"
+```
+
+這會建立：
 
 ```text
-you> /qa-aist doctor
+~/.hermes/skills/qa-aist/SKILL.md
+```
+
+這才是目前 Hermes 會掃描的安裝位置。不要把 QA-AIST 檔案放進 `/usr/local/lib/hermes-agent/agent` 期待它自動變成 slash command。
+
+### 2. 檢查 skill 安裝狀態
+
+```bash
+PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes skill-status
+```
+
+預期看到：
+
+```json
+{
+  "status": "ok",
+  "command_prefix": "/qa-aist",
+  "skill_valid": true
+}
+```
+
+如果 `qa-aist-hermes: command not found`，這不是 Hermes 壞掉，而是 console script 沒安裝到目前 shell。請先使用上面的 `PYTHONPATH=... python3 -m qa_aist.hermes ...` 形式。
+
+### 3. 讓 Hermes 重掃 skills
+
+在 Hermes 聊天視窗輸入：
+
+```text
+/reload-skills
+```
+
+然後確認你的 Hermes session 正在產品 repo root，不是在 QA-AIST source repo。`/qa-aist setup` 會在目前產品 repo 建立 `.qa-aist.yaml` 和 `.qa-aist-project`。
+
+### 4. 在 Hermes 聊天室操作 QA-AIST
+
+```text
+/qa-aist setup
+/qa-aist doctor
+/qa-aist qa-test list
+/qa-aist qa-test run-one EXAMPLE-001
+/qa-aist close-loop run-once
+/qa-aist report status
+/qa-aist tracker plan-write
+```
+
+常見回覆會長這樣：
+
+```text
 qa-aist> PASS
-         config: .qa-aist.yaml
          cases: 1
          runners: 1
-         secrets: env var names only, raw values hidden
+         latest_run_json: .qa-aist-project/state/latest-run.json
+         report: .qa-aist-project/reports/status.md
+```
 
-you> /qa-aist qa-test run-one EXAMPLE-001
-qa-aist> PASS
-         result: .qa-aist-project/evidence/EXAMPLE-001/result.json
-         report: run /qa-aist report status
+### 5. 不經 Hermes 的 smoke test
+
+如果你懷疑 Hermes 沒有正確觸發 skill，先直接測 dispatcher。請在產品 repo 執行：
+
+```bash
+cd /path/to/your-product
+PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes --root "$PWD" /qa-aist doctor
+```
+
+如果產品 repo 尚未初始化：
+
+```bash
+PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes --root "$PWD" /qa-aist setup
+PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes --root "$PWD" /qa-aist doctor
 ```
 
 ## Command Cheat Sheet
 
-這些是 README 保證描述的 V1 user-facing commands。`/qa-aist` 是 Hermes chat 指令；背後會對應到 `qa-aist` CLI engine。
+這些是 Hermes 聊天室裡的主介面。背後實際會由 SKILL 指示 agent 呼叫 QA-AIST dispatcher。
 
-| 你想做的事 | Hermes command | Notes |
+| 你想做的事 | Hermes command | 常見結果 |
 |---|---|---|
-| 初始化或更新 QA-AIST workspace | `/qa-aist setup` | Safe bootstrap flow; equivalent to engine setup |
-| 看目前狀態 | `/qa-aist status` | Shows config/workspace/case count/latest run |
-| 做健康檢查 | `/qa-aist doctor` | Checks config, paths, and secret references |
-| 顯示設定 | `/qa-aist config show` | Prints parsed host config |
-| 驗證設定 | `/qa-aist config validate` | Rejects missing sections and raw secrets |
-| 列出測試 cases | `/qa-aist qa-test list` | Reads `.qa-aist-project/cases/*.yaml` |
-| 驗證 case contracts | `/qa-aist qa-test validate` | Validates required fields and command order |
-| 預覽會跑什麼 | `/qa-aist qa-test dry-run` | Produces NOT_RUN results without executing commands |
-| 跑全部 cases | `/qa-aist qa-test run` | Saves evidence per case |
-| 跑單一 case | `/qa-aist qa-test run-one <case_id>` | Best first debugging command |
-| 看 close-loop 狀態 | `/qa-aist close-loop status` | Shows pipeline order and latest run |
-| 跑完整 close-loop | `/qa-aist close-loop run-once` | Runs fixed deterministic pipeline once |
-| 產生 Markdown report | `/qa-aist report status` | Writes `.qa-aist-project/reports/status.md` |
-| 取得 latest run JSON | `/qa-aist report json` | Useful for Hermes rendering and CI |
-| 規劃 tracker 寫入 | `/qa-aist tracker plan-write` | V1 dry-run only; always goes through write gate |
-
-Hermes 若支援純文字 alias，可以把 `qa-aist ...` 設為 `/qa-aist ...` 的別名；文件與產品介面仍以 `/qa-aist` 為正式格式。
+| 初始化產品 repo | `/qa-aist setup` | 建立 `.qa-aist.yaml` 和 `.qa-aist-project` starter files |
+| 看目前狀態 | `/qa-aist status` | 顯示 config/workspace/case count/latest run |
+| 做健康檢查 | `/qa-aist doctor` | 檢查 config、paths、runners、secret references |
+| 顯示設定 | `/qa-aist config show` | 輸出解析後的 host config |
+| 驗證設定 | `/qa-aist config validate` | 缺欄位或 raw secret 會被拒絕 |
+| 列出測試 cases | `/qa-aist qa-test list` | 讀取 `.qa-aist-project/cases/*.yaml` |
+| 驗證 case contracts | `/qa-aist qa-test validate` | 檢查必填欄位與 command order |
+| 預覽會跑什麼 | `/qa-aist qa-test dry-run` | 產生 NOT_RUN 結果，不執行 command |
+| 跑全部 cases | `/qa-aist qa-test run` | 為每個 case 保存 evidence |
+| 跑單一 case | `/qa-aist qa-test run-one <case_id>` | 最適合第一次除錯 |
+| 看 close-loop 狀態 | `/qa-aist close-loop status` | 顯示 pipeline order 和 latest run |
+| 跑完整 close-loop | `/qa-aist close-loop run-once` | 執行固定 deterministic pipeline |
+| 產生 Markdown report | `/qa-aist report status` | 寫入 `.qa-aist-project/reports/status.md` |
+| 取得 latest run JSON | `/qa-aist report json` | 給 Hermes rendering 或 CI 使用 |
+| 規劃 tracker 寫入 | `/qa-aist tracker plan-write` | V1 dry-run only，必經 write gate |
 
 ## Project Layout
 
-初始化後，產品 repo 會有這些檔案：
+初始化後，產品 repo 會出現：
 
 ```text
 your-product/
-  .qa-aist.yaml                 # host-owned QA-AIST config
-  .qa-aist-project/             # host-owned runtime workspace
+  .qa-aist.yaml                 # host-owned config
+  .qa-aist-project/             # host-owned runtime data
     cases/                      # YAML case contracts
-    runners/                    # project-specific runner scripts
+    runners/                    # product-specific runner scripts
     rules/                      # deterministic QA rules
     state/                      # latest-run.json
     evidence/                   # stdout/stderr/rc/meta/result JSON
     reports/                    # Markdown or JSON reports
 ```
 
-如果你的產品 repo 內同時 vendored 了 QA-AIST tool source，建議長這樣：
+如果你把 QA-AIST vendored 進產品 repo，建議是：
 
 ```text
 your-product/
-  .qa-aist/                     # QA-AIST tool source or package checkout
+  .qa-aist/                     # QA-AIST tool source checkout
   .qa-aist.yaml                 # product config
   .qa-aist-project/             # product runtime data
 ```
 
-重要邊界：
+邊界很重要：
 
 - `.qa-aist` 是工具本體，不放產品執行結果。
 - `.qa-aist-project` 是產品 runtime data，放 cases、runners、state、evidence、reports。
-- `.qa-aist.yaml` 是 host-owned config，應該由產品 repo 管理。
+- `.qa-aist.yaml` 是產品 repo 自己擁有的設定。
 - token、password、API key 不應寫進 tracked config；只存 env var 名稱。
 
 ## Case Contract
 
-使用者在 `.qa-aist-project/cases/*.yaml` 定義 case。每個 case 是 ordered commands：QA-AIST 會照順序執行，保存每個 command 的 stdout、stderr、return code、metadata，並計算整份 contract 的 `contract_hash`。
+使用者在 `.qa-aist-project/cases/*.yaml` 定義 ordered commands。QA-AIST 會照順序執行，保存每個 command 的 stdout、stderr、return code、metadata，並計算整份 contract 的 `contract_hash`。
 
 最小範例：
 
@@ -152,7 +210,7 @@ commands:
     expected_exit_code: 0
 ```
 
-直接寫產品測試指令也可以：
+也可以直接寫產品測試指令：
 
 ```yaml
 case_id: CLI-HELP-001
@@ -180,18 +238,15 @@ commands:
 ```mermaid
 flowchart TD
   a["config_validate"] --> b["health_checks"]
-  b --> c["tracker_pull_open_items<br/>V1 disabled/no-op"]
-  c --> d["select_scope"]
-  d --> e["run_cases"]
-  e --> f["normalize_results"]
-  f --> g["deduplicate_tracker_actions"]
-  g --> h["write_gate"]
-  h --> i["tracker_write_when_allowed<br/>V1 dry-run only"]
-  i --> j["render_reports"]
-  j --> k["persist_state"]
+  b --> c["select_scope"]
+  c --> d["run_cases"]
+  d --> e["normalize_results"]
+  e --> f["write_gate"]
+  f --> g["render_reports"]
+  g --> h["persist_state"]
 ```
 
-Close-loop summary JSON 固定包含這些高階欄位：
+Close-loop summary JSON 固定包含：
 
 ```json
 {
@@ -200,13 +255,13 @@ Close-loop summary JSON 固定包含這些高階欄位：
   "case_counts": {"PASS": 1, "FAIL": 0, "BLOCK": 0, "ABORT": 0, "NOT_RUN": 0},
   "latest_run_json": ".qa-aist-project/state/latest-run.json",
   "report_path": ".qa-aist-project/reports/status.md",
-  "tracker_writes": {"created": 0, "updated": 0, "blocked_by_gate": 1}
+  "tracker_writes": {"blocked_by_gate": 1}
 }
 ```
 
 ## Reports And Evidence
 
-每次 case run 會產生 normalized result JSON，核心欄位包含：
+每次 run 都會保存 normalized result JSON，核心欄位包含：
 
 ```json
 {
@@ -233,15 +288,6 @@ Evidence layout：
     result.json
 ```
 
-Close-loop run 會用 run id 分層：
-
-```text
-.qa-aist-project/evidence/
-  <run-id>/
-    EXAMPLE-001/
-      result.json
-```
-
 常用輸出：
 
 ```text
@@ -251,7 +297,7 @@ Close-loop run 會用 run id 分層：
 
 ## Write Gate
 
-QA-AIST 的 tracker 原則是：先證據、再 gate、最後才可能寫入。V1 不做真實 tracker 寫入，只產生 deterministic plan。
+QA-AIST 的 tracker 原則是：先證據、再 gate、最後才可能規劃寫入。V1 不做真實 tracker 寫入，只產生 deterministic plan。
 
 | Gate condition | V1 result | Reason |
 |---|---|---|
@@ -262,162 +308,61 @@ QA-AIST 的 tracker 原則是：先證據、再 gate、最後才可能寫入。V
 | Tracker provider is `none` or disabled | blocked plan | `tracker_disabled` |
 | Evidence is current and tracker is enabled | allowed plan | `allowed` |
 
-這代表 Hermes 不應該自己組 tracker comment，也不應該自己決定是否 reopen/close/comment。所有 tracker intent 都要先經過 `/qa-aist tracker plan-write` 或 close-loop 裡的 write gate。
+Hermes 不應該自己組 tracker comment，也不應該自行判斷要 reopen、close 或 comment。所有 tracker intent 都要經過 `/qa-aist tracker plan-write` 或 close-loop 裡的 write gate。
 
 ## What QA-AIST Is Not
 
+- 不是安裝 Python package 後自動出現在 Hermes 的原生 plugin。
 - 不是讓 Hermes 任意拼接 shell command 或 tracker action 的捷徑。
 - 不是用 LLM 自行判斷「這次應該跳過 health check」的流程。
 - 不是 V1 就會真的寫 Gitea、Redmine、GitHub Issues 或其他 tracker。
 - 不是把產品測試資料放進 QA-AIST tool source 的資料夾。
 
-## Hermes Integration
+## Hermes Skill Contract
 
-Hermes integration 的責任很小、很清楚：
-
-1. 在聊天視窗註冊 `/qa-aist` 指令。
-2. 把使用者輸入的 `/qa-aist ...` dispatch 到 QA-AIST engine。
-3. 提供目前產品 repo root/context。
-4. 讀取 QA-AIST 的 JSON output、evidence path、report path。
-5. 在聊天 UI 裡呈現結果。
-
-重要前提：`/qa-aist` 必須先被 Hermes 的 message router、plugin registry、agent registry 或 tool config 註冊。只安裝 QA-AIST Python package 不會自動修改 Hermes 聊天室。完整安裝判斷流程請看 [Hermes Agent Installation](docs/HERMES_AGENT_INSTALL.md)。
-
-Hermes 不應該：
-
-- 自行重排 close-loop pipeline。
-- 自行略過 write gate。
-- 自行把 raw secret 印出來。
-- 自行直接寫 tracker。
-
-推薦 dispatcher model：
-
-```mermaid
-sequenceDiagram
-  participant U as User
-  participant H as Hermes chat
-  participant Q as QA-AIST agent/plugin
-  participant E as qa-aist engine
-  participant P as Product repo
-
-  U->>H: /qa-aist close-loop run-once
-  H->>Q: command + repo context
-  Q->>E: qa-aist close-loop run-once --root REPO --json
-  E->>P: read config, cases, runners
-  E->>P: write evidence, state, reports
-  E-->>Q: stable JSON summary
-  Q-->>H: concise status + links
-  H-->>U: PASS/FAIL/BLOCK + report path
-```
-
-QA-AIST package 也提供一個很薄的 Hermes dispatch hook。Hermes 可以直接 import Python API：
-
-```python
-from qa_aist.hermes import dispatch_chat_command
-
-result = dispatch_chat_command("/qa-aist status", root="/path/to/product-repo")
-```
-
-或呼叫 package entrypoint：
+`~/.hermes/skills/qa-aist/SKILL.md` 必須和這份 README 一致。它的職責不是自己實作 QA 邏輯，而是要求 Hermes agent 做這件事：
 
 ```bash
-qa-aist-hermes --root /path/to/product-repo /qa-aist status
+/usr/bin/env PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes --root "$PWD" /qa-aist <arguments>
 ```
 
-這一層只做三件事：驗證 `/qa-aist` prefix、自動補上 repo context、把指令轉給 `qa-aist ... --json` engine。它不會自行執行任意聊天文字，也不會繞過 write gate。
+SKILL 應該要求 agent：
 
-### Install Into Hermes Slash Command
+- 把 `/qa-aist <arguments>` 視為 QA-AIST command。
+- 從目前產品 repo root 執行 dispatcher。
+- 不從記憶回答、不手刻 tracker comment、不發明 evidence path。
+- 讀取 dispatcher 回傳 JSON。
+- 優先回覆 JSON 裡的 `chat_response`。
 
-這台 Hermes 的 `/xxx` 動態指令是由 `~/.hermes/skills/**/SKILL.md` 產生的。要讓 Hermes 認得 `/qa-aist`，請安裝 QA-AIST skill：
-
-```bash
-PYTHONPATH=/path/to/QA-AIST/src python3 -m qa_aist.hermes install-skill \
-  --runner-command "/usr/bin/env PYTHONPATH=/path/to/QA-AIST/src python3 -m qa_aist.hermes"
-```
-
-這會建立：
-
-```text
-~/.hermes/skills/qa-aist/
-  SKILL.md                      # Hermes dynamic skill slash command
-```
-
-檢查安裝狀態：
-
-```bash
-PYTHONPATH=/path/to/QA-AIST/src python3 -m qa_aist.hermes skill-status
-```
-
-重新載入 Hermes skills：
-
-```text
-/reload-skills
-```
-
-之後 Hermes 會把 `/qa-aist ...` 當成 skill slash command。注意：這是 Hermes skill-mediated flow，Hermes 會載入 `SKILL.md` 指示 agent 去呼叫 deterministic QA-AIST dispatcher；不是 Hermes 原生 Python router 直接執行外部命令。
-
-如果你已經把 QA-AIST 安裝進 Hermes 使用的 Python 環境，也可以用較短的指令：
-
-```bash
-qa-aist-hermes install-skill
-```
-
-不經 Hermes，直接 smoke test dispatcher：
-
-```bash
-PYTHONPATH=/path/to/QA-AIST/src python3 -m qa_aist.hermes \
-  --root /path/to/product-repo /qa-aist doctor
-```
-
-QA-AIST 仍保留 `qa-aist-hermes install --agent-dir ...` portable manifest/wrapper 模式，但這不是目前 Hermes dynamic slash command 的主要安裝方式。
+如果 Hermes skill 被觸發但 agent 沒有跑 terminal command，請提醒 agent 依 `~/.hermes/skills/qa-aist/SKILL.md` 執行 dispatcher。這是 dynamic skill 模式的限制，不是 QA-AIST engine 本身不會跑。
 
 ## Developer / CI Usage
 
-一般使用者請優先使用 Hermes chat 的 `/qa-aist ...`。下面是給 QA-AIST 維護者、Hermes 整合者、CI pipeline、本機除錯使用的 CLI engine。
+一般使用者優先看 Hermes chat 的 `/qa-aist ...`。下面是給 QA-AIST 維護者、Hermes 整合者、CI pipeline、本機除錯使用。
 
-在 QA-AIST source checkout 裡開發：
-
-```bash
-cd .qa-aist
-PYTHONPATH=src python3 -m qa_aist.cli --help
-```
-
-安裝成 `qa-aist` engine：
+從 source checkout 直接呼叫 Hermes dispatcher：
 
 ```bash
-cd .qa-aist
-python3 -m pip install .
-qa-aist --help
+cd /path/to/your-product
+PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes --root "$PWD" /qa-aist status
+PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes --root "$PWD" /qa-aist doctor
+PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes --root "$PWD" /qa-aist qa-test list
+PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes --root "$PWD" /qa-aist close-loop run-once
 ```
 
-在產品 repo 初始化：
-
-```bash
-qa-aist setup --root /path/to/your-product --json
-```
-
-常用 smoke flow：
-
-```bash
-qa-aist status --root /path/to/your-product --json
-qa-aist doctor --root /path/to/your-product --json
-qa-aist qa-test list --root /path/to/your-product --json
-qa-aist qa-test run-one --root /path/to/your-product EXAMPLE-001 --json
-qa-aist close-loop run-once --root /path/to/your-product --json
-qa-aist report status --root /path/to/your-product --json
-qa-aist tracker plan-write --root /path/to/your-product --json
-```
-
-測試 Hermes dispatch layer：
+若已安裝 console scripts：
 
 ```bash
 qa-aist-hermes --root /path/to/your-product /qa-aist doctor
+qa-aist --json doctor --root /path/to/your-product
 ```
+
+Ubuntu 若出現 `externally-managed-environment`，不要硬改系統 Python。請用 `PYTHONPATH=... python3 -m qa_aist.hermes ...`、venv、pipx，或 distro package 流程。
 
 跑測試：
 
 ```bash
-cd .qa-aist
+cd /root/repo/QA-AIST
 PYTHONPATH=src python3 -m unittest discover -s tests
 ```
 
@@ -454,17 +399,31 @@ QA-AIST 可以檢查 env var 名稱是否存在，但不應把 raw value 寫進 
 
 | Symptom | Try this |
 |---|---|
-| Hermes 找不到 `/qa-aist` | 確認 Hermes 已安裝/啟用 QA-AIST agent/plugin，並把 repo context 傳給 engine |
-| `config_invalid` | 執行 `/qa-aist config validate`，補齊 `.qa-aist.yaml` 必填區塊 |
-| `case_not_found` | 執行 `/qa-aist qa-test list` 確認 case id |
-| Case 失敗 | 查看 `.qa-aist-project/evidence/<case-id>/` 下的 stdout、stderr、rc、meta |
-| `tracker_disabled` | V1 預期行為；tracker provider 是 `none` 時只會產生 blocked plan |
-| `raw_secret_detected` | 移除 config/result 裡的 raw token，改用 env var name |
-| Report 是空的 | 先跑 `/qa-aist close-loop run-once` 或 `/qa-aist qa-test run` |
+| `qa-aist-hermes: command not found` | 使用 `PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes ...`，或把 QA-AIST 安裝進 venv/pipx。 |
+| Hermes 找不到 `/qa-aist` | 確認 `~/.hermes/skills/qa-aist/SKILL.md` 存在，執行 `/reload-skills`，再檢查 skill scanner。 |
+| `/qa-aist` 有觸發但沒有執行測試 | 要求 agent 依 SKILL 執行 dispatcher；dynamic skill 不是 native router。 |
+| `config_not_found` | 確認 Hermes session root 是產品 repo，或先跑 `/qa-aist setup`。 |
+| `config_invalid` | 執行 `/qa-aist config validate`，補齊 `.qa-aist.yaml` 必填區塊。 |
+| `case_not_found` | 執行 `/qa-aist qa-test list` 確認 case id。 |
+| Case 失敗 | 查看 `.qa-aist-project/evidence/<case-id>/` 下的 stdout、stderr、rc、meta。 |
+| `tracker_disabled` | V1 預期行為；tracker provider 是 `none` 時只會產生 blocked plan。 |
+| `raw_secret_detected` | 移除 config/result 裡的 raw token，改用 env var name。 |
+| Report 是空的 | 先跑 `/qa-aist close-loop run-once` 或 `/qa-aist qa-test run`。 |
+
+可以用 Hermes 自己的 scanner 驗證 `/qa-aist` 是否存在：
+
+```bash
+PYTHONPATH=/usr/local/lib/hermes-agent python3 - <<'PY'
+from agent.skill_commands import scan_skill_commands
+cmds = scan_skill_commands()
+print("/qa-aist" in cmds)
+print(cmds.get("/qa-aist"))
+PY
+```
 
 ## Roadmap
 
-- Hermes plugin packaging and installation flow.
+- Native Hermes router/plugin adapter, for environments that need slash commands to execute before LLM/agent mediation.
 - Richer report templates for product teams and maintainers.
 - Tracker adapters behind the existing write gate.
 - Optional agent roles for investigation, summarization, and fix planning.
@@ -477,7 +436,7 @@ QA-AIST 可以檢查 env var 名稱是否存在，但不應把 raw value 寫進 
 - 清楚的使用情境或 bug 說明。
 - 對應的 unit/CLI test，或說明為什麼無法測。
 - 不把產品私有 evidence、token、hostname、客戶資料放進 tool source。
-- 若新增 public command，請同步更新 command cheat sheet 和 docs。
+- 若新增 public command，請同步更新 command cheat sheet、README、SKILL template。
 
 本 repo 的核心設計偏好：
 
@@ -489,6 +448,24 @@ QA-AIST 可以檢查 env var 名稱是否存在，但不應把 raw value 寫進 
 ## Security
 
 請不要在 issue、PR、case contract、runner output、report 或 screenshot 中提交 raw API key、password、customer data。若發現 secret 暴露，請先撤銷該 secret，再開 private/security channel 通知維護者；公開 issue 請只描述影響範圍，不貼 secret value。
+
+## FAQ
+
+**我有 Hermes，為什麼不能直接跑 `/qa-aist`？**
+
+因為 Hermes 需要先掃到 `~/.hermes/skills/qa-aist/SKILL.md`。請先跑 `install-skill`，再在 Hermes 輸入 `/reload-skills`。
+
+**`qa-aist-hermes` 為什麼不存在？**
+
+它是 Python console script，只有安裝 package 後才會出現。未安裝時請用 `PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes ...`。
+
+**QA-AIST 會真的留言或改 tracker 嗎？**
+
+V1 不會。它只產生 deterministic write plan，並用 write gate 阻擋不安全動作。
+
+**我可以不用 Hermes 嗎？**
+
+可以。CI 和本機除錯可以直接呼叫 QA-AIST engine。Hermes skill 是人機操作介面，不是唯一執行方式。
 
 ## License
 
