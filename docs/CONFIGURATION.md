@@ -47,6 +47,8 @@ The SWQA policy fields require every confirmed bug to be expanded into sibling-s
 
 `paths.issues` is optional for older configs. If it is missing, QA-AIST uses `<workspace>/issues`.
 
+`/qa-aist setup` uses `--tracker-provider auto` by default. When the target repo has a parseable `git remote origin`, setup fills `tracker.provider: gitea`, `tracker.gitea.backend: mcp`, `tracker.gitea.base_url`, and `tracker.gitea.repo` automatically. Without a remote, setup keeps `tracker.provider: none`.
+
 ## Gitea Backends
 
 `tracker.gitea.backend` controls how `/qa-aist issues sync` reads remote issue state:

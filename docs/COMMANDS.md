@@ -51,6 +51,7 @@ Hermes 回覆不是純 JSON dump。QA-AIST dispatcher 會在 payload 裡放 `nex
 
 ```bash
 qa-aist init-project --root <target-repo>
+qa-aist init-project --root <target-repo> --tracker-provider gitea --gitea-backend mcp --gitea-base-url https://git.example.com --gitea-repo owner/repo
 qa-aist issues sync --root <target-repo>
 qa-aist cases generate --root <target-repo> --from-issues
 qa-aist qa-test run-one --root <target-repo> ISSUE-1
@@ -64,6 +65,8 @@ From a source checkout:
 ```bash
 PYTHONPATH=src python3 -m qa_aist.cli issues sync --root <target-repo> --issues-json issues.json
 ```
+
+`setup` / `init-project` defaults to `--tracker-provider auto`. If the target repo has a parseable `git remote origin`, QA-AIST writes a Gitea MCP-ready config automatically. Use `--tracker-provider none` to keep tracker disabled, or `--gitea-backend http` when CI should call Gitea REST directly with a token env.
 
 If `.qa-aist.yaml` uses `tracker.gitea.backend: mcp`, Hermes must first use its configured Gitea MCP read tool to write raw issue JSON to `.qa-aist-project/state/gitea-mcp/issues.json` or `QA_AIST_GITEA_MCP_ISSUES_JSON`, then run:
 

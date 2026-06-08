@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+import subprocess
 from pathlib import Path
 from typing import Any
+from urllib import parse
 
 from .config import (
     CONFIG_FILE,
@@ -47,6 +50,7 @@ def cmd_init_project(args: argparse.Namespace) -> int:
     root.mkdir(parents=True, exist_ok=True)
     workspace = args.workspace or DEFAULT_PROJECT_WORKSPACE
     paths = project_paths(root, workspace)
+    tracker_setup = resolve_setup_tracker(root, args)
     if is_qa_aist_source_checkout(paths.workspace):
         return print_json({
             "status": "error",
@@ -59,7 +63,7 @@ def cmd_init_project(args: argparse.Namespace) -> int:
         path.mkdir(parents=True, exist_ok=True)
 
     created = []
-    if write_if_missing(paths.config, default_config(str(workspace)), force=args.force):
+    if write_if_missing(paths.config, default_config(str(workspace), **tracker_setup["config_kwargs"]), force=args.force):
         created.append(str(paths.config))
     if write_if_missing(paths.cases / "example-contract.yaml", EXAMPLE_CONTRACT, force=args.force):
         created.append(str(paths.cases / "example-contract.yaml"))
@@ -68,17 +72,124 @@ def cmd_init_project(args: argparse.Namespace) -> int:
     if write_if_missing(paths.rules / "swqa-test-design.md", SWQA_TEST_DESIGN_RULE, force=args.force):
         created.append(str(paths.rules / "swqa-test-design.md"))
 
+    issue_sync = None
+    config_error = None
+    if paths.config.exists():
+        try:
+            config = load_project_config(root)
+            issue_sync = issue_sync_readiness(config)
+        except QAConfigError as exc:
+            config_error = {"error": exc.error, "message": exc.message, **exc.details}
+
     return print_json({
         "status": "ok",
         "root": str(root),
         "created": created,
         "workspace": str(paths.workspace),
+        "tracker_setup": tracker_setup["payload"],
+        "issue_sync": issue_sync,
+        "config_error": config_error,
         "embedded_tool_checkout_detected": is_qa_aist_source_checkout(root / LEGACY_PROJECT_WORKSPACE),
     })
 
 
 def cmd_setup(args: argparse.Namespace) -> int:
     return cmd_init_project(args)
+
+
+def resolve_setup_tracker(root: Path, args: argparse.Namespace) -> dict[str, Any]:
+    detected = detect_gitea_remote(root)
+    provider = str(getattr(args, "tracker_provider", "auto") or "auto")
+    if provider == "auto":
+        provider = "gitea" if detected else "none"
+
+    backend_arg = getattr(args, "gitea_backend", None)
+    backend = str(backend_arg or ("mcp" if provider == "gitea" else "http"))
+    base_url = str(getattr(args, "gitea_base_url", "") or (detected or {}).get("base_url", ""))
+    repo = str(getattr(args, "gitea_repo", "") or (detected or {}).get("repo", ""))
+    token_env = str(getattr(args, "gitea_token_env", "") or "QA_AIST_GITEA_TOKEN")
+    project_name = repo.rsplit("/", 1)[-1] if repo else root.name
+    default_branch = detect_default_branch(root) or "main"
+
+    if provider != "gitea":
+        backend = "http"
+        base_url = ""
+        repo = ""
+
+    return {
+        "config_kwargs": {
+            "project_name": project_name or "example-project",
+            "default_branch": default_branch,
+            "tracker_provider": provider,
+            "gitea_backend": backend,
+            "gitea_base_url": base_url,
+            "gitea_repo": repo,
+            "gitea_token_env": token_env,
+        },
+        "payload": {
+            "provider": provider,
+            "gitea_backend": backend,
+            "gitea_base_url": base_url,
+            "gitea_repo": repo,
+            "gitea_token_env": token_env,
+            "git_remote_detected": bool(detected),
+            "git_remote_url": (detected or {}).get("remote_url"),
+            "auto_configured_mcp": provider == "gitea" and backend == "mcp" and bool(detected),
+        },
+    }
+
+
+def detect_default_branch(root: Path) -> str | None:
+    for command in [
+        ["git", "symbolic-ref", "--short", "HEAD"],
+        ["git", "branch", "--show-current"],
+    ]:
+        result = subprocess.run(command, cwd=root, text=True, capture_output=True, check=False)
+        branch = result.stdout.strip()
+        if result.returncode == 0 and branch:
+            return branch
+    return None
+
+
+def detect_gitea_remote(root: Path) -> dict[str, str] | None:
+    result = subprocess.run(["git", "remote", "get-url", "origin"], cwd=root, text=True, capture_output=True, check=False)
+    if result.returncode != 0:
+        return None
+    remote_url = result.stdout.strip()
+    parsed = parse_git_remote(remote_url)
+    if not parsed:
+        return None
+    return {**parsed, "remote_url": remote_url}
+
+
+def parse_git_remote(remote_url: str) -> dict[str, str] | None:
+    raw = remote_url.strip()
+    if not raw:
+        return None
+
+    scp_match = re.match(r"^[^@]+@([^:]+):(.+)$", raw)
+    if scp_match:
+        host = scp_match.group(1)
+        repo = _clean_repo_path(scp_match.group(2))
+        return {"base_url": f"https://{host}", "repo": repo} if repo else None
+
+    parsed = parse.urlparse(raw)
+    if parsed.scheme in {"http", "https", "ssh", "git"} and parsed.netloc:
+        netloc = parsed.netloc.rsplit("@", 1)[-1]
+        base_url = f"https://{netloc}" if parsed.scheme in {"ssh", "git"} else f"{parsed.scheme}://{netloc}"
+        repo = _clean_repo_path(parsed.path)
+        return {"base_url": base_url.rstrip("/"), "repo": repo} if repo else None
+    return None
+
+
+def _clean_repo_path(path: str) -> str:
+    value = path.strip().lstrip("/")
+    if value.endswith(".git"):
+        value = value[:-4]
+    parts = [part for part in value.split("/") if part]
+    if len(parts) >= 2:
+        return "/".join(parts[-2:])
+    return value
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -617,6 +728,11 @@ def _add_root_workspace(parser: argparse.ArgumentParser) -> None:
 def _add_root_workspace_force(parser: argparse.ArgumentParser) -> None:
     _add_root_workspace(parser)
     parser.add_argument("--force", action="store_true", help="Overwrite generated starter files")
+    parser.add_argument("--tracker-provider", default="auto", choices=["auto", "none", "gitea"], help="Tracker provider for generated config; auto uses git remote when available")
+    parser.add_argument("--gitea-backend", default=None, choices=["mcp", "http"], help="Gitea backend for generated config; defaults to mcp when a git remote is detected")
+    parser.add_argument("--gitea-base-url", default="", help="Gitea base URL override for generated config")
+    parser.add_argument("--gitea-repo", default="", help="Gitea owner/repo override for generated config")
+    parser.add_argument("--gitea-token-env", default="QA_AIST_GITEA_TOKEN", help="Environment variable name for HTTP Gitea token")
 
 
 def _add_root_config(parser: argparse.ArgumentParser) -> None:

@@ -65,12 +65,22 @@ class ProjectConfig:
     paths: ProjectPaths
 
 
-def default_config(workspace: str = DEFAULT_PROJECT_WORKSPACE) -> str:
+def default_config(
+    workspace: str = DEFAULT_PROJECT_WORKSPACE,
+    *,
+    project_name: str = "example-project",
+    default_branch: str = "main",
+    tracker_provider: str = "none",
+    gitea_backend: str = "http",
+    gitea_base_url: str = "",
+    gitea_repo: str = "",
+    gitea_token_env: str = "QA_AIST_GITEA_TOKEN",
+) -> str:
     return f"""# QA-AIST project configuration
 # This file belongs to the host project, not to the QA-AIST tool repository.
 project:
-  name: example-project
-  default_branch: main
+  name: {_yaml_string(project_name)}
+  default_branch: {_yaml_string(default_branch)}
 
 paths:
   workspace: {workspace}
@@ -83,14 +93,14 @@ paths:
   reports: {workspace}/reports
 
 tracker:
-  provider: none
-  project: ""
+  provider: {tracker_provider}
+  project: {_yaml_string(gitea_repo)}
   api_token_env: QA_AIST_TRACKER_TOKEN
   gitea:
-    backend: http
-    base_url: ""
-    repo: ""
-    token_env: QA_AIST_GITEA_TOKEN
+    backend: {gitea_backend}
+    base_url: {_yaml_string(gitea_base_url)}
+    repo: {_yaml_string(gitea_repo)}
+    token_env: {gitea_token_env}
     mcp_issues_json: {workspace}/state/gitea-mcp/issues.json
     wiki_page: "Test status"
     branch_prefix: "qa-aist/issue-"
@@ -105,6 +115,10 @@ policy:
   require_boundary_invalid_tests: true
   require_side_effect_safe_repro: true
 """
+
+
+def _yaml_string(value: str) -> str:
+    return json.dumps(str(value), ensure_ascii=False)
 
 
 def workspace_path(root: Path, workspace: str | Path = DEFAULT_PROJECT_WORKSPACE) -> Path:

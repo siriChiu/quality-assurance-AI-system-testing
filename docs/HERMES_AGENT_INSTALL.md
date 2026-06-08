@@ -140,6 +140,20 @@ PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes --root "$PWD" /qa-ai
 PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes --root "$PWD" /qa-aist doctor
 ```
 
+`/qa-aist setup` 會讀目前產品 repo 的 `git remote origin`。如果 remote 可解析成 Gitea URL，例如 `git@git.example.com:owner/repo.git`，QA-AIST 會自動在 `.qa-aist.yaml` 產生：
+
+```yaml
+tracker:
+  provider: gitea
+  gitea:
+    backend: mcp
+    base_url: "https://git.example.com"
+    repo: "owner/repo"
+    mcp_issues_json: .qa-aist-project/state/gitea-mcp/issues.json
+```
+
+這只是設定 QA-AIST 使用 Hermes-friendly MCP read backend；它不會修改 Hermes 本身的 MCP server 註冊。Hermes 仍需在使用者確認後呼叫已設定好的 Gitea MCP read tool，寫入 snapshot，再讓 QA-AIST 執行 `/qa-aist issues sync`。
+
 ## Why `qa-aist-hermes` May Not Exist
 
 `qa-aist-hermes` 是 Python package 安裝後才會出現的 console script。如果你只是 clone repo，它不會自動存在。

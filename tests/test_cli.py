@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -34,6 +35,52 @@ class CliTest(unittest.TestCase):
             self.assertEqual(payload["status"], "ok")
             self.assertEqual(Path(payload["workspace"]).name, ".qa-aist-project")
             self.assertIn("workspace: .qa-aist-project", (root / ".qa-aist.yaml").read_text(encoding="utf-8"))
+            self.assertEqual(payload["tracker_setup"]["provider"], "none")
+
+    def test_init_project_auto_configures_gitea_mcp_from_git_remote(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True)
+            subprocess.run(["git", "remote", "add", "origin", "git@git.sw.ciot.work:Redfish/irctool.git"], cwd=root, check=True)
+
+            code, payload = self.run_cli(["init-project", "--root", tmp])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["tracker_setup"]["provider"], "gitea")
+            self.assertEqual(payload["tracker_setup"]["gitea_backend"], "mcp")
+            self.assertEqual(payload["tracker_setup"]["gitea_base_url"], "https://git.sw.ciot.work")
+            self.assertEqual(payload["tracker_setup"]["gitea_repo"], "Redfish/irctool")
+            config = (root / ".qa-aist.yaml").read_text(encoding="utf-8")
+            self.assertIn("provider: gitea", config)
+            self.assertIn("backend: mcp", config)
+            self.assertIn('base_url: "https://git.sw.ciot.work"', config)
+            self.assertIn('repo: "Redfish/irctool"', config)
+
+    def test_init_project_accepts_explicit_http_gitea_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            code, payload = self.run_cli([
+                "init-project",
+                "--root",
+                tmp,
+                "--tracker-provider",
+                "gitea",
+                "--gitea-backend",
+                "http",
+                "--gitea-base-url",
+                "https://git.example.test",
+                "--gitea-repo",
+                "owner/repo",
+            ])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["tracker_setup"]["provider"], "gitea")
+            self.assertEqual(payload["tracker_setup"]["gitea_backend"], "http")
+            config = (root / ".qa-aist.yaml").read_text(encoding="utf-8")
+            self.assertIn("backend: http", config)
+            self.assertIn('base_url: "https://git.example.test"', config)
+            self.assertIn('repo: "owner/repo"', config)
 
     def test_init_project_refuses_to_write_into_tool_checkout_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

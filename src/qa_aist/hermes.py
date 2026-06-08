@@ -152,6 +152,13 @@ def render_chat_response(payload: dict[str, Any], *, exit_code: int = 0) -> str:
         lines.append(f"         path: {payload.get('path')}")
     if payload.get("workspace"):
         lines.append(f"         workspace: {payload.get('workspace')}")
+    if isinstance(payload.get("tracker_setup"), dict):
+        tracker_setup = payload["tracker_setup"]
+        lines.append(f"         tracker_setup: {tracker_setup.get('provider', '-')}/{tracker_setup.get('gitea_backend', '-')}")
+        if tracker_setup.get("gitea_repo"):
+            lines.append(f"         gitea_repo: {tracker_setup.get('gitea_repo')}")
+        if tracker_setup.get("auto_configured_mcp"):
+            lines.append("         auto_configured_mcp: true")
     if "case_contract_count" in payload:
         lines.append(f"         cases: {payload.get('case_contract_count')}")
     if "runner_count" in payload:
@@ -300,6 +307,12 @@ def suggest_next_actions(payload: dict[str, Any], engine_argv: list[str], exit_c
             _next("看 qa-test 教學", "/qa-aist help qa-test"),
         ]
     if current == "setup":
+        if "gitea_mcp_snapshot_missing" in blockers:
+            return [
+                _next("用 Hermes Gitea MCP 讀取 issues，寫入 snapshot 後重跑 sync", "/qa-aist issues sync", confirm=True),
+                _next("執行健康檢查", "/qa-aist doctor"),
+                _next("查看 Gitea/MCP 設定", "/qa-aist config show"),
+            ]
         return [
             _next("執行健康檢查", "/qa-aist doctor"),
             _next("查看設定", "/qa-aist config show"),
@@ -663,6 +676,8 @@ When the user invokes `/qa-aist <arguments>`, you must:
 
 Gitea MCP rule: if the product repo config uses `tracker.gitea.backend: mcp`, you may use Hermes' configured Gitea MCP tooling only to read issue data before `/qa-aist issues sync`. Write the raw MCP issue result as JSON to `.qa-aist-project/state/gitea-mcp/issues.json`, unless `.qa-aist.yaml` or `QA_AIST_GITEA_MCP_ISSUES_JSON` specifies another path. Then run the QA-AIST dispatcher normally. Do not treat the MCP read itself as a completed sync.
 
+Setup rule: `/qa-aist setup` auto-detects `git remote origin`. If the remote looks like Gitea, setup writes `tracker.provider: gitea`, `tracker.gitea.backend: mcp`, `base_url`, `repo`, and the MCP snapshot path into `.qa-aist.yaml`. Do not ask the user to hand-edit this unless detection is wrong or they explicitly want HTTP token mode.
+
 ## Interactive Guidance Model
 
 Do not behave like a passive command relay. After every QA-AIST turn, guide the user toward the next useful step in Traditional Chinese.
@@ -690,6 +705,7 @@ Preferred menu style:
 Recommended interaction by situation:
 
 - After `/qa-aist setup`: suggest `/qa-aist doctor`, `/qa-aist config show`, then `/qa-aist issues sync`.
+- If setup reports `auto_configured_mcp: true`, explain that QA-AIST is configured and the remaining step is a Hermes Gitea MCP read to create the local snapshot.
 - After `/qa-aist doctor` warning: explain the warning and suggest the smallest check that resolves it.
 - After `gitea_mcp_snapshot_missing`: offer to use Hermes Gitea MCP read-only fetch, write the snapshot, then rerun `/qa-aist issues sync`.
 - After `/qa-aist issues sync`: suggest `/qa-aist issues dedupe` and `/qa-aist cases generate --from-issues`.
@@ -976,6 +992,8 @@ def _overview_help_text(commands: list[dict[str, str]]) -> str:
         [
             "qa-aist> HELP",
             "QA-AIST 中文使用手冊",
+            "",
+            "`/qa-aist setup` 會自動讀 git remote origin；若能辨識 Gitea repo，會先設定成 Hermes-friendly MCP backend。",
             "",
             "第一次使用建議流程：",
             "1. `/qa-aist setup`：初始化目前產品 repo。",
