@@ -19,8 +19,10 @@
 安裝後，Hermes skill scanner 可以看到 `/qa-aist`，使用者可以在 Hermes 聊天室輸入：
 
 ```text
+/qa-aist help
 /qa-aist status
 /qa-aist doctor
+/qa-aist help qa-test
 /qa-aist qa-test list
 /qa-aist close-loop run-once
 ```
@@ -72,6 +74,12 @@ PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes skill-status
 
 ```text
 /reload-skills
+```
+
+先用不需要專案初始化的 help 指令確認 skill 真的可用：
+
+```text
+/qa-aist help
 ```
 
 ## Verify Hermes Can See `/qa-aist`
@@ -140,13 +148,13 @@ qa-aist-hermes install-skill --force
 `SKILL.md` 不會自己執行 Python。它是 Hermes agent 的操作規則。當使用者輸入：
 
 ```text
-/qa-aist doctor
+/qa-aist help qa-test
 ```
 
 agent 應該在目前產品 repo root 執行：
 
 ```bash
-/usr/bin/env PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes --root "$PWD" /qa-aist doctor
+/usr/bin/env PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes --root "$PWD" /qa-aist help qa-test
 ```
 
 然後讀取 JSON，優先回覆 JSON 裡的 `chat_response`。

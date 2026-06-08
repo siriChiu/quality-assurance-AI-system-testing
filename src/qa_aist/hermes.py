@@ -18,6 +18,7 @@ PRIMARY_PREFIX = "/qa-aist"
 ALIAS_PREFIX = "qa-aist"
 ACCEPTED_PREFIXES = {PRIMARY_PREFIX, ALIAS_PREFIX}
 ROOT_COMMANDS = {"init-project", "setup", "status", "doctor", "qa-test", "close-loop", "report", "tracker"}
+HELP_TOPICS = {"qa-test"}
 AGENT_MANIFEST_NAME = "qa-aist.agent.json"
 AGENT_WRAPPER_NAME = "qa-aist-agent.sh"
 HERMES_SKILL_NAME = "qa-aist"
@@ -68,6 +69,19 @@ def dispatch_chat_command(message: str, *, root: str | Path = ".") -> dict[str, 
             "chat_response": render_chat_response(payload, exit_code=2),
         }
 
+    help_payload = _help_payload(command.engine_argv)
+    if help_payload:
+        return {
+            "status": "ok",
+            "interface": "hermes",
+            "command": message,
+            "prefix": command.prefix,
+            "engine_argv": command.engine_argv,
+            "exit_code": 0,
+            "payload": help_payload,
+            "chat_response": render_chat_response(help_payload, exit_code=0),
+        }
+
     stdout = StringIO()
     stderr = StringIO()
     try:
@@ -105,6 +119,9 @@ def dispatch_chat_command(message: str, *, root: str | Path = ".") -> dict[str, 
 
 
 def render_chat_response(payload: dict[str, Any], *, exit_code: int = 0) -> str:
+    if isinstance(payload.get("help_text"), str):
+        return payload["help_text"]
+
     status = str(payload.get("status") or ("ok" if exit_code == 0 else "error"))
     lines = [f"qa-aist> {status.upper()}"]
 
@@ -169,6 +186,8 @@ def build_agent_manifest(*, wrapper_path: str | None = None, runner_command: str
             "json_output": True,
         },
         "commands": [
+            f"{PRIMARY_PREFIX} help",
+            f"{PRIMARY_PREFIX} help qa-test",
             f"{PRIMARY_PREFIX} setup",
             f"{PRIMARY_PREFIX} status",
             f"{PRIMARY_PREFIX} doctor",
@@ -179,6 +198,7 @@ def build_agent_manifest(*, wrapper_path: str | None = None, runner_command: str
             f"{PRIMARY_PREFIX} qa-test dry-run",
             f"{PRIMARY_PREFIX} qa-test run",
             f"{PRIMARY_PREFIX} qa-test run-one <case_id>",
+            f"{PRIMARY_PREFIX} qa-test help",
             f"{PRIMARY_PREFIX} close-loop status",
             f"{PRIMARY_PREFIX} close-loop run-once",
             f"{PRIMARY_PREFIX} report status",
@@ -308,6 +328,8 @@ Use this command shape:
 Examples:
 
 ```bash
+{runner_command} --root "$PWD" /qa-aist help
+{runner_command} --root "$PWD" /qa-aist help qa-test
 {runner_command} --root "$PWD" /qa-aist setup
 {runner_command} --root "$PWD" /qa-aist status
 {runner_command} --root "$PWD" /qa-aist doctor
@@ -320,6 +342,8 @@ Examples:
 
 ## Supported User-facing Commands
 
+- `/qa-aist help`
+- `/qa-aist help qa-test`
 - `/qa-aist setup`
 - `/qa-aist status`
 - `/qa-aist doctor`
@@ -330,6 +354,7 @@ Examples:
 - `/qa-aist qa-test dry-run`
 - `/qa-aist qa-test run`
 - `/qa-aist qa-test run-one <case_id>`
+- `/qa-aist qa-test help`
 - `/qa-aist close-loop status`
 - `/qa-aist close-loop run-once`
 - `/qa-aist report status`
@@ -357,7 +382,7 @@ qa-aist> PASS
          report: .qa-aist-project/reports/status.md
 ```
 
-If the result is blocked, failed, or invalid, include the reason and the next actionable command, for example `/qa-aist setup`, `/qa-aist config validate`, or `/qa-aist qa-test list`.
+If the result is blocked, failed, or invalid, include the reason and the next actionable command, for example `/qa-aist help`, `/qa-aist setup`, `/qa-aist config validate`, or `/qa-aist qa-test list`.
 
 ## If The Dispatcher Is Missing Or Broken
 
@@ -425,6 +450,168 @@ def skill_status(skills_dir: str | Path | None = None) -> dict[str, Any]:
         "skill_valid": valid,
         "command_prefix": PRIMARY_PREFIX if valid else None,
     }
+
+
+def _help_payload(engine_argv: list[str]) -> dict[str, Any] | None:
+    args = _positional_args(engine_argv)
+    if not args:
+        return None
+    if args[0] == "help":
+        topic = args[1] if len(args) > 1 else "overview"
+        if topic in {"overview", "commands", "command", "all"}:
+            return _overview_help_payload()
+        if topic in HELP_TOPICS:
+            return _qa_test_help_payload()
+        return _unknown_help_payload(topic)
+    if len(args) >= 2 and args[0] == "qa-test" and args[1] in {"help", "-h", "--help", "?"}:
+        return _qa_test_help_payload()
+    return None
+
+
+def _overview_help_payload() -> dict[str, Any]:
+    commands = [
+        {"command": "/qa-aist help", "purpose": "顯示這份中文手冊"},
+        {"command": "/qa-aist help qa-test", "purpose": "只看 qa-test 測試 case 教學"},
+        {"command": "/qa-aist setup", "purpose": "在目前產品 repo 建立 .qa-aist.yaml 與 .qa-aist-project"},
+        {"command": "/qa-aist doctor", "purpose": "檢查設定、目錄、runner、secret reference 是否健康"},
+        {"command": "/qa-aist status", "purpose": "查看 workspace、case 數量、latest run"},
+        {"command": "/qa-aist config show", "purpose": "顯示目前解析後的 QA-AIST 設定"},
+        {"command": "/qa-aist config validate", "purpose": "驗證 .qa-aist.yaml 是否完整且沒有 raw secret"},
+        {"command": "/qa-aist qa-test list", "purpose": "列出可以跑的測試 case"},
+        {"command": "/qa-aist qa-test validate", "purpose": "檢查 case YAML 格式是否正確"},
+        {"command": "/qa-aist qa-test dry-run", "purpose": "預覽會執行哪些 command，但不真的跑"},
+        {"command": "/qa-aist qa-test help", "purpose": "等同 /qa-aist help qa-test"},
+        {"command": "/qa-aist qa-test run-one <case_id>", "purpose": "只跑一個 case，最適合第一次測試"},
+        {"command": "/qa-aist qa-test run", "purpose": "跑全部 case"},
+        {"command": "/qa-aist close-loop status", "purpose": "查看 close-loop pipeline 順序與 latest run"},
+        {"command": "/qa-aist close-loop run-once", "purpose": "跑完整 pipeline：檢查、測試、write gate、報告、保存 state"},
+        {"command": "/qa-aist report status", "purpose": "產生 Markdown report"},
+        {"command": "/qa-aist report json", "purpose": "輸出 latest run JSON"},
+        {"command": "/qa-aist tracker plan-write", "purpose": "只規劃 tracker 寫入；V1 不會真的寫 tracker"},
+    ]
+    return {
+        "status": "ok",
+        "tool": "qa-aist",
+        "command_group": "help",
+        "topic": "overview",
+        "language": "zh-Hant",
+        "commands": commands,
+        "help_text": _overview_help_text(commands),
+    }
+
+
+def _qa_test_help_payload() -> dict[str, Any]:
+    steps = [
+        "先跑 /qa-aist setup，讓專案產生範例 case。",
+        "跑 /qa-aist qa-test list，找到 case_id。",
+        "跑 /qa-aist qa-test dry-run，確認 QA-AIST 會執行哪些 command。",
+        "跑 /qa-aist qa-test run-one <case_id>，先只跑一個 case。",
+        "看 .qa-aist-project/evidence/<case_id>/ 裡的 stdout、stderr、rc、meta、result.json。",
+        "單一 case 穩定後，再跑 /qa-aist qa-test run 或 /qa-aist close-loop run-once。",
+    ]
+    commands = [
+        {"command": "/qa-aist qa-test list", "purpose": "列出所有 case_id、title、contract hash"},
+        {"command": "/qa-aist qa-test validate", "purpose": "只檢查 YAML 格式，不執行測試"},
+        {"command": "/qa-aist qa-test dry-run", "purpose": "預覽 command 順序，不執行測試"},
+        {"command": "/qa-aist qa-test run-one EXAMPLE-001", "purpose": "執行單一 case"},
+        {"command": "/qa-aist qa-test run", "purpose": "執行全部 case"},
+    ]
+    return {
+        "status": "ok",
+        "tool": "qa-aist",
+        "command_group": "help",
+        "topic": "qa-test",
+        "language": "zh-Hant",
+        "steps": steps,
+        "commands": commands,
+        "help_text": _qa_test_help_text(steps, commands),
+    }
+
+
+def _unknown_help_payload(topic: str) -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "tool": "qa-aist",
+        "command_group": "help",
+        "topic": topic,
+        "language": "zh-Hant",
+        "help_text": "\n".join(
+            [
+                "qa-aist> HELP",
+                f"找不到 `{topic}` 這個 help topic。",
+                "",
+                "可用手冊：",
+                "- /qa-aist help",
+                "- /qa-aist help qa-test",
+            ]
+        ),
+    }
+
+
+def _overview_help_text(commands: list[dict[str, str]]) -> str:
+    command_lines = [f"- `{item['command']}`：{item['purpose']}" for item in commands]
+    return "\n".join(
+        [
+            "qa-aist> HELP",
+            "QA-AIST 中文使用手冊",
+            "",
+            "第一次使用建議流程：",
+            "1. `/qa-aist setup`：初始化目前產品 repo。",
+            "2. `/qa-aist doctor`：確認設定和目錄健康。",
+            "3. `/qa-aist qa-test list`：看看有哪些 case 可以跑。",
+            "4. `/qa-aist qa-test run-one EXAMPLE-001`：先跑一個範例 case。",
+            "5. `/qa-aist report status`：產生報告。",
+            "",
+            "常用指令：",
+            *command_lines,
+            "",
+            "qa-test 看不懂時，直接輸入：",
+            "`/qa-aist help qa-test`",
+        ]
+    )
+
+
+def _qa_test_help_text(steps: list[str], commands: list[dict[str, str]]) -> str:
+    step_lines = [f"{index}. {step}" for index, step in enumerate(steps, start=1)]
+    command_lines = [f"- `{item['command']}`：{item['purpose']}" for item in commands]
+    return "\n".join(
+        [
+            "qa-aist> HELP",
+            "qa-test 是什麼？",
+            "",
+            "`qa-test` 是 QA-AIST 用來執行「case contract」的指令群組。",
+            "你不用讓 Hermes 自己拼測試指令；你只要把測試步驟寫在 `.qa-aist-project/cases/*.yaml`，QA-AIST 會照順序執行、保存 evidence，並計算 contract hash。",
+            "",
+            "最小 case YAML：",
+            "```yaml",
+            "case_id: EXAMPLE-001",
+            "title: Project smoke test",
+            "commands:",
+            "  - id: smoke",
+            "    run: .qa-aist-project/runners/example-runner.sh",
+            "    expected_exit_code: 0",
+            "```",
+            "",
+            "建議操作順序：",
+            *step_lines,
+            "",
+            "qa-test 指令：",
+            *command_lines,
+            "",
+            "重點名詞：",
+            "- `case_id`：測試編號，例如 `EXAMPLE-001`，run-one 會用到它。",
+            "- `commands[].run`：真正要執行的測試 command 或 runner path。",
+            "- `expected_exit_code`：預期 return code，通常是 `0`。",
+            "- evidence：每次執行後保存 stdout、stderr、rc、meta、result.json 的資料夾。",
+            "",
+            "最安全的第一步：",
+            "`/qa-aist qa-test list`",
+        ]
+    )
+
+
+def _positional_args(argv: list[str]) -> list[str]:
+    return [item for item in argv if item != "--json" and not item.startswith("-")]
 
 
 def _inject_project_context(engine_argv: list[str], root: Path) -> None:

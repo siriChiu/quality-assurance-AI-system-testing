@@ -47,7 +47,7 @@ flowchart LR
 
 實際流程：
 
-1. 使用者在 Hermes 聊天室輸入 `/qa-aist doctor`。
+1. 使用者在 Hermes 聊天室輸入 `/qa-aist help` 或 `/qa-aist doctor`。
 2. Hermes 透過 skill scanner 找到 `~/.hermes/skills/qa-aist/SKILL.md`。
 3. SKILL 指示 agent 從目前產品 repo root 執行 QA-AIST dispatcher。
 4. Dispatcher 呼叫 deterministic engine，輸出 stable JSON。
@@ -106,9 +106,11 @@ PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes skill-status
 ### 4. 在 Hermes 聊天室操作 QA-AIST
 
 ```text
+/qa-aist help
 /qa-aist setup
 /qa-aist doctor
 /qa-aist qa-test list
+/qa-aist help qa-test
 /qa-aist qa-test run-one EXAMPLE-001
 /qa-aist close-loop run-once
 /qa-aist report status
@@ -147,6 +149,8 @@ PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes --root "$PWD" /qa-ai
 
 | 你想做的事 | Hermes command | 常見結果 |
 |---|---|---|
+| 看中文使用手冊 | `/qa-aist help` | 列出指令、第一次使用流程、qa-test 說明入口 |
+| 看 qa-test 教學 | `/qa-aist help qa-test` | 解釋 case YAML、case_id、dry-run、run-one、evidence |
 | 初始化產品 repo | `/qa-aist setup` | 建立 `.qa-aist.yaml` 和 `.qa-aist-project` starter files |
 | 看目前狀態 | `/qa-aist status` | 顯示 config/workspace/case count/latest run |
 | 做健康檢查 | `/qa-aist doctor` | 檢查 config、paths、runners、secret references |
@@ -157,6 +161,7 @@ PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes --root "$PWD" /qa-ai
 | 預覽會跑什麼 | `/qa-aist qa-test dry-run` | 產生 NOT_RUN 結果，不執行 command |
 | 跑全部 cases | `/qa-aist qa-test run` | 為每個 case 保存 evidence |
 | 跑單一 case | `/qa-aist qa-test run-one <case_id>` | 最適合第一次除錯 |
+| 在 qa-test group 內看教學 | `/qa-aist qa-test help` | 等同 `/qa-aist help qa-test` |
 | 看 close-loop 狀態 | `/qa-aist close-loop status` | 顯示 pipeline order 和 latest run |
 | 跑完整 close-loop | `/qa-aist close-loop run-once` | 執行固定 deterministic pipeline |
 | 產生 Markdown report | `/qa-aist report status` | 寫入 `.qa-aist-project/reports/status.md` |
@@ -198,6 +203,17 @@ your-product/
 ## Case Contract
 
 使用者在 `.qa-aist-project/cases/*.yaml` 定義 ordered commands。QA-AIST 會照順序執行，保存每個 command 的 stdout、stderr、return code、metadata，並計算整份 contract 的 `contract_hash`。
+
+如果你看不懂 `qa-test`，先記這句：`qa-test` 不是一個測試框架，而是「讀取 case YAML，照順序執行你定義的 command，然後保存 evidence」的指令群組。第一次使用建議照這個順序：
+
+```text
+/qa-aist help qa-test
+/qa-aist qa-test list
+/qa-aist qa-test dry-run
+/qa-aist qa-test run-one EXAMPLE-001
+```
+
+`case_id` 是每個測試 case 的名字，例如 `EXAMPLE-001`。你用 `/qa-aist qa-test list` 找到它，再用 `/qa-aist qa-test run-one <case_id>` 跑它。
 
 最小範例：
 
@@ -344,6 +360,8 @@ SKILL 應該要求 agent：
 
 ```bash
 cd /path/to/your-product
+PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes --root "$PWD" /qa-aist help
+PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes --root "$PWD" /qa-aist help qa-test
 PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes --root "$PWD" /qa-aist status
 PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes --root "$PWD" /qa-aist doctor
 PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes --root "$PWD" /qa-aist qa-test list
@@ -402,6 +420,7 @@ QA-AIST 可以檢查 env var 名稱是否存在，但不應把 raw value 寫進 
 | `qa-aist-hermes: command not found` | 使用 `PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes ...`，或把 QA-AIST 安裝進 venv/pipx。 |
 | Hermes 找不到 `/qa-aist` | 確認 `~/.hermes/skills/qa-aist/SKILL.md` 存在，執行 `/reload-skills`，再檢查 skill scanner。 |
 | `/qa-aist` 有觸發但沒有執行測試 | 要求 agent 依 SKILL 執行 dispatcher；dynamic skill 不是 native router。 |
+| `qa-test` 看不懂 | 執行 `/qa-aist help qa-test`，照 list -> dry-run -> run-one 的順序走。 |
 | `config_not_found` | 確認 Hermes session root 是產品 repo，或先跑 `/qa-aist setup`。 |
 | `config_invalid` | 執行 `/qa-aist config validate`，補齊 `.qa-aist.yaml` 必填區塊。 |
 | `case_not_found` | 執行 `/qa-aist qa-test list` 確認 case id。 |

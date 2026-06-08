@@ -2,6 +2,19 @@
 
 Implemented V1 commands:
 
+Hermes chat commands:
+
+```text
+/qa-aist help
+/qa-aist help qa-test
+/qa-aist qa-test help
+```
+
+`/qa-aist help` returns a Traditional Chinese command manual. `/qa-aist help qa-test`
+explains case contracts, `case_id`, `dry-run`, `run-one`, and evidence output.
+
+Direct engine commands:
+
 ```bash
 qa-aist init-project --root <target-repo> --workspace .qa-aist-project
 qa-aist setup --root <target-repo> --workspace .qa-aist-project
@@ -26,6 +39,7 @@ V1 command groups:
 ```yaml
 commands:
   setup:
+    - help
     - init-project
     - setup
     - status
@@ -33,6 +47,7 @@ commands:
     - config validate
     - config show
   qa-test:
+    - help
     - list
     - validate
     - dry-run

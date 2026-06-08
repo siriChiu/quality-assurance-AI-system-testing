@@ -13,6 +13,33 @@ from qa_aist import hermes
 
 
 class HermesDispatchTest(unittest.TestCase):
+    def test_help_command_returns_traditional_chinese_manual(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = hermes.dispatch_chat_command("/qa-aist help", root=tmp)
+            self.assertEqual(result["exit_code"], 0)
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["payload"]["topic"], "overview")
+            self.assertEqual(result["payload"]["language"], "zh-Hant")
+            self.assertIn("QA-AIST 中文使用手冊", result["chat_response"])
+            self.assertIn("/qa-aist setup", result["chat_response"])
+            self.assertIn("/qa-aist qa-test list", result["chat_response"])
+            self.assertIn("/qa-aist help qa-test", result["chat_response"])
+
+    def test_qa_test_help_explains_case_contract_workflow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            for command in ["/qa-aist help qa-test", "/qa-aist qa-test help"]:
+                with self.subTest(command=command):
+                    result = hermes.dispatch_chat_command(command, root=tmp)
+                    self.assertEqual(result["exit_code"], 0)
+                    self.assertEqual(result["status"], "ok")
+                    self.assertEqual(result["payload"]["topic"], "qa-test")
+                    self.assertEqual(result["payload"]["language"], "zh-Hant")
+                    self.assertIn("qa-test 是什麼", result["chat_response"])
+                    self.assertIn(".qa-aist-project/cases/*.yaml", result["chat_response"])
+                    self.assertIn("case_id", result["chat_response"])
+                    self.assertIn("dry-run", result["chat_response"])
+                    self.assertIn("/qa-aist qa-test run-one EXAMPLE-001", result["chat_response"])
+
     def test_quick_start_chat_commands_dispatch_to_engine(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -55,6 +82,8 @@ class HermesDispatchTest(unittest.TestCase):
             hermes.dispatch_chat_command("/qa-aist setup", root=root)
 
             commands = [
+                "/qa-aist help",
+                "/qa-aist help qa-test",
                 "/qa-aist status",
                 "/qa-aist doctor",
                 "/qa-aist config show",
@@ -62,6 +91,7 @@ class HermesDispatchTest(unittest.TestCase):
                 "/qa-aist qa-test list",
                 "/qa-aist qa-test validate",
                 "/qa-aist qa-test dry-run",
+                "/qa-aist qa-test help",
                 "/qa-aist qa-test run",
                 "/qa-aist qa-test run-one EXAMPLE-001",
                 "/qa-aist close-loop status",
@@ -114,6 +144,9 @@ class HermesDispatchTest(unittest.TestCase):
             manifest = hermes.build_agent_manifest()
             self.assertEqual(manifest["command_prefix"], "/qa-aist")
             self.assertIn("qa-aist", manifest["aliases"])
+            self.assertIn("/qa-aist help", manifest["commands"])
+            self.assertIn("/qa-aist help qa-test", manifest["commands"])
+            self.assertIn("/qa-aist qa-test help", manifest["commands"])
             self.assertEqual(manifest["permissions"]["tracker_write"], "never_in_v1")
 
             installed = hermes.install_agent(agent_tmp, runner_command=f"{os.sys.executable} -m qa_aist.hermes")
@@ -187,6 +220,8 @@ class HermesDispatchTest(unittest.TestCase):
             self.assertIn("Do not answer from memory", text)
             self.assertIn("chat_response", text)
             self.assertIn("product repository root", text)
+            self.assertIn("/qa-aist help", text)
+            self.assertIn("/qa-aist help qa-test", text)
             self.assertIn("/usr/bin/env PYTHONPATH=/repo/QA-AIST/src python3 -m qa_aist.hermes", text)
 
             status = hermes.skill_status(skills_tmp)
