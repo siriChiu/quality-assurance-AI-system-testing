@@ -2,6 +2,8 @@
 
 QA-AIST 的主介面是 Hermes 聊天室中的 `/qa-aist ...`。CLI 是 Hermes 背後的 deterministic engine，同一組 command surface 也可給 CI 或本機除錯使用。
 
+Hermes 回覆不是純 JSON dump。QA-AIST dispatcher 會在 payload 裡放 `next_actions`，skill 應該把它呈現成繁體中文選單，讓使用者回覆編號後繼續操作。`requires_confirmation: true` 的下一步不可直接執行。
+
 ## Hermes Workflow
 
 ```text
@@ -63,6 +65,12 @@ From a source checkout:
 PYTHONPATH=src python3 -m qa_aist.cli issues sync --root <target-repo> --issues-json issues.json
 ```
 
+If `.qa-aist.yaml` uses `tracker.gitea.backend: mcp`, Hermes must first use its configured Gitea MCP read tool to write raw issue JSON to `.qa-aist-project/state/gitea-mcp/issues.json` or `QA_AIST_GITEA_MCP_ISSUES_JSON`, then run:
+
+```text
+/qa-aist issues sync
+```
+
 ## Remote Write Rule
 
 QA-AIST can write real Gitea wiki/issues/PRs only through:
@@ -73,6 +81,8 @@ QA-AIST can write real Gitea wiki/issues/PRs only through:
 ```
 
 Every remote write must pass deterministic write gate first. Blocked writes must stay blocked; Hermes must not call Gitea directly to bypass QA-AIST.
+
+`tracker.gitea.backend: mcp` is read-only in V1 and cannot apply publish plans or submit PRs. Use HTTP backend plus token env for real remote writes.
 
 ## Host Data Boundary
 

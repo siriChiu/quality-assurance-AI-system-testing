@@ -52,8 +52,9 @@ class HermesDispatchTest(unittest.TestCase):
             self.assertTrue((root / ".qa-aist-project" / "cases" / "example-contract.yaml").exists())
 
             doctor = hermes.dispatch_chat_command("/qa-aist doctor", root=root)
-            self.assertEqual(doctor["status"], "PASS")
-            self.assertIn("qa-aist> PASS", doctor["chat_response"])
+            self.assertEqual(doctor["status"], "WARN")
+            self.assertIn("tracker_provider_disabled", doctor["chat_response"])
+            self.assertIn("下一步可以選", doctor["chat_response"])
 
             listed = hermes.dispatch_chat_command("/qa-aist qa-test list", root=root)
             self.assertEqual(listed["status"], "ok")

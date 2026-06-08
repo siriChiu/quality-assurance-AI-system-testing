@@ -100,6 +100,13 @@ def submit_fix_pr(config: ProjectConfig, *, issue_id: int, dry_run: bool = False
     gitea_cfg = gitea_config_from_project(config.data)
     if not gitea_cfg.configured:
         return {"status": "blocked", "error": "gitea_not_configured", "token_env": gitea_cfg.token_env}
+    if gitea_cfg.uses_mcp:
+        return {
+            "status": "blocked",
+            "error": "gitea_mcp_write_not_supported",
+            "message": "tracker.gitea.backend: mcp is read-only for issue sync. Configure HTTP backend with token_env before /qa-aist fix-issues submit-pr.",
+            "backend": gitea_cfg.backend,
+        }
     _push_branch(config.root, plan["branch"])
     response = GiteaClient(gitea_cfg).create_pull_request(**payload)
     result = {"status": "ok", "issue_id": issue_id, "pr_payload": payload, "response": response}

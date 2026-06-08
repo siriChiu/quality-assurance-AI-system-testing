@@ -13,29 +13,44 @@ class GiteaError(RuntimeError):
 
 @dataclass(frozen=True)
 class GiteaConfig:
+    backend: str
     base_url: str
     repo: str
     token_env: str
     token: str | None
+    mcp_issues_json: str
     wiki_page: str
     branch_prefix: str
 
     @property
     def configured(self) -> bool:
+        if self.uses_mcp:
+            return bool(self.mcp_issues_json)
         return bool(self.base_url and self.repo and self.token)
+
+    @property
+    def uses_mcp(self) -> bool:
+        return self.backend in {"mcp", "gitea-mcp", "hermes-mcp"}
+
+    @property
+    def uses_http(self) -> bool:
+        return self.backend in {"", "http", "https", "rest", "api"}
 
 
 def gitea_config_from_project(config_data: dict[str, Any]) -> GiteaConfig:
     tracker = config_data.get("tracker") if isinstance(config_data.get("tracker"), dict) else {}
     gitea = tracker.get("gitea") if isinstance(tracker.get("gitea"), dict) else {}
+    backend = str(gitea.get("backend") or tracker.get("backend") or "http").strip().lower()
     base_url = str(gitea.get("base_url") or tracker.get("base_url") or "").rstrip("/")
     repo = str(gitea.get("repo") or tracker.get("project") or tracker.get("repo") or "").strip("/")
     token_env = str(gitea.get("token_env") or tracker.get("api_token_env") or "QA_AIST_GITEA_TOKEN")
     return GiteaConfig(
+        backend=backend,
         base_url=base_url,
         repo=repo,
         token_env=token_env,
         token=os.getenv(token_env) or None,
+        mcp_issues_json=str(gitea.get("mcp_issues_json") or tracker.get("mcp_issues_json") or ".qa-aist-project/state/gitea-mcp/issues.json"),
         wiki_page=str(gitea.get("wiki_page") or "Test status"),
         branch_prefix=str(gitea.get("branch_prefix") or "qa-aist/issue-"),
     )
@@ -43,6 +58,8 @@ def gitea_config_from_project(config_data: dict[str, Any]) -> GiteaConfig:
 
 class GiteaClient:
     def __init__(self, config: GiteaConfig) -> None:
+        if config.uses_mcp:
+            raise GiteaError("Gitea MCP backend is read through the configured MCP issues JSON snapshot, not the HTTP client")
         if not config.base_url:
             raise GiteaError("gitea.base_url is required")
         if not config.repo:

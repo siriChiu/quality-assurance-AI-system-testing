@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +12,7 @@ from .gitea import GiteaClient, GiteaError, gitea_config_from_project, issue_num
 from .runner import utc_now
 
 ISSUE_SNAPSHOT_NAME = "issues-snapshot.json"
+MCP_ISSUES_ENV = "QA_AIST_GITEA_MCP_ISSUES_JSON"
 
 
 class IssueSyncError(RuntimeError):
@@ -41,7 +43,7 @@ def sync_issues(
     issues_json: str | Path | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    issues = _load_input_issues(config, issues_json)
+    issues, source_info = _load_input_issues(config, issues_json)
     normalized = [normalize_issue(issue) for issue in issues]
     config.paths.issues.mkdir(parents=True, exist_ok=True)
     config.paths.state.mkdir(parents=True, exist_ok=True)
@@ -72,7 +74,7 @@ def sync_issues(
 
     return {
         "status": "dry_run" if dry_run else "ok",
-        "source": "json" if issues_json else "gitea",
+        **source_info,
         "snapshot_path": _relative_or_str(snapshot_path, config.root),
         "issues_dir": _relative_or_str(config.paths.issues, config.root),
         "open_active_issue_ids": [issue.issue_id for issue in open_issues],
@@ -87,6 +89,7 @@ def sync_issues(
 def issue_status(config: ProjectConfig) -> dict[str, Any]:
     snapshot = load_issue_snapshot(config)
     mirrors = sorted(path for path in config.paths.issues.glob("*.md")) if config.paths.issues.exists() else []
+    readiness = issue_sync_readiness(config)
     return {
         "status": "ok",
         "snapshot_exists": issue_snapshot_path(config).exists(),
@@ -96,6 +99,129 @@ def issue_status(config: ProjectConfig) -> dict[str, Any]:
         "mirror_count": len(mirrors),
         "open_active_issue_ids": [item.get("issue_id") for item in snapshot.get("items", [])],
         "synced_at": snapshot.get("synced_at"),
+        "issue_sync": readiness,
+    }
+
+
+def issue_sync_readiness(config: ProjectConfig) -> dict[str, Any]:
+    tracker = config.data.get("tracker") if isinstance(config.data.get("tracker"), dict) else {}
+    provider = str(tracker.get("provider") or "none")
+    gitea_cfg = gitea_config_from_project(config.data)
+    checks: list[dict[str, Any]] = []
+    blockers: list[str] = []
+
+    if provider != "gitea":
+        blockers.append("tracker_provider_disabled")
+        checks.append({
+            "name": "tracker.provider",
+            "status": "WARN",
+            "value": provider,
+            "message": "Set tracker.provider: gitea before syncing remote issues.",
+        })
+    else:
+        checks.append({"name": "tracker.provider", "status": "PASS", "value": provider})
+
+    checks.append({"name": "tracker.gitea.backend", "status": "PASS", "value": gitea_cfg.backend})
+
+    if gitea_cfg.uses_mcp:
+        path = mcp_issues_snapshot_path(config, gitea_cfg)
+        repo_status = "PASS" if gitea_cfg.repo else "WARN"
+        if not gitea_cfg.repo:
+            blockers.append("gitea_repo_missing")
+        repo_check = {
+            "name": "tracker.gitea.repo",
+            "status": repo_status,
+            "value": gitea_cfg.repo,
+        }
+        if not gitea_cfg.repo:
+            repo_check["message"] = "Set tracker.gitea.repo, for example owner/repo."
+        checks.append(repo_check)
+        if path.exists():
+            checks.append({
+                "name": "tracker.gitea.mcp_issues_json",
+                "status": "PASS",
+                "path": _relative_or_str(path, config.root),
+            })
+        else:
+            blockers.append("gitea_mcp_snapshot_missing")
+            checks.append({
+                "name": "tracker.gitea.mcp_issues_json",
+                "status": "WARN",
+                "path": _relative_or_str(path, config.root),
+                "message": "Use Hermes Gitea MCP read-only fetch to write this JSON before issues sync.",
+            })
+        issue_sync_ready = provider == "gitea" and bool(gitea_cfg.repo) and path.exists()
+        return {
+            "status": "ready" if issue_sync_ready else "blocked",
+            "provider": provider,
+            "backend": gitea_cfg.backend,
+            "issue_sync_ready": issue_sync_ready,
+            "remote_write_ready": False,
+            "remote_write_reason": "mcp_backend_is_read_only",
+            "blockers": sorted(set(blockers)),
+            "checks": checks,
+            "mcp_issues_json": _relative_or_str(path, config.root),
+            "mcp_snapshot_exists": path.exists(),
+            "snapshot_exists": issue_snapshot_path(config).exists(),
+            "snapshot_path": _relative_or_str(issue_snapshot_path(config), config.root),
+        }
+
+    if not gitea_cfg.uses_http:
+        blockers.append("gitea_backend_unknown")
+        checks.append({
+            "name": "tracker.gitea.backend",
+            "status": "FAIL",
+            "value": gitea_cfg.backend,
+            "message": "Use backend: http or backend: mcp.",
+        })
+        return {
+            "status": "blocked",
+            "provider": provider,
+            "backend": gitea_cfg.backend,
+            "issue_sync_ready": False,
+            "remote_write_ready": False,
+            "blockers": sorted(set(blockers)),
+            "checks": checks,
+            "snapshot_exists": issue_snapshot_path(config).exists(),
+            "snapshot_path": _relative_or_str(issue_snapshot_path(config), config.root),
+        }
+
+    for name, value, blocker, message in [
+        ("tracker.gitea.base_url", gitea_cfg.base_url, "gitea_base_url_missing", "Set tracker.gitea.base_url."),
+        ("tracker.gitea.repo", gitea_cfg.repo, "gitea_repo_missing", "Set tracker.gitea.repo, for example owner/repo."),
+    ]:
+        if value:
+            checks.append({"name": name, "status": "PASS", "value": value})
+        else:
+            blockers.append(blocker)
+            checks.append({"name": name, "status": "WARN", "value": value, "message": message})
+
+    token_present = bool(gitea_cfg.token)
+    if token_present:
+        checks.append({"name": "tracker.gitea.token_env", "status": "PASS", "env": gitea_cfg.token_env, "value_printed": False})
+    else:
+        blockers.append("gitea_http_token_missing")
+        checks.append({
+            "name": "tracker.gitea.token_env",
+            "status": "WARN",
+            "env": gitea_cfg.token_env,
+            "value_printed": False,
+            "message": f"Set environment variable {gitea_cfg.token_env} before HTTP issue sync or remote writes.",
+        })
+
+    issue_sync_ready = provider == "gitea" and bool(gitea_cfg.base_url and gitea_cfg.repo and gitea_cfg.token)
+    return {
+        "status": "ready" if issue_sync_ready else "blocked",
+        "provider": provider,
+        "backend": gitea_cfg.backend,
+        "issue_sync_ready": issue_sync_ready,
+        "remote_write_ready": issue_sync_ready,
+        "blockers": sorted(set(blockers)),
+        "checks": checks,
+        "token_env": gitea_cfg.token_env,
+        "token_present": token_present,
+        "snapshot_exists": issue_snapshot_path(config).exists(),
+        "snapshot_path": _relative_or_str(issue_snapshot_path(config), config.root),
     }
 
 
@@ -296,19 +422,108 @@ def issue_fingerprint(title: str, body: str) -> str:
     return " ".join(words[:24])
 
 
-def _load_input_issues(config: ProjectConfig, issues_json: str | Path | None) -> list[dict[str, Any]]:
+def mcp_issues_snapshot_path(config: ProjectConfig, gitea_cfg: Any | None = None) -> Path:
+    gitea_cfg = gitea_cfg or gitea_config_from_project(config.data)
+    raw_path = os.getenv(MCP_ISSUES_ENV) or gitea_cfg.mcp_issues_json
+    path = Path(str(raw_path)).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    return (config.root / path).resolve()
+
+
+def _load_input_issues(config: ProjectConfig, issues_json: str | Path | None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if issues_json:
         loaded = json.loads(Path(issues_json).read_text(encoding="utf-8"))
-        if isinstance(loaded, dict):
-            loaded = loaded.get("issues", loaded.get("result", []))
-        if not isinstance(loaded, list):
-            raise IssueSyncError("issues JSON must be a list or an object with an issues list")
-        return [item for item in loaded if isinstance(item, dict)]
+        return _extract_issue_list(loaded), {"source": "json", "issues_json": str(Path(issues_json))}
 
     gitea_cfg = gitea_config_from_project(config.data)
+    if gitea_cfg.uses_mcp:
+        path = mcp_issues_snapshot_path(config, gitea_cfg)
+        if not path.exists():
+            raise IssueSyncError(
+                "gitea_mcp_snapshot_missing: tracker.gitea.backend is mcp, but issue snapshot JSON was not found at "
+                f"{_relative_or_str(path, config.root)}. Use Hermes Gitea MCP read-only fetch to write raw issues JSON there, "
+                f"or set {MCP_ISSUES_ENV}."
+            )
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise IssueSyncError(f"gitea_mcp_snapshot_invalid: {path}") from exc
+        return _extract_issue_list(loaded), {"source": "mcp", "mcp_issues_json": _relative_or_str(path, config.root)}
+
     if not gitea_cfg.configured:
         raise GiteaError(f"Gitea is not configured or token env is missing: {gitea_cfg.token_env}")
-    return GiteaClient(gitea_cfg).list_issues(state="all", include_comments=True)
+    return GiteaClient(gitea_cfg).list_issues(state="all", include_comments=True), {"source": "gitea"}
+
+
+def _extract_issue_list(loaded: Any) -> list[dict[str, Any]]:
+    issues = _maybe_extract_issue_list(loaded)
+    if issues is None:
+        raise IssueSyncError("issues JSON must be a list, an object with an issues list, or a Gitea MCP content payload")
+    return [item for item in issues if isinstance(item, dict)]
+
+
+def _maybe_extract_issue_list(loaded: Any) -> list[Any] | None:
+    if isinstance(loaded, list):
+        return loaded
+    if not isinstance(loaded, dict):
+        return None
+
+    for path in [
+        ("issues",),
+        ("result",),
+        ("data", "issues"),
+        ("structuredContent", "issues"),
+        ("structured_content", "issues"),
+    ]:
+        value = _nested_get(loaded, path)
+        extracted = _maybe_extract_issue_list(value)
+        if extracted is not None:
+            return extracted
+
+    content = loaded.get("content")
+    if isinstance(content, list):
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            for key in ("json", "data", "structuredContent", "structured_content"):
+                extracted = _maybe_extract_issue_list(item.get(key))
+                if extracted is not None:
+                    return extracted
+            text = item.get("text")
+            if isinstance(text, str):
+                parsed = _parse_json_text(text)
+                if parsed is not None:
+                    extracted = _maybe_extract_issue_list(parsed)
+                    if extracted is not None:
+                        return extracted
+    return None
+
+
+def _nested_get(data: dict[str, Any], path: tuple[str, ...]) -> Any:
+    current: Any = data
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _parse_json_text(text: str) -> Any | None:
+    candidate = text.strip()
+    if candidate.startswith("```"):
+        lines = candidate.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        candidate = "\n".join(lines).strip()
+    if not candidate:
+        return None
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
 
 
 def _relative_or_str(path: Path, root: Path) -> str:

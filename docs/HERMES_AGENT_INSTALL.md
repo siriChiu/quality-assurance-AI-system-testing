@@ -36,6 +36,15 @@
 
 QA-AIST 可以真實寫 Gitea，但只有在 `/qa-aist publish apply` 或 `/qa-aist fix-issues submit-pr` 明確執行、且 deterministic write gate 通過、且 token env 存在時才會碰遠端。Hermes 不可以自己用 curl/API 繞過 QA-AIST。
 
+如果 Hermes 環境已經配置 Gitea MCP，QA-AIST 的正確用法仍然是 `/qa-aist issues sync`。差別只是 issue 來源改成 read-only MCP snapshot：
+
+1. `.qa-aist.yaml` 設定 `tracker.gitea.backend: mcp`。
+2. Hermes agent 依 `SKILL.md` 用 Gitea MCP 讀取 issues。
+3. Hermes 將原始 issue JSON 寫入 `.qa-aist-project/state/gitea-mcp/issues.json`，或 `QA_AIST_GITEA_MCP_ISSUES_JSON` 指定的路徑。
+4. Hermes 再執行 `/qa-aist issues sync`，由 QA-AIST 產生 mirror、snapshot 和後續 gate inputs。
+
+MCP backend 在 V1 是 read-only。Hermes 不可以用 Gitea MCP 直接新增 issue comment、更新 wiki 或建立 PR；遠端寫入仍必須走 QA-AIST HTTP backend、write gate、`publish apply` / `submit-pr`。
+
 ## Install From Source Checkout
 
 如果 QA-AIST source checkout 在 `/root/repo/QA-AIST`，請執行：
@@ -166,6 +175,37 @@ agent 應該在目前產品 repo root 執行：
 
 然後讀取 JSON，優先回覆 JSON 裡的 `chat_response`。
 
+`chat_response` 會包含給使用者的互動選單；payload 也會包含 `next_actions`。agent 不應該只機械式轉貼 JSON，應該用繁體中文帶使用者完成下一步：
+
+```text
+下一步可以選：
+1. 執行健康檢查：/qa-aist doctor
+2. 同步 Gitea issues：/qa-aist issues sync（需確認）
+3. 查看 qa-test 教學：/qa-aist help qa-test
+```
+
+互動規則：
+
+- 使用者回覆 `1`、`2`、`3` 時，執行對應的 `next_actions[].command`。
+- 安全查詢類動作可主動詢問「要我現在跑嗎？」。
+- `/qa-aist status` 和 `/qa-aist doctor` 會提前檢查 issue sync readiness。若看到 `tracker_provider_disabled`、`gitea_mcp_snapshot_missing` 或 `gitea_http_token_missing`，先依選單補齊設定，不要等到 `issues sync` 才處理。
+- 寫檔、跑測試、Gitea MCP 讀取、publish、push branch、建立 PR 都要先取得確認。
+- `next_actions[].requires_confirmation: true` 時，不可直接執行。
+- 若 `next_actions` 的 kind 是 `ask_user` 或結果內有 questions，逐題用繁體中文詢問，不要自行猜測。
+
+若產品 repo 的 `.qa-aist.yaml` 包含：
+
+```yaml
+tracker:
+  provider: gitea
+  gitea:
+    backend: mcp
+    repo: "owner/repo"
+    mcp_issues_json: .qa-aist-project/state/gitea-mcp/issues.json
+```
+
+agent 在執行 `/qa-aist issues sync` 前，可以使用 Hermes 已安裝的 Gitea MCP 讀取 issues，並只把讀到的 JSON 寫入 `mcp_issues_json`。之後仍然必須呼叫 QA-AIST dispatcher，不可以直接把 MCP 結果當成 QA-AIST sync 完成。
+
 如果 Hermes skill 有觸發，但 agent 只用文字回答、沒有執行 terminal command，這代表 skill-mediated flow 沒被 agent 遵守。請要求 agent 依 `~/.hermes/skills/qa-aist/SKILL.md` 呼叫 QA-AIST dispatcher。
 
 ## Native Router Is A Separate Future Integration
@@ -192,4 +232,6 @@ return result["chat_response"]
 | `config_not_found` | root 指到錯的 repo 或尚未 setup | 回到產品 repo root，執行 `/qa-aist setup`。 |
 | `tracker_disabled` | provider 未啟用 | 設定 `tracker.provider: gitea` 與 `tracker.gitea.*`。 |
 | `gitea_not_configured` | apply/submit-pr 缺 token 或 repo 設定 | 設定 `QA_AIST_GITEA_TOKEN` 與 `.qa-aist.yaml`。 |
+| `gitea_mcp_snapshot_missing` | `backend: mcp` 但沒有 issue snapshot | 用 Hermes Gitea MCP 讀 issues 並寫入 `.qa-aist-project/state/gitea-mcp/issues.json`，或設定 `QA_AIST_GITEA_MCP_ISSUES_JSON`。 |
+| `gitea_mcp_write_not_supported` | MCP backend 嘗試寫遠端 | V1 MCP 只支援 issue sync 讀取；真實寫入請改 HTTP backend/token。 |
 | `write_gate_blocked` | QA-AIST 拒絕遠端寫入 | 先修 sync/evidence/contract/duplicate/secret 問題，不要繞過 gate。 |

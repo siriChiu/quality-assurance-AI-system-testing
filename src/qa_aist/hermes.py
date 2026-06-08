@@ -73,6 +73,7 @@ def dispatch_chat_command(message: str, *, root: str | Path = ".") -> dict[str, 
             "error": error,
             "message": _parse_error_message(error),
         }
+        payload = _with_next_actions(payload, [], 2)
         return {
             "status": "error",
             "interface": "hermes",
@@ -86,6 +87,7 @@ def dispatch_chat_command(message: str, *, root: str | Path = ".") -> dict[str, 
 
     help_payload = _help_payload(command.engine_argv)
     if help_payload:
+        help_payload = _with_next_actions(help_payload, command.engine_argv, 0)
         return {
             "status": "ok",
             "interface": "hermes",
@@ -121,6 +123,7 @@ def dispatch_chat_command(message: str, *, root: str | Path = ".") -> dict[str, 
     elif raw_stderr:
         payload = {**payload, "stderr": raw_stderr}
 
+    payload = _with_next_actions(payload, command.engine_argv, exit_code)
     return {
         "status": _dispatch_status(payload, exit_code),
         "interface": "hermes",
@@ -135,7 +138,8 @@ def dispatch_chat_command(message: str, *, root: str | Path = ".") -> dict[str, 
 
 def render_chat_response(payload: dict[str, Any], *, exit_code: int = 0) -> str:
     if isinstance(payload.get("help_text"), str):
-        return payload["help_text"]
+        menu = _next_actions_text(payload)
+        return f"{payload['help_text']}\n\n{menu}" if menu else payload["help_text"]
 
     status = str(payload.get("status") or ("ok" if exit_code == 0 else "error"))
     lines = [f"qa-aist> {status.upper()}"]
@@ -169,6 +173,14 @@ def render_chat_response(payload: dict[str, Any], *, exit_code: int = 0) -> str:
         lines.append(f"         plan: {payload.get('plan_path')}")
     if "blocked_by_gate" in payload:
         lines.append(f"         blocked_by_gate: {payload.get('blocked_by_gate')}")
+    if payload.get("setup_required"):
+        lines.append("         setup_required: true")
+    if isinstance(payload.get("issue_sync"), dict):
+        lines.extend(_issue_sync_lines(payload["issue_sync"]))
+    if isinstance(payload.get("checks"), list):
+        attention = _attention_check_lines(payload["checks"])
+        if attention:
+            lines.extend(attention)
 
     first_result = _first_result(payload)
     if first_result:
@@ -178,7 +190,298 @@ def render_chat_response(payload: dict[str, Any], *, exit_code: int = 0) -> str:
             lines.append(f"         result: {first_result.get('result_path')}")
         elif first_result.get("evidence"):
             lines.append(f"         evidence: {', '.join(map(str, first_result.get('evidence', [])[:3]))}")
+    next_actions = payload.get("next_actions")
+    if isinstance(next_actions, list) and next_actions:
+        lines.extend(["", *_next_actions_lines(next_actions)])
     return "\n".join(lines)
+
+
+def _issue_sync_lines(issue_sync: dict[str, Any]) -> list[str]:
+    lines = [
+        f"         issue_sync: {issue_sync.get('status', 'unknown')}",
+        f"         tracker: {issue_sync.get('provider', '-')}/{issue_sync.get('backend', '-')}",
+    ]
+    blockers = issue_sync.get("blockers")
+    if isinstance(blockers, list) and blockers:
+        lines.append(f"         blockers: {', '.join(map(str, blockers[:5]))}")
+    if issue_sync.get("mcp_issues_json"):
+        exists = "exists" if issue_sync.get("mcp_snapshot_exists") else "missing"
+        lines.append(f"         mcp_issues_json: {issue_sync.get('mcp_issues_json')} ({exists})")
+    elif issue_sync.get("token_env"):
+        token_state = "set" if issue_sync.get("token_present") else "missing"
+        lines.append(f"         token_env: {issue_sync.get('token_env')} ({token_state})")
+    return lines
+
+
+def _attention_check_lines(checks: list[Any]) -> list[str]:
+    attention = [
+        check for check in checks
+        if isinstance(check, dict) and str(check.get("status")) in {"WARN", "FAIL"}
+    ]
+    if not attention:
+        return []
+    lines = ["", "需要處理："]
+    for check in attention[:5]:
+        name = check.get("name", "check")
+        status = check.get("status", "WARN")
+        message = check.get("message") or check.get("path") or check.get("value") or ""
+        lines.append(f"- {status} {name}: {message}")
+    return lines
+
+
+def _next_actions_text(payload: dict[str, Any]) -> str:
+    actions = payload.get("next_actions")
+    if not isinstance(actions, list) or not actions:
+        return ""
+    return "\n".join(_next_actions_lines(actions))
+
+
+def _next_actions_lines(next_actions: list[Any]) -> list[str]:
+    lines = ["下一步可以選："]
+    for index, action in enumerate([item for item in next_actions if isinstance(item, dict)][:4], start=1):
+        label = action.get("label") or action.get("command") or "下一步"
+        command = action.get("command")
+        requires_confirmation = action.get("requires_confirmation")
+        suffix = "（需確認）" if requires_confirmation else ""
+        if command:
+            lines.append(f"{index}. {label}：`{command}`{suffix}")
+        else:
+            lines.append(f"{index}. {label}{suffix}")
+    lines.append("請回覆選項編號，或直接輸入下一個 `/qa-aist ...` 指令。")
+    return lines
+
+
+def _with_next_actions(payload: dict[str, Any], engine_argv: list[str], exit_code: int) -> dict[str, Any]:
+    if isinstance(payload.get("next_actions"), list):
+        return payload
+    actions = suggest_next_actions(payload, engine_argv, exit_code)
+    if not actions:
+        return payload
+    return {**payload, "next_actions": actions}
+
+
+def suggest_next_actions(payload: dict[str, Any], engine_argv: list[str], exit_code: int = 0) -> list[dict[str, Any]]:
+    args = _positional_args(engine_argv)
+    current = " ".join(args[:2]) if len(args) >= 2 else (args[0] if args else "")
+    status = str(payload.get("status") or "").lower()
+    error = str(payload.get("error") or "")
+    message = str(payload.get("message") or "")
+    issue_sync = payload.get("issue_sync") if isinstance(payload.get("issue_sync"), dict) else {}
+    blockers = set(issue_sync.get("blockers", [])) if isinstance(issue_sync.get("blockers"), list) else set()
+
+    if error == "config_not_found":
+        return [
+            _next("初始化目前 repo", "/qa-aist setup", confirm=True),
+            _next("檢查目前路徑", "/qa-aist status"),
+        ]
+    if "gitea_mcp_snapshot_missing" in message:
+        return [
+            _next("用 Hermes Gitea MCP 讀取 issues，寫入 snapshot 後重跑 sync", "/qa-aist issues sync", confirm=True),
+            _next("查看 Gitea/MCP 設定", "/qa-aist config show"),
+            _next("查看 issue sync 狀態", "/qa-aist issues status"),
+        ]
+    if error in {"GiteaError", "IssueSyncError"}:
+        return [
+            _next("檢查設定", "/qa-aist config show"),
+            _next("執行健康檢查", "/qa-aist doctor"),
+            _next("查看 issue 狀態", "/qa-aist issues status"),
+        ]
+    if error in {"QAConfigError", "config_invalid"} or status == "error" and "config" in error.lower():
+        return [
+            _next("驗證設定", "/qa-aist config validate"),
+            _next("查看設定", "/qa-aist config show"),
+        ]
+
+    if not args or args[0] == "help":
+        return [
+            _next("初始化產品 repo", "/qa-aist setup", confirm=True),
+            _next("執行健康檢查", "/qa-aist doctor"),
+            _next("同步 Gitea issues", "/qa-aist issues sync", confirm=True),
+            _next("看 qa-test 教學", "/qa-aist help qa-test"),
+        ]
+    if current == "setup":
+        return [
+            _next("執行健康檢查", "/qa-aist doctor"),
+            _next("查看設定", "/qa-aist config show"),
+            _next("同步 Gitea issues", "/qa-aist issues sync", confirm=True),
+        ]
+    if current == "status" and payload.get("config_exists") is False:
+        return [
+            _next("初始化產品 repo", "/qa-aist setup", confirm=True),
+            _next("查看中文手冊", "/qa-aist help"),
+        ]
+    if current in {"doctor", "status"}:
+        if "gitea_mcp_snapshot_missing" in blockers:
+            return [
+                _next("用 Hermes Gitea MCP 讀取 issues，寫入 snapshot 後重跑 sync", "/qa-aist issues sync", confirm=True),
+                _next("查看 Gitea/MCP 設定", "/qa-aist config show"),
+                _next("查看 issue sync 狀態", "/qa-aist issues status"),
+            ]
+        if "gitea_http_token_missing" in blockers:
+            return [
+                _next("查看 Gitea HTTP 設定", "/qa-aist config show"),
+                {"label": "設定 token env 後再重跑 doctor", "kind": "ask_user"},
+                _next("切換成 MCP read-only sync", "/qa-aist config show"),
+            ]
+        if "tracker_provider_disabled" in blockers:
+            return [
+                _next("查看 tracker 設定", "/qa-aist config show"),
+                {"label": "設定 tracker.provider: gitea 後重跑 doctor", "kind": "ask_user"},
+            ]
+        if status in {"warn", "error", "fail"}:
+            return [
+                _next("驗證設定", "/qa-aist config validate"),
+                _next("查看設定", "/qa-aist config show"),
+                _next("查看 issue sync 狀態", "/qa-aist issues status"),
+            ]
+        return [
+            _next("同步 Gitea issues", "/qa-aist issues sync", confirm=True),
+            _next("列出測試 cases", "/qa-aist qa-test list"),
+        ]
+    if current == "config validate":
+        return [
+            _next("執行健康檢查", "/qa-aist doctor"),
+            _next("同步 Gitea issues", "/qa-aist issues sync", confirm=True),
+        ]
+    if current == "issues sync":
+        if exit_code == 0 and status in {"ok", "dry_run"}:
+            return [
+                _next("檢查重複 issue", "/qa-aist issues dedupe"),
+                _next("從 issues 產生測試 cases", "/qa-aist cases generate --from-issues", confirm=True),
+                _next("查看 issue sync 狀態", "/qa-aist issues status"),
+            ]
+        return [
+            _next("查看設定", "/qa-aist config show"),
+            _next("查看 issue sync 狀態", "/qa-aist issues status"),
+        ]
+    if current == "issues status":
+        if not payload.get("snapshot_exists"):
+            return [
+                _next("同步 Gitea issues", "/qa-aist issues sync", confirm=True),
+                _next("查看設定", "/qa-aist config show"),
+            ]
+        return [
+            _next("檢查重複 issue", "/qa-aist issues dedupe"),
+            _next("產生測試 cases", "/qa-aist cases generate --from-issues", confirm=True),
+        ]
+    if current == "issues dedupe":
+        return [
+            _next("產生測試 cases", "/qa-aist cases generate --from-issues", confirm=True),
+            _next("查看單一 issue", "/qa-aist issues show <issue_id>"),
+        ]
+    if current == "cases generate":
+        if status == "needs_input":
+            return [
+                _next("審查待補資訊", "/qa-aist cases review"),
+                {"label": "逐題回答 fixture、輸入檔、成功條件與不可碰範圍", "kind": "ask_user"},
+                _next("補完後驗證 cases", "/qa-aist cases validate"),
+            ]
+        return [
+            _next("審查產生的 cases", "/qa-aist cases review"),
+            _next("驗證 cases", "/qa-aist cases validate"),
+            _next("列出可跑測試", "/qa-aist qa-test list"),
+        ]
+    if current in {"cases review", "cases validate"}:
+        return [
+            _next("列出可跑測試", "/qa-aist qa-test list"),
+            _next("先 dry-run", "/qa-aist qa-test dry-run"),
+        ]
+    if args and args[0] == "qa-test":
+        if args == ["qa-test"]:
+            return [
+                _next("列出可跑測試", "/qa-aist qa-test list"),
+                _next("先 dry-run", "/qa-aist qa-test dry-run"),
+                _next("看完整 qa-test 教學", "/qa-aist help qa-test"),
+            ]
+        if args[:2] == ["qa-test", "list"]:
+            first_case = _first_case_id(payload)
+            actions = [_next("先 dry-run", "/qa-aist qa-test dry-run")]
+            if first_case:
+                actions.append(_next(f"先跑單一 case {first_case}", f"/qa-aist qa-test run-one {first_case}", confirm=True))
+            actions.append(_next("驗證 case YAML", "/qa-aist qa-test validate"))
+            return actions
+        if args[:2] in (["qa-test", "dry-run"], ["qa-test", "validate"]):
+            first_case = _first_case_id(payload)
+            if first_case:
+                return [_next(f"執行單一 case {first_case}", f"/qa-aist qa-test run-one {first_case}", confirm=True)]
+            return [_next("列出 cases", "/qa-aist qa-test list")]
+        if args[:2] in (["qa-test", "run"], ["qa-test", "run-one"]):
+            return [
+                _next("產生報告", "/qa-aist report status"),
+                _next("產生 publish plan", "/qa-aist publish plan", confirm=True),
+                _next("查看 latest run JSON", "/qa-aist report json"),
+            ]
+    if current == "close-loop run-once":
+        return [
+            _next("產生報告", "/qa-aist report status"),
+            _next("產生 publish plan", "/qa-aist publish plan", confirm=True),
+        ]
+    if current == "report status":
+        return [
+            _next("產生 publish plan", "/qa-aist publish plan", confirm=True),
+            _next("查看 latest run JSON", "/qa-aist report json"),
+        ]
+    if current == "publish plan":
+        if payload.get("status") == "ready" or payload.get("blocked_by_gate") == 0:
+            return [
+                _next("套用 Gitea 寫入計畫", "/qa-aist publish apply", confirm=True, destructive=True),
+                _next("查看 publish 狀態", "/qa-aist publish status"),
+            ]
+        return [
+            _next("查看 publish 狀態", "/qa-aist publish status"),
+            _next("查看 write gate", "/qa-aist tracker plan-write"),
+        ]
+    if current == "publish apply":
+        if status == "blocked":
+            return [
+                _next("查看 publish 狀態", "/qa-aist publish status"),
+                _next("重新產生 publish plan", "/qa-aist publish plan", confirm=True),
+            ]
+        return [_next("查看 publish 狀態", "/qa-aist publish status")]
+    if current == "fix-issues plan":
+        if status == "ready":
+            return [
+                _next("建立 Hermes 修復 handoff", "/qa-aist fix-issues run --issue <id>", confirm=True),
+                _next("先跑相關測試", "/qa-aist qa-test list"),
+            ]
+        return [
+            _next("同步 issues", "/qa-aist issues sync", confirm=True),
+            _next("檢查重複 issue", "/qa-aist issues dedupe"),
+        ]
+    if current == "fix-issues run":
+        return [
+            {"label": "讓 Hermes 依 handoff 做最小修復，完成後跑 linked case", "kind": "handoff"},
+            _next("查看修復狀態", "/qa-aist fix-issues status"),
+        ]
+    if current == "fix-issues submit-pr":
+        return [
+            _next("查看 PR lifecycle 狀態", "/qa-aist fix-issues status"),
+            _next("產生/更新報告", "/qa-aist report status"),
+        ]
+    return []
+
+
+def _next(label: str, command: str, *, confirm: bool = False, destructive: bool = False) -> dict[str, Any]:
+    return {
+        "label": label,
+        "command": command,
+        "requires_confirmation": confirm or destructive,
+        "destructive": destructive,
+    }
+
+
+def _first_case_id(payload: dict[str, Any]) -> str | None:
+    cases = payload.get("cases")
+    if isinstance(cases, list):
+        for item in cases:
+            if isinstance(item, dict) and item.get("case_id"):
+                return str(item["case_id"])
+    results = payload.get("results")
+    if isinstance(results, list):
+        for item in results:
+            if isinstance(item, dict) and item.get("case_id"):
+                return str(item["case_id"])
+    return None
 
 
 def build_agent_manifest(*, wrapper_path: str | None = None, runner_command: str = "qa-aist-hermes") -> dict[str, Any]:
@@ -244,7 +547,7 @@ def build_agent_manifest(*, wrapper_path: str | None = None, runner_command: str
         ],
         "permissions": {
             "filesystem": ["project_root"],
-            "network": ["gitea_when_apply_or_submit_pr"],
+            "network": ["gitea_http_when_apply_or_submit_pr", "gitea_mcp_read_when_configured"],
             "tracker_write": "write_gate_apply_only",
         },
         "security": {
@@ -257,6 +560,8 @@ def build_agent_manifest(*, wrapper_path: str | None = None, runner_command: str
             "format": "json",
             "chat_response_field": "chat_response",
             "payload_field": "payload",
+            "next_actions_field": "payload.next_actions",
+            "interaction_style": "guided_menu",
         },
     }
 
@@ -356,6 +661,43 @@ When the user invokes `/qa-aist <arguments>`, you must:
 6. If `chat_response` is missing, summarize `status`, `payload.status`, `payload.error`, `payload.message`, `latest_run_json`, `report_path`, and evidence paths.
 7. Preserve failures. If the dispatcher exits non-zero or emits invalid JSON, tell the user the exit code and useful stderr/stdout details.
 
+Gitea MCP rule: if the product repo config uses `tracker.gitea.backend: mcp`, you may use Hermes' configured Gitea MCP tooling only to read issue data before `/qa-aist issues sync`. Write the raw MCP issue result as JSON to `.qa-aist-project/state/gitea-mcp/issues.json`, unless `.qa-aist.yaml` or `QA_AIST_GITEA_MCP_ISSUES_JSON` specifies another path. Then run the QA-AIST dispatcher normally. Do not treat the MCP read itself as a completed sync.
+
+## Interactive Guidance Model
+
+Do not behave like a passive command relay. After every QA-AIST turn, guide the user toward the next useful step in Traditional Chinese.
+
+Use this pattern:
+
+1. Briefly explain what just happened.
+2. If the JSON payload contains `next_actions`, present them as a small numbered menu.
+3. Ask the user to choose a number, approve the recommended action, or type another `/qa-aist ...` command.
+4. If the next action is safe and read-only, you may offer to run it immediately.
+5. If the next action writes files, runs tests, uses Gitea MCP, publishes to Gitea, pushes a branch, or creates a PR, ask for confirmation first.
+6. If the command returns questions or missing inputs, ask the questions one at a time in Traditional Chinese and wait for the user's answer.
+
+Preferred menu style:
+
+```text
+下一步可以選：
+1. 執行健康檢查：/qa-aist doctor
+2. 同步 Gitea issues：/qa-aist issues sync（需確認）
+3. 查看 qa-test 教學：/qa-aist help qa-test
+
+請回覆 1、2、3，或直接輸入下一個 /qa-aist ... 指令。
+```
+
+Recommended interaction by situation:
+
+- After `/qa-aist setup`: suggest `/qa-aist doctor`, `/qa-aist config show`, then `/qa-aist issues sync`.
+- After `/qa-aist doctor` warning: explain the warning and suggest the smallest check that resolves it.
+- After `gitea_mcp_snapshot_missing`: offer to use Hermes Gitea MCP read-only fetch, write the snapshot, then rerun `/qa-aist issues sync`.
+- After `/qa-aist issues sync`: suggest `/qa-aist issues dedupe` and `/qa-aist cases generate --from-issues`.
+- After `cases generate` returns questions: ask the questions interactively before treating the draft as runnable.
+- After `/qa-aist qa-test list`: suggest dry-run or running one selected case, not all cases by default.
+- After a test run: suggest `/qa-aist report status` and `/qa-aist publish plan`.
+- Before `/qa-aist publish apply` or `/qa-aist fix-issues submit-pr`: ask for explicit confirmation and summarize what will be written remotely.
+
 Use this command shape:
 
 ```bash
@@ -423,6 +765,7 @@ Examples:
 ## Safety Rules
 
 - Do not directly write Gitea comments, issues, wiki pages, or PRs. Remote writes are allowed only by `/qa-aist publish apply` or `/qa-aist fix-issues submit-pr` after QA-AIST write gate passes.
+- Do not use Gitea MCP for remote writes. In QA-AIST V1, `tracker.gitea.backend: mcp` is read-only and only feeds `/qa-aist issues sync` through a local JSON snapshot.
 - Do not reorder the QA-AIST close-loop pipeline.
 - Do not invent evidence paths.
 - Do not print raw secrets.
@@ -444,6 +787,8 @@ qa-aist> PASS
 ```
 
 If the result is blocked, failed, or invalid, include the reason and the next actionable command, for example `/qa-aist help`, `/qa-aist setup`, `/qa-aist config validate`, or `/qa-aist qa-test list`.
+
+When `next_actions` exists, do not stop at the status line. Show a compact menu and invite the user to choose. The goal is an interactive QA assistant, not a silent JSON printer.
 
 ## If The Dispatcher Is Missing Or Broken
 

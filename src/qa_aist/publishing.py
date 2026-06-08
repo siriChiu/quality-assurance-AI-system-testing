@@ -101,6 +101,13 @@ def apply_publish_plan(config: ProjectConfig, *, plan_path: str | Path | None = 
     gitea_cfg = gitea_config_from_project(config.data)
     if not gitea_cfg.configured:
         return {"status": "blocked", "error": "gitea_not_configured", "token_env": gitea_cfg.token_env}
+    if gitea_cfg.uses_mcp:
+        return {
+            "status": "blocked",
+            "error": "gitea_mcp_write_not_supported",
+            "message": "tracker.gitea.backend: mcp is read-only for issue sync. Configure HTTP backend with token_env before /qa-aist publish apply.",
+            "backend": gitea_cfg.backend,
+        }
     client = GiteaClient(gitea_cfg)
     applied: list[dict[str, Any]] = []
     for action in plan.get("actions", []):

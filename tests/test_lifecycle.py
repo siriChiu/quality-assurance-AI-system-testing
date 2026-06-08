@@ -29,6 +29,14 @@ class LifecycleTest(unittest.TestCase):
         config.write_text(text, encoding="utf-8")
         return root
 
+    def init_gitea_mcp_project(self, tmp: str) -> Path:
+        root = self.init_gitea_project(tmp)
+        config = root / ".qa-aist.yaml"
+        text = config.read_text(encoding="utf-8")
+        text = text.replace("    backend: http", "    backend: mcp")
+        config.write_text(text, encoding="utf-8")
+        return root
+
     def write_issues(self, root: Path) -> Path:
         issues = [
             {
@@ -71,6 +79,39 @@ class LifecycleTest(unittest.TestCase):
             self.assertFalse(stale.exists())
             snapshot = json.loads((root / ".qa-aist-project" / "state" / "issues-snapshot.json").read_text(encoding="utf-8"))
             self.assertEqual(snapshot["items"][0]["issue_id"], 1)
+
+    def test_issues_sync_reads_gitea_mcp_snapshot_without_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.init_gitea_mcp_project(tmp)
+            stale = root / ".qa-aist-project" / "issues" / "2.md"
+            stale.write_text("stale closed mirror", encoding="utf-8")
+            mcp_path = root / ".qa-aist-project" / "state" / "gitea-mcp" / "issues.json"
+            mcp_path.parent.mkdir(parents=True, exist_ok=True)
+            issues = json.loads(self.write_issues(root).read_text(encoding="utf-8"))
+            mcp_path.write_text(json.dumps({"content": [{"type": "text", "text": json.dumps({"issues": issues})}]}), encoding="utf-8")
+
+            code, payload = self.run_cli(["issues", "sync", "--root", tmp, "--json"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["source"], "mcp")
+            self.assertEqual(payload["mcp_issues_json"], ".qa-aist-project/state/gitea-mcp/issues.json")
+            self.assertEqual(payload["open_active_issue_ids"], [1])
+            self.assertEqual(payload["removed_mirror_ids"], [2])
+            self.assertTrue((root / ".qa-aist-project" / "issues" / "1.md").exists())
+            self.assertFalse(stale.exists())
+
+    def test_issues_sync_mcp_backend_missing_snapshot_is_actionable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.init_gitea_mcp_project(tmp)
+
+            code, payload = self.run_cli(["issues", "sync", "--root", tmp, "--json"])
+
+            self.assertEqual(code, 2)
+            self.assertEqual(payload["error"], "IssueSyncError")
+            self.assertIn("gitea_mcp_snapshot_missing", payload["message"])
+            self.assertIn("QA_AIST_GITEA_MCP_ISSUES_JSON", payload["message"])
+            self.assertNotIn("QA_AIST_TRACKER_TOKEN", payload["message"])
 
     def test_cases_generate_review_validate_and_qa_test_run_one(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -134,14 +175,46 @@ class LifecycleTest(unittest.TestCase):
             help_result = hermes.dispatch_chat_command("/qa-aist qa-test", root=root)
             self.assertEqual(help_result["status"], "ok")
             self.assertIn("qa-test 是什麼", help_result["chat_response"])
+            self.assertIn("下一步可以選", help_result["chat_response"])
+            self.assertTrue(help_result["payload"]["next_actions"])
 
             sync = hermes.dispatch_chat_command(f"/qa-aist issues sync --issues-json {issues_json}", root=root)
             self.assertEqual(sync["status"], "ok")
             self.assertEqual(sync["payload"]["open_count"], 1)
+            self.assertEqual(sync["payload"]["next_actions"][0]["command"], "/qa-aist issues dedupe")
 
             generate = hermes.dispatch_chat_command("/qa-aist cases generate --from-issues", root=root)
             self.assertEqual(generate["status"], "needs_input")
             self.assertIn("generated_cases", generate["chat_response"])
+            self.assertTrue(any(action.get("kind") == "ask_user" for action in generate["payload"]["next_actions"]))
+
+    def test_hermes_mcp_snapshot_error_guides_next_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.init_gitea_mcp_project(tmp)
+
+            result = hermes.dispatch_chat_command("/qa-aist issues sync", root=root)
+
+            self.assertEqual(result["status"], "error")
+            self.assertIn("gitea_mcp_snapshot_missing", result["chat_response"])
+            self.assertIn("下一步可以選", result["chat_response"])
+            self.assertEqual(result["payload"]["next_actions"][0]["command"], "/qa-aist issues sync")
+            self.assertTrue(result["payload"]["next_actions"][0]["requires_confirmation"])
+
+    def test_status_and_doctor_detect_missing_gitea_mcp_snapshot_early(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.init_gitea_mcp_project(tmp)
+
+            status = hermes.dispatch_chat_command("/qa-aist status", root=tmp)
+            self.assertEqual(status["status"], "warn")
+            self.assertFalse(status["payload"]["issue_sync"]["issue_sync_ready"])
+            self.assertIn("gitea_mcp_snapshot_missing", status["chat_response"])
+            self.assertEqual(status["payload"]["next_actions"][0]["command"], "/qa-aist issues sync")
+
+            doctor = hermes.dispatch_chat_command("/qa-aist doctor", root=tmp)
+            self.assertEqual(doctor["status"].lower(), "warn")
+            self.assertFalse(doctor["payload"]["issue_sync"]["issue_sync_ready"])
+            self.assertIn("gitea_mcp_snapshot_missing", doctor["chat_response"])
+            self.assertIn("需要處理", doctor["chat_response"])
 
 
 if __name__ == "__main__":

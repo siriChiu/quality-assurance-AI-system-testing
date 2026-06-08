@@ -87,9 +87,11 @@ tracker:
   project: ""
   api_token_env: QA_AIST_TRACKER_TOKEN
   gitea:
+    backend: http
     base_url: ""
     repo: ""
     token_env: QA_AIST_GITEA_TOKEN
+    mcp_issues_json: {workspace}/state/gitea-mcp/issues.json
     wiki_page: "Test status"
     branch_prefix: "qa-aist/issue-"
 

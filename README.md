@@ -23,6 +23,8 @@ flowchart LR
   slash --> skill["Hermes SKILL.md"]
   skill --> dispatcher["qa_aist.hermes dispatcher"]
   dispatcher --> engine["QA-AIST engine"]
+  engine --> next["next_actions<br/>guided menu"]
+  next --> user
   engine --> cfg[".qa-aist.yaml"]
   engine --> ws[".qa-aist-project"]
   ws --> issues["issues mirror"]
@@ -72,17 +74,31 @@ PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes install-skill --forc
 /qa-aist doctor
 ```
 
-4. 設定 `.qa-aist.yaml` 的 Gitea provider，token 只放 env：
+4. 設定 `.qa-aist.yaml` 的 Gitea provider。
+
+如果你要讓 QA-AIST 直接用 Gitea REST API 同步 issues、並在 gate 通過後執行 `publish apply` / `submit-pr`，用 HTTP backend，token 只放 env：
 
 ```yaml
 tracker:
   provider: gitea
   gitea:
+    backend: http
     base_url: "https://git.example.com"
     repo: "owner/repo"
     token_env: QA_AIST_GITEA_TOKEN
     wiki_page: "Test status"
     branch_prefix: "qa-aist/issue-"
+```
+
+如果你的 Hermes 已經有 Gitea MCP，QA-AIST 也支援 read-only MCP issue sync：Hermes 先用 Gitea MCP 讀 issues，將原始 JSON 寫入 `mcp_issues_json`，再呼叫 `/qa-aist issues sync`。這條路不需要 token，但只支援同步，不支援遠端寫入。
+
+```yaml
+tracker:
+  provider: gitea
+  gitea:
+    backend: mcp
+    repo: "owner/repo"
+    mcp_issues_json: .qa-aist-project/state/gitea-mcp/issues.json
 ```
 
 5. 跑完整新手流程：
@@ -100,6 +116,32 @@ tracker:
 ```
 
 如果 `cases generate` 回傳 questions，Hermes 必須先用繁體中文問答補齊測試輸入、fixture、成功條件與副作用邊界，再把 draft case 當成可執行測試。
+
+## Guided Interaction
+
+QA-AIST 的 Hermes skill 不是被動轉貼 JSON。每次 `/qa-aist ...` 執行後，engine 會回傳 `next_actions`，Hermes 應該用繁體中文列出下一步選單，讓使用者回覆編號或直接輸入下一個指令。
+
+範例：
+
+```text
+qa-aist> OK
+         open_issues: 3
+
+下一步可以選：
+1. 檢查重複 issue：/qa-aist issues dedupe
+2. 從 issues 產生測試 cases：/qa-aist cases generate --from-issues（需確認）
+3. 查看 issue sync 狀態：/qa-aist issues status
+
+請回覆選項編號，或直接輸入下一個 /qa-aist ... 指令。
+```
+
+互動原則：
+
+- 安全的查詢類指令，例如 `status`、`doctor`、`issues status`、`qa-test list`，Hermes 可以主動提議立即執行。
+- `status` 和 `doctor` 會提前檢查 issue sync readiness；如果 Gitea/MCP/token/snapshot 尚未準備好，會先顯示 blocker，不必等到 `issues sync` 才失敗。
+- 會寫檔、跑測試、讀 Gitea MCP、publish、push branch、建立 PR 的動作，Hermes 必須先問使用者確認。
+- `cases generate` 若產生問題，Hermes 要逐題用繁體中文問答補齊，不要亂猜。
+- `publish apply` 和 `fix-issues submit-pr` 前，Hermes 必須摘要將寫入的目標與 gate 結果。
 
 ## Command Cheat Sheet
 
@@ -147,6 +189,7 @@ your-product/
     runners/      # project-specific runner scripts
     rules/        # SWQA rules copied from QA-AIST
     state/        # snapshots, latest-run.json, plans
+      gitea-mcp/  # optional read-only MCP issue input snapshot
     evidence/     # stdout/stderr/rc/meta/result JSON
     reports/      # Markdown/JSON reports
 ```
@@ -208,6 +251,7 @@ QA-AIST 可以真實寫 Gitea，但只允許明確的 apply/submit-pr 流程：
 | modifying another user's post | blocked |
 | internal `.qa/`, run internals, prompt text leakage | blocked |
 | tracker disabled or token missing | blocked |
+| `tracker.gitea.backend: mcp` remote write | blocked |
 
 Hermes 不可以自己組 Gitea comment、issue、wiki 或 PR API request。需要遠端寫入時，只能走：
 
@@ -279,6 +323,12 @@ Because `qa-test` is a command group. Use `qa-test list`, `qa-test dry-run`, `qa
 ### Why is `publish apply` blocked?
 
 Usually because write gate blocked it, Gitea token env is missing, issue sync is stale/missing, evidence is missing, or tracker provider is disabled.
+
+If `.qa-aist.yaml` uses `tracker.gitea.backend: mcp`, `publish apply` and `fix-issues submit-pr` are intentionally blocked. MCP backend is read-only in V1 and only feeds `/qa-aist issues sync`. Use `backend: http` plus `QA_AIST_GITEA_TOKEN` for real remote writes.
+
+### Why did `/qa-aist issues sync` ask for an MCP JSON snapshot?
+
+Your config uses `tracker.gitea.backend: mcp`. Hermes must use the configured Gitea MCP read tool to fetch issues, write the raw issue list to `.qa-aist-project/state/gitea-mcp/issues.json` or the path named by `QA_AIST_GITEA_MCP_ISSUES_JSON`, then rerun `/qa-aist issues sync`.
 
 ### Why does `qa-aist-hermes` not exist?
 

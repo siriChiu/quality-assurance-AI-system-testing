@@ -28,7 +28,7 @@ from .case_generation import (
 from .contracts import ContractError, list_contract_paths, load_contract, load_contracts, select_contracts
 from .fix_issues import FixIssueError, fix_status, plan_fix_issue, run_fix_issue, submit_fix_pr
 from .gitea import GiteaError
-from .issues import IssueSyncError, dedupe_issues, issue_status, show_issue, sync_issues
+from .issues import IssueSyncError, dedupe_issues, issue_status, issue_sync_readiness, show_issue, sync_issues
 from .pipeline import PIPELINE_ORDER, run_close_loop
 from .publishing import PublishError, apply_publish_plan, plan_publish, publish_status
 from .reports import load_latest_results, render_status_report
@@ -86,6 +86,18 @@ def cmd_status(args: argparse.Namespace) -> int:
     workspace = args.workspace or DEFAULT_PROJECT_WORKSPACE
     paths = project_paths(root, workspace)
     config_exists = paths.config.exists()
+    payload_status = "ok" if config_exists else "setup_required"
+    issue_sync = None
+    config_error = None
+    if config_exists:
+        try:
+            config = load_project_config(root)
+            issue_sync = issue_sync_readiness(config)
+            if not issue_sync.get("issue_sync_ready"):
+                payload_status = "warn"
+        except QAConfigError as exc:
+            payload_status = "error"
+            config_error = {"error": exc.error, "message": exc.message, **exc.details}
     latest_run = paths.state / "latest-run.json"
     latest_payload = None
     if latest_run.exists():
@@ -96,9 +108,12 @@ def cmd_status(args: argparse.Namespace) -> int:
     cases = list_contract_paths(paths.cases)
     runners = sorted(paths.runners.glob("*")) if paths.runners.exists() else []
     return print_json({
+        "status": payload_status,
         "tool": "qa-aist",
         "root": str(root),
         "config_exists": config_exists,
+        "setup_required": not config_exists,
+        "config_error": config_error,
         "workspace": str(paths.workspace),
         "workspace_exists": paths.workspace.exists(),
         "workspace_is_tool_checkout": is_qa_aist_source_checkout(paths.workspace),
@@ -106,6 +121,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         "case_contract_count": len(cases),
         "runner_count": len([p for p in runners if p.is_file()]),
         "latest_run": latest_payload,
+        "issue_sync": issue_sync,
     })
 
 
@@ -123,8 +139,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         token_env = tracker.get("api_token_env") if isinstance(tracker, dict) else None
         if token_env:
             checks.append({"name": "tracker.api_token_env", "status": "PASS", "env": token_env, "value_printed": False})
-        status = "PASS" if all(check["status"] == "PASS" for check in checks) else "WARN"
-        return print_json({"status": status, "checks": checks})
+        readiness = issue_sync_readiness(config)
+        checks.extend(readiness.get("checks", []))
+        statuses = {str(check.get("status")) for check in checks}
+        status = "FAIL" if "FAIL" in statuses else ("WARN" if "WARN" in statuses else "PASS")
+        return print_json({"status": status, "checks": checks, "issue_sync": readiness})
     except QAConfigError as exc:
         return print_json({"status": "FAIL", "error": exc.error, "message": exc.message, **exc.details}, exit_code=2)
 
