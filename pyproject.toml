@@ -15,9 +15,15 @@ classifiers = [
   "Programming Language :: Python :: 3",
   "License :: OSI Approved :: MIT License",
 ]
+dependencies = [
+  "PyYAML>=6.0",
+]
 
 [project.scripts]
 qa-aist = "qa_aist.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+qa_aist = ["py.typed", "template_files/project/**/*"]

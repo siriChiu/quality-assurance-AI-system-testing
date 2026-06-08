@@ -45,6 +45,11 @@ pipeline:
   - persist_state
 ```
 
+V1 implements the full deterministic order. Tracker pull/write steps are
+explicit no-op/dry-run stages unless a future adapter is enabled behind the
+write gate; they are still emitted in run summaries so automation can verify
+that no step was silently skipped.
+
 ## Invariants
 
 ```yaml

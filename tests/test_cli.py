@@ -81,6 +81,35 @@ class CliTest(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(payload["status"], "ok")
 
+    def test_qa_test_list_and_run_with_json_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.run_cli(["init-project", "--root", tmp])
+            code, payload = self.run_cli(["qa-test", "list", "--root", tmp, "--json"])
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["cases"][0]["case_id"], "EXAMPLE-001")
+
+            code, payload = self.run_cli(["qa-test", "run-one", "--root", tmp, "--json", "EXAMPLE-001"])
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["status"], "PASS")
+            self.assertEqual(payload["results"][0]["case_id"], "EXAMPLE-001")
+            self.assertIn("contract_hash", payload["results"][0])
+
+    def test_close_loop_and_tracker_plan_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.run_cli(["init-project", "--root", tmp])
+            code, payload = self.run_cli(["close-loop", "run-once", "--root", tmp, "--json"])
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["status"], "PASS")
+            self.assertIn("latest_run_json", payload)
+            self.assertGreaterEqual(payload["tracker_writes"]["blocked_by_gate"], 1)
+            self.assertIn("tracker_pull_open_items", [step["name"] for step in payload["steps"]])
+            self.assertIn("tracker_write_when_allowed", [step["name"] for step in payload["steps"]])
+
+            code, payload = self.run_cli(["tracker", "plan-write", "--root", tmp, "--target-state", "closed", "--json"])
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["write_gate_result"]["reason"], "closed_issue_write_forbidden")
+
 
 if __name__ == "__main__":
     unittest.main()
