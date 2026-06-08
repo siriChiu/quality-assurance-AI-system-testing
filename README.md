@@ -324,6 +324,48 @@ qa-aist-hermes --root /path/to/product-repo /qa-aist status
 
 這一層只做三件事：驗證 `/qa-aist` prefix、自動補上 repo context、把指令轉給 `qa-aist ... --json` engine。它不會自行執行任意聊天文字，也不會繞過 write gate。
 
+### Install Into Hermes Agent
+
+如果 Hermes 使用 agent directory / manifest registry 的整合方式，QA-AIST 可以把 portable agent files 安裝到指定目錄：
+
+```bash
+qa-aist-hermes install --agent-dir /path/to/hermes/agents/qa-aist
+```
+
+這會建立：
+
+```text
+/path/to/hermes/agents/qa-aist/
+  qa-aist.agent.json            # portable Hermes agent manifest
+  qa-aist-agent.sh              # wrapper that dispatches /qa-aist to qa-aist-hermes
+```
+
+檢查安裝狀態：
+
+```bash
+qa-aist-hermes status --agent-dir /path/to/hermes/agents/qa-aist
+```
+
+只輸出 manifest、不寫檔：
+
+```bash
+qa-aist-hermes manifest
+```
+
+Hermes 端需要提供：
+
+- `HERMES_PROJECT_ROOT`：目前產品 repo root。
+- `HERMES_MESSAGE` 或 argv：使用者輸入的 `/qa-aist ...` 訊息。
+
+Wrapper 也可以直接 smoke test：
+
+```bash
+HERMES_PROJECT_ROOT=/path/to/product-repo \
+  /path/to/hermes/agents/qa-aist/qa-aist-agent.sh /qa-aist doctor
+```
+
+若 Hermes 已有自己的 plugin schema，可以讀 `qa-aist.agent.json` 內的 `command_prefix`、`entrypoint`、`python_api`、`permissions`、`security` 欄位，轉成 Hermes 原生 registry entry。
+
 ## Developer / CI Usage
 
 一般使用者請優先使用 Hermes chat 的 `/qa-aist ...`。下面是給 QA-AIST 維護者、Hermes 整合者、CI pipeline、本機除錯使用的 CLI engine。

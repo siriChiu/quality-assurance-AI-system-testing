@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -106,6 +108,67 @@ class HermesDispatchTest(unittest.TestCase):
             self.assertEqual(payload["interface"], "hermes")
             self.assertEqual(payload["command"], "/qa-aist status")
             self.assertEqual(payload["payload"]["tool"], "qa-aist")
+
+    def test_agent_manifest_install_status_and_wrapper(self) -> None:
+        with tempfile.TemporaryDirectory() as agent_tmp, tempfile.TemporaryDirectory() as project_tmp:
+            manifest = hermes.build_agent_manifest()
+            self.assertEqual(manifest["command_prefix"], "/qa-aist")
+            self.assertIn("qa-aist", manifest["aliases"])
+            self.assertEqual(manifest["permissions"]["tracker_write"], "never_in_v1")
+
+            installed = hermes.install_agent(agent_tmp, runner_command=f"{os.sys.executable} -m qa_aist.hermes")
+            self.assertEqual(installed["status"], "ok")
+            manifest_path = Path(installed["manifest_path"])
+            wrapper_path = Path(installed["wrapper_path"])
+            self.assertTrue(manifest_path.exists())
+            self.assertTrue(wrapper_path.exists())
+            self.assertTrue(os.access(wrapper_path, os.X_OK))
+
+            status = hermes.agent_status(agent_tmp)
+            self.assertEqual(status["status"], "ok")
+            self.assertTrue(status["manifest_valid"])
+
+            duplicate = hermes.install_agent(agent_tmp, runner_command=f"{os.sys.executable} -m qa_aist.hermes")
+            self.assertEqual(duplicate["status"], "error")
+            self.assertEqual(duplicate["error"], "agent_files_exist")
+
+            hermes.dispatch_chat_command("/qa-aist setup", root=project_tmp)
+            env = os.environ.copy()
+            env["PYTHONPATH"] = "src"
+            env["HERMES_PROJECT_ROOT"] = project_tmp
+            completed = subprocess.run(
+                [str(wrapper_path), "/qa-aist", "status"],
+                cwd=Path(__file__).resolve().parents[1],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            payload = json.loads(completed.stdout)
+            self.assertEqual(payload["interface"], "hermes")
+            self.assertEqual(payload["payload"]["tool"], "qa-aist")
+
+    def test_agent_console_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as agent_tmp:
+            buf = StringIO()
+            with redirect_stdout(buf):
+                code = hermes.main(["manifest"])
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(buf.getvalue())["command_prefix"], "/qa-aist")
+
+            buf = StringIO()
+            with redirect_stdout(buf):
+                code = hermes.main(["install", "--agent-dir", agent_tmp, "--runner-command", f"{os.sys.executable} -m qa_aist.hermes"])
+            self.assertEqual(code, 0)
+            installed = json.loads(buf.getvalue())
+            self.assertEqual(installed["status"], "ok")
+
+            buf = StringIO()
+            with redirect_stdout(buf):
+                code = hermes.main(["status", "--agent-dir", agent_tmp])
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(buf.getvalue())["status"], "ok")
 
 
 if __name__ == "__main__":

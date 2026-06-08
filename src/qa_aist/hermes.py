@@ -10,13 +10,15 @@ from io import StringIO
 from pathlib import Path
 from typing import Any
 
-from . import cli
+from . import __version__, cli
 from .config import CONFIG_FILE, json_dumps
 
 PRIMARY_PREFIX = "/qa-aist"
 ALIAS_PREFIX = "qa-aist"
 ACCEPTED_PREFIXES = {PRIMARY_PREFIX, ALIAS_PREFIX}
 ROOT_COMMANDS = {"init-project", "setup", "status", "doctor", "qa-test", "close-loop", "report", "tracker"}
+AGENT_MANIFEST_NAME = "qa-aist.agent.json"
+AGENT_WRAPPER_NAME = "qa-aist-agent.sh"
 
 
 @dataclass(frozen=True)
@@ -136,6 +138,124 @@ def render_chat_response(payload: dict[str, Any], *, exit_code: int = 0) -> str:
     return "\n".join(lines)
 
 
+def build_agent_manifest(*, wrapper_path: str | None = None, runner_command: str = "qa-aist-hermes") -> dict[str, Any]:
+    entrypoint_command = [wrapper_path] if wrapper_path else [runner_command, "--root", "${HERMES_PROJECT_ROOT}", "${HERMES_MESSAGE}"]
+    return {
+        "schema": "hermes.agent.v1",
+        "name": "qa-aist",
+        "display_name": "QA-AIST",
+        "version": __version__,
+        "description": "Hermes-first deterministic QA automation agent/plugin.",
+        "command_prefix": PRIMARY_PREFIX,
+        "aliases": [ALIAS_PREFIX],
+        "entrypoint": {
+            "type": "process",
+            "command": entrypoint_command,
+            "root_env": "HERMES_PROJECT_ROOT",
+            "message_env": "HERMES_MESSAGE",
+            "message_args": "append",
+        },
+        "python_api": {
+            "module": "qa_aist.hermes",
+            "callable": "dispatch_chat_command",
+            "signature": "dispatch_chat_command(message: str, root: str | Path = '.') -> dict",
+        },
+        "engine": {
+            "console_script": "qa-aist",
+            "hermes_console_script": runner_command,
+            "json_output": True,
+        },
+        "commands": [
+            f"{PRIMARY_PREFIX} setup",
+            f"{PRIMARY_PREFIX} status",
+            f"{PRIMARY_PREFIX} doctor",
+            f"{PRIMARY_PREFIX} config show",
+            f"{PRIMARY_PREFIX} config validate",
+            f"{PRIMARY_PREFIX} qa-test list",
+            f"{PRIMARY_PREFIX} qa-test validate",
+            f"{PRIMARY_PREFIX} qa-test dry-run",
+            f"{PRIMARY_PREFIX} qa-test run",
+            f"{PRIMARY_PREFIX} qa-test run-one <case_id>",
+            f"{PRIMARY_PREFIX} close-loop status",
+            f"{PRIMARY_PREFIX} close-loop run-once",
+            f"{PRIMARY_PREFIX} report status",
+            f"{PRIMARY_PREFIX} report json",
+            f"{PRIMARY_PREFIX} tracker plan-write",
+        ],
+        "permissions": {
+            "filesystem": ["project_root"],
+            "network": [],
+            "tracker_write": "never_in_v1",
+        },
+        "security": {
+            "deterministic_write_gate_required": True,
+            "raw_secret_output_forbidden": True,
+            "closed_issue_write_forbidden": True,
+            "llm_may_not_reorder_pipeline": True,
+        },
+        "outputs": {
+            "format": "json",
+            "chat_response_field": "chat_response",
+            "payload_field": "payload",
+        },
+    }
+
+
+def install_agent(agent_dir: str | Path, *, force: bool = False, runner_command: str = "qa-aist-hermes") -> dict[str, Any]:
+    target = Path(agent_dir).expanduser().resolve()
+    target.mkdir(parents=True, exist_ok=True)
+    wrapper_path = target / AGENT_WRAPPER_NAME
+    manifest_path = target / AGENT_MANIFEST_NAME
+    if not force and (wrapper_path.exists() or manifest_path.exists()):
+        return {
+            "status": "error",
+            "error": "agent_files_exist",
+            "message": "Hermes agent files already exist. Re-run with --force to overwrite.",
+            "agent_dir": str(target),
+            "manifest_path": str(manifest_path),
+            "wrapper_path": str(wrapper_path),
+        }
+
+    wrapper_path.write_text(_wrapper_script(runner_command), encoding="utf-8")
+    wrapper_path.chmod(wrapper_path.stat().st_mode | 0o111)
+    manifest = build_agent_manifest(wrapper_path=str(wrapper_path), runner_command=runner_command)
+    manifest_path.write_text(json_dumps(manifest) + "\n", encoding="utf-8")
+    return {
+        "status": "ok",
+        "agent_dir": str(target),
+        "manifest_path": str(manifest_path),
+        "wrapper_path": str(wrapper_path),
+        "command_prefix": PRIMARY_PREFIX,
+        "aliases": [ALIAS_PREFIX],
+    }
+
+
+def agent_status(agent_dir: str | Path) -> dict[str, Any]:
+    target = Path(agent_dir).expanduser().resolve()
+    manifest_path = target / AGENT_MANIFEST_NAME
+    wrapper_path = target / AGENT_WRAPPER_NAME
+    manifest: dict[str, Any] | None = None
+    manifest_valid = False
+    if manifest_path.exists():
+        try:
+            loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                manifest = loaded
+                manifest_valid = loaded.get("command_prefix") == PRIMARY_PREFIX
+        except json.JSONDecodeError:
+            manifest_valid = False
+    return {
+        "status": "ok" if manifest_valid and wrapper_path.exists() else "missing",
+        "agent_dir": str(target),
+        "manifest_path": str(manifest_path),
+        "manifest_exists": manifest_path.exists(),
+        "manifest_valid": manifest_valid,
+        "wrapper_path": str(wrapper_path),
+        "wrapper_exists": wrapper_path.exists(),
+        "command_prefix": manifest.get("command_prefix") if manifest else None,
+    }
+
+
 def _inject_project_context(engine_argv: list[str], root: Path) -> None:
     path = _command_path(engine_argv)
     if len(path) >= 2 and path[0] == "config" and path[1] == "validate":
@@ -201,7 +321,22 @@ def _parse_error_message(error: str) -> str:
     return error
 
 
+def _wrapper_script(runner_command: str) -> str:
+    runner_argv = " ".join(shlex.quote(part) for part in shlex.split(runner_command))
+    return f"""#!/usr/bin/env bash
+set -euo pipefail
+root="${{HERMES_PROJECT_ROOT:-${{PWD}}}}"
+if [[ "$#" -eq 0 && -n "${{HERMES_MESSAGE:-}}" ]]; then
+  exec {runner_argv} --root "$root" "${{HERMES_MESSAGE}}"
+fi
+exec {runner_argv} --root "$root" "$@"
+"""
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = list(argv if argv is not None else sys.argv[1:])
+    if argv and argv[0] in {"manifest", "install", "status"}:
+        return _main_agent_command(argv)
     parser = argparse.ArgumentParser(prog="qa-aist-hermes", description="Dispatch a Hermes /qa-aist chat command to the QA-AIST engine")
     parser.add_argument("--root", default=".", help="Product repository root provided by Hermes context")
     parser.add_argument("message", nargs=argparse.REMAINDER, help="Hermes chat message, for example: /qa-aist status")
@@ -210,6 +345,31 @@ def main(argv: list[str] | None = None) -> int:
     result = dispatch_chat_command(message, root=args.root)
     print(json_dumps(result))
     return int(result["exit_code"])
+
+
+def _main_agent_command(argv: list[str]) -> int:
+    command = argv[0]
+    if command == "manifest":
+        parser = argparse.ArgumentParser(prog="qa-aist-hermes manifest", description="Print a portable Hermes agent manifest")
+        parser.add_argument("--runner-command", default="qa-aist-hermes")
+        args = parser.parse_args(argv[1:])
+        print(json_dumps(build_agent_manifest(runner_command=args.runner_command)))
+        return 0
+    if command == "install":
+        parser = argparse.ArgumentParser(prog="qa-aist-hermes install", description="Install QA-AIST agent files into a Hermes agents directory")
+        parser.add_argument("--agent-dir", required=True, help="Hermes agents directory")
+        parser.add_argument("--runner-command", default="qa-aist-hermes")
+        parser.add_argument("--force", action="store_true", help="Overwrite existing QA-AIST agent files")
+        args = parser.parse_args(argv[1:])
+        payload = install_agent(args.agent_dir, force=args.force, runner_command=args.runner_command)
+        print(json_dumps(payload))
+        return 0 if payload["status"] == "ok" else 4
+    parser = argparse.ArgumentParser(prog="qa-aist-hermes status", description="Check QA-AIST Hermes agent installation")
+    parser.add_argument("--agent-dir", required=True, help="Hermes agents directory")
+    args = parser.parse_args(argv[1:])
+    payload = agent_status(args.agent_dir)
+    print(json_dumps(payload))
+    return 0 if payload["status"] == "ok" else 2
 
 
 if __name__ == "__main__":
