@@ -36,9 +36,18 @@ from .issues import IssueSyncError, dedupe_issues, issue_status, issue_sync_read
 from .pipeline import PIPELINE_ORDER, run_close_loop
 from .publishing import PublishError, apply_publish_plan, plan_publish, publish_status
 from .reports import load_latest_results, render_status_report
-from .runner import RunContext, run_case
-from .templates import EXAMPLE_CONTRACT, EXAMPLE_RUNNER, SWQA_TEST_DESIGN_RULE
+from .runner import RunContext, run_case, utc_now
+from .templates import EXAMPLE_CONTRACT, EXAMPLE_RUNNER, SWQA_TEST_DESIGN_RULE, WIKI_CATEGORIES_RULE
 from .write_gate import evaluate_write_gate
+from .wiki import (
+    WikiPublishError,
+    apply_wiki_plan,
+    auto_sync_wiki,
+    plan_wiki,
+    render_wiki,
+    wiki_readiness,
+    wiki_status,
+)
 
 
 def print_json(payload: dict[str, Any], *, exit_code: int = 0) -> int:
@@ -72,13 +81,17 @@ def cmd_init_project(args: argparse.Namespace) -> int:
         created.append(str(paths.runners / "example-runner.sh"))
     if write_if_missing(paths.rules / "swqa-test-design.md", SWQA_TEST_DESIGN_RULE, force=args.force):
         created.append(str(paths.rules / "swqa-test-design.md"))
+    if write_if_missing(paths.rules / "wiki-categories.yaml", WIKI_CATEGORIES_RULE, force=args.force):
+        created.append(str(paths.rules / "wiki-categories.yaml"))
 
     issue_sync = None
+    wiki_sync = None
     config_error = None
     if paths.config.exists():
         try:
             config = load_project_config(root)
             issue_sync = issue_sync_readiness(config)
+            wiki_sync = wiki_readiness(config)
         except QAConfigError as exc:
             config_error = {"error": exc.error, "message": exc.message, **exc.details}
 
@@ -89,6 +102,7 @@ def cmd_init_project(args: argparse.Namespace) -> int:
         "workspace": str(paths.workspace),
         "tracker_setup": tracker_setup["payload"],
         "issue_sync": issue_sync,
+        "wiki_sync": wiki_sync,
         "config_error": config_error,
         "embedded_tool_checkout_detected": is_qa_aist_source_checkout(root / LEGACY_PROJECT_WORKSPACE),
     })
@@ -200,11 +214,13 @@ def cmd_status(args: argparse.Namespace) -> int:
     config_exists = paths.config.exists()
     payload_status = "ok" if config_exists else "setup_required"
     issue_sync = None
+    wiki_sync = None
     config_error = None
     if config_exists:
         try:
             config = load_project_config(root)
             issue_sync = issue_sync_readiness(config)
+            wiki_sync = wiki_readiness(config)
             if not issue_sync.get("issue_sync_ready"):
                 payload_status = "warn"
         except QAConfigError as exc:
@@ -234,6 +250,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         "runner_count": len([p for p in runners if p.is_file()]),
         "latest_run": latest_payload,
         "issue_sync": issue_sync,
+        "wiki_sync": wiki_sync,
     })
 
 
@@ -253,9 +270,19 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             checks.append({"name": "tracker.api_token_env", "status": "PASS", "env": token_env, "value_printed": False})
         readiness = issue_sync_readiness(config)
         checks.extend(readiness.get("checks", []))
+        wiki_ready = wiki_readiness(config)
+        if wiki_ready.get("remote_write_ready"):
+            checks.append({"name": "wiki.remote_write", "status": "PASS", "page": wiki_ready.get("page")})
+        else:
+            checks.append({
+                "name": "wiki.remote_write",
+                "status": "WARN",
+                "page": wiki_ready.get("page"),
+                "message": ", ".join(wiki_ready.get("blockers", [])) or "Wiki remote write is not ready.",
+            })
         statuses = {str(check.get("status")) for check in checks}
         status = "FAIL" if "FAIL" in statuses else ("WARN" if "WARN" in statuses else "PASS")
-        return print_json({"status": status, "checks": checks, "issue_sync": readiness})
+        return print_json({"status": status, "checks": checks, "issue_sync": readiness, "wiki_sync": wiki_ready})
     except QAConfigError as exc:
         return print_json({"status": "FAIL", "error": exc.error, "message": exc.message, **exc.details}, exit_code=2)
 
@@ -414,6 +441,7 @@ def cmd_cases_generate(args: argparse.Namespace) -> int:
                 candidate_json=args.candidate_json,
                 issue_id=args.issue,
             )
+        payload = _with_auto_wiki(config, payload, event="case_generation")
     except (QAConfigError, CaseGenerationError, IssueSyncError) as exc:
         return _error_payload(exc)
     return print_json(payload, exit_code=0 if payload.get("status") != "error" else 2)
@@ -450,6 +478,8 @@ def cmd_publish_apply(args: argparse.Namespace) -> int:
     try:
         config = load_project_config(Path(args.root), args.config)
         payload = apply_publish_plan(config, plan_path=args.plan)
+        if payload.get("status") == "ok":
+            payload = _with_auto_wiki(config, payload, event="gitea_write_summary")
     except (QAConfigError, PublishError, GiteaError) as exc:
         return _error_payload(exc)
     return print_json(payload, exit_code=0 if payload.get("status") == "ok" else 4)
@@ -460,6 +490,42 @@ def cmd_publish_status(args: argparse.Namespace) -> int:
         config = load_project_config(Path(args.root), args.config)
         payload = publish_status(config)
     except QAConfigError as exc:
+        return _error_payload(exc)
+    return print_json(payload)
+
+
+def cmd_publish_wiki_plan(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        payload = plan_wiki(config, event=args.event, latest_run=args.latest_run)
+    except (QAConfigError, WikiPublishError, IssueSyncError) as exc:
+        return _error_payload(exc)
+    return print_json(payload)
+
+
+def cmd_publish_wiki_apply(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        payload = apply_wiki_plan(config, plan_path=args.plan)
+    except (QAConfigError, WikiPublishError, GiteaError) as exc:
+        return _error_payload(exc)
+    return print_json(payload, exit_code=0 if payload.get("status") == "ok" else 4)
+
+
+def cmd_publish_wiki_status(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        payload = wiki_status(config)
+    except (QAConfigError, WikiPublishError) as exc:
+        return _error_payload(exc)
+    return print_json(payload)
+
+
+def cmd_publish_wiki_render(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        payload = render_wiki(config, event=args.event, latest_run=args.latest_run)
+    except (QAConfigError, WikiPublishError, IssueSyncError) as exc:
         return _error_payload(exc)
     return print_json(payload)
 
@@ -486,6 +552,8 @@ def cmd_fix_issues_submit_pr(args: argparse.Namespace) -> int:
     try:
         config = load_project_config(Path(args.root), args.config)
         payload = submit_fix_pr(config, issue_id=args.issue, dry_run=args.dry_run)
+        if payload.get("status") == "ok":
+            payload = _with_auto_wiki(config, payload, event="gitea_write_summary")
     except (QAConfigError, FixIssueError, GiteaError, IssueSyncError) as exc:
         return _error_payload(exc)
     return print_json(payload, exit_code=0 if payload.get("status") in {"ok", "dry_run"} else 4)
@@ -532,7 +600,12 @@ def _run_cases(args: argparse.Namespace, *, dry_run: bool, one: bool) -> int:
     elif any(result["status"] == "BLOCK" for result in results):
         status = "BLOCK"
     exit_code = 1 if status == "FAIL" else (2 if status == "BLOCK" else 0)
-    return print_json({"status": status, "results": results}, exit_code=exit_code)
+    payload = {"status": status, "results": results}
+    if not dry_run:
+        run_payload = _persist_qa_test_run(config, status=status, results=results)
+        payload = {**run_payload, "results": results}
+        payload = _with_auto_wiki(config, payload, event="test_result", latest_run=run_payload)
+    return print_json(payload, exit_code=exit_code)
 
 
 def cmd_close_loop_status(args: argparse.Namespace) -> int:
@@ -551,7 +624,10 @@ def cmd_close_loop_run_once(args: argparse.Namespace) -> int:
     except QAConfigError as exc:
         return _error_payload(exc)
     result = run_close_loop(config, case_id=args.case_id, dry_run=args.dry_run)
-    return print_json(result.payload, exit_code=0 if result.status in {"PASS", "FAIL"} else 2)
+    payload = result.payload
+    if not args.dry_run and result.status in {"PASS", "FAIL", "BLOCK"}:
+        payload = _with_auto_wiki(config, payload, event="test_result", latest_run=payload)
+    return print_json(payload, exit_code=0 if result.status in {"PASS", "FAIL"} else 2)
 
 
 def cmd_report_status(args: argparse.Namespace) -> int:
@@ -596,6 +672,40 @@ def cmd_tracker_plan_write(args: argparse.Namespace) -> int:
     return print_json({"status": "ok", "write_gate_result": gate.as_dict(), "planned_writes": []})
 
 
+def _persist_qa_test_run(config: Any, *, status: str, results: list[dict[str, Any]]) -> dict[str, Any]:
+    run_id = utc_now().replace(":", "").replace(".", "")
+    config.paths.state.mkdir(parents=True, exist_ok=True)
+    counts = {"PASS": 0, "FAIL": 0, "BLOCK": 0, "ABORT": 0, "NOT_RUN": 0}
+    for result in results:
+        key = str(result.get("status", "BLOCK"))
+        counts[key] = counts.get(key, 0) + 1
+    report_path = render_status_report(results, config.paths.reports / "status.md")
+    latest_run_json = config.paths.state / "latest-run.json"
+    payload = {
+        "status": status,
+        "run_id": run_id,
+        "case_counts": counts,
+        "results": results,
+        "latest_run_json": _relative_or_str(latest_run_json, config.root),
+        "report_path": _relative_or_str(report_path, config.root),
+        "tracker_writes": {"created": 0, "updated": 0, "blocked_by_gate": 0},
+        "source": "qa-test",
+    }
+    latest_run_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    return payload
+
+
+def _with_auto_wiki(
+    config: Any,
+    payload: dict[str, Any],
+    *,
+    event: str,
+    latest_run: dict[str, Any] | str | Path | None = None,
+) -> dict[str, Any]:
+    wiki = auto_sync_wiki(config, event=event, latest_run=latest_run, source_payload=payload, gitea_write_result=payload)
+    return {**payload, "wiki": wiki}
+
+
 def _contract_payload(contract: Any) -> dict[str, Any]:
     return {
         "case_id": contract.case_id,
@@ -614,9 +724,16 @@ def _error_payload(exc: Exception) -> int:
         if exc.path:
             payload["path"] = exc.path
         return print_json(payload, exit_code=3)
-    if isinstance(exc, (IssueSyncError, GiteaError, CaseGenerationError, PublishError, FixIssueError)):
+    if isinstance(exc, (IssueSyncError, GiteaError, CaseGenerationError, PublishError, FixIssueError, WikiPublishError)):
         return print_json({"status": "error", "error": type(exc).__name__, "message": str(exc)}, exit_code=2)
     return print_json({"status": "error", "error": type(exc).__name__, "message": str(exc)}, exit_code=1)
+
+
+def _relative_or_str(path: Path, root: Path) -> str:
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -696,7 +813,7 @@ def build_parser() -> argparse.ArgumentParser:
     cases_generate.add_argument("--candidate-json", default=None, help="Import Hermes growth-session candidates from JSON after QA-AIST validation")
     cases_generate.add_argument("--feature", default=None, help="Feature or user-visible surface to bias growth generation")
     cases_generate.add_argument("--profile", default="auto", choices=["auto", "cli", "api", "hardware", "repo"], help="Generation profile; auto inspects repo signals")
-    cases_generate.add_argument("--count", type=int, default=5, help="Maximum number of draft cases to generate")
+    cases_generate.add_argument("--count", type=int, default=None, help="Optional maximum number of draft cases. --init defaults to the full seed x dimension map; --growing defaults to 5.")
     cases_generate.add_argument("--issue", type=int, default=None, help=argparse.SUPPRESS)
     cases_generate.add_argument("--force", action="store_true", help="Overwrite existing generated case YAML")
     cases_generate.set_defaults(func=cmd_cases_generate)
@@ -749,6 +866,25 @@ def build_parser() -> argparse.ArgumentParser:
     publish_status_cmd = publish_sub.add_parser("status", help="Show publish plan/apply status")
     _add_root_config(publish_status_cmd)
     publish_status_cmd.set_defaults(func=cmd_publish_status)
+    publish_wiki = publish_sub.add_parser("wiki", help="Plan, apply, status, or render the Gitea Wiki status page")
+    wiki_sub = publish_wiki.add_subparsers(dest="publish_wiki_command", required=True)
+    wiki_plan = wiki_sub.add_parser("plan", help="Create a gated Wiki-only status plan")
+    _add_root_config(wiki_plan)
+    wiki_plan.add_argument("--event", default="manual", choices=["manual", "case_generation", "test_result", "gitea_write_summary"])
+    wiki_plan.add_argument("--latest-run", default=None)
+    wiki_plan.set_defaults(func=cmd_publish_wiki_plan)
+    wiki_apply = wiki_sub.add_parser("apply", help="Apply a gated Wiki-only status plan")
+    _add_root_config(wiki_apply)
+    wiki_apply.add_argument("--plan", default=None)
+    wiki_apply.set_defaults(func=cmd_publish_wiki_apply)
+    wiki_status_cmd = wiki_sub.add_parser("status", help="Show latest Wiki plan/apply status")
+    _add_root_config(wiki_status_cmd)
+    wiki_status_cmd.set_defaults(func=cmd_publish_wiki_status)
+    wiki_render = wiki_sub.add_parser("render", help="Render local Wiki status markdown without remote write")
+    _add_root_config(wiki_render)
+    wiki_render.add_argument("--event", default="manual", choices=["manual", "case_generation", "test_result", "gitea_write_summary"])
+    wiki_render.add_argument("--latest-run", default=None)
+    wiki_render.set_defaults(func=cmd_publish_wiki_render)
 
     fix_issues = sub.add_parser("fix-issues", help="Plan, hand off, and submit PRs for synced Gitea issues")
     fix_sub = fix_issues.add_subparsers(dest="fix_command", required=True)

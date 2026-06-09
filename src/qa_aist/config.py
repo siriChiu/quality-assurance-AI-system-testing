@@ -102,12 +102,13 @@ tracker:
     repo: {_yaml_string(gitea_repo)}
     token_env: {gitea_token_env}
     mcp_issues_json: {workspace}/state/gitea-mcp/issues.json
-    wiki_page: "Test status"
+    wiki_page: "Test status (Siri)"
     branch_prefix: "qa-aist/issue-"
 
 policy:
   deterministic_first: true
   require_write_gate: true
+  auto_publish_wiki: true
   prohibit_closed_issue_comments: true
   prohibit_raw_secrets_in_repo: true
   require_swqa_pattern_expansion: true

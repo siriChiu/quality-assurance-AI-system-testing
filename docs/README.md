@@ -2,7 +2,7 @@
 
 QA-AIST is a reusable tool. Documentation in this repository must describe the product, interfaces, and generic templates only.
 
-Hermes integration is guided and interactive: `/qa-aist ...` responses include `next_actions`, and the skill should present those actions as a Traditional Chinese numbered menu instead of acting like a passive command relay.
+Hermes integration is guided and interactive: `/qa-aist ...` responses include `next_actions`, and the skill should present those actions as a Traditional Chinese numbered menu instead of acting like a passive command relay. When user input is required, the payload includes `hermes_needs_input`; Hermes should call `clarify`.
 
 Project-specific materials belong to the target repository overlay:
 

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 from qa_aist import hermes
 from qa_aist.cli import main
@@ -230,6 +232,8 @@ democtl = "demo.cli:main"
             self.assertEqual(generated["status"], "needs_input")
             self.assertEqual(generated["source"], "init")
             self.assertEqual(generated["mode"], "init")
+            self.assertEqual(generated["generation_limit"], "manual_count_cap")
+            self.assertEqual(generated["requested_count"], 5)
             self.assertEqual(generated["resolved_profile"], "cli")
             self.assertGreaterEqual(generated["analyzed_files_count"], 2)
             self.assertTrue((root / ".qa-aist-project" / "state" / "init-context.json").exists())
@@ -243,7 +247,7 @@ democtl = "demo.cli:main"
             self.assertEqual(first_yaml["source"]["type"], "init")
             self.assertEqual(first_yaml["source"]["method"], "full_repo_swqa_init")
             self.assertTrue(first_yaml["qa_aist"]["review_required_before_run"])
-            self.assertTrue(first_yaml["qa_aist"]["questions"])
+            self.assertEqual(first_yaml["qa_aist"]["questions"], [])
             self.assertIn("risk_controls", first_yaml)
             self.assertIn("init_seed", first_yaml)
 
@@ -281,6 +285,44 @@ democtl = "demo.cli:main"
             self.assertEqual(code, 0)
             self.assertEqual(second["generated_count"], 0)
             self.assertGreaterEqual(second["deduped_count"], 1)
+
+    def test_cases_generate_init_default_uses_full_seed_dimension_map(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.init_gitea_project(tmp)
+            (root / "README.md").write_text("# Demo CLI\n\nUse democtl for status checks.\n", encoding="utf-8")
+            (root / "pyproject.toml").write_text(
+                """[project]
+name = "demo"
+
+[project.scripts]
+democtl = "demo.cli:main"
+""",
+                encoding="utf-8",
+            )
+            (root / "demo").mkdir()
+            (root / "demo" / "cli.py").write_text("def main():\n    return 0\n", encoding="utf-8")
+
+            code, generated = self.run_cli([
+                "cases",
+                "generate",
+                "--root",
+                tmp,
+                "--init",
+                "--feature",
+                "CLI help",
+                "--profile",
+                "cli",
+                "--json",
+            ])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(generated["generation_limit"], "all_init_seed_dimension_pairs")
+            self.assertIsNone(generated["requested_count"])
+            self.assertGreater(generated["generated_count"], 5)
+            self.assertEqual(
+                generated["candidate_count"],
+                generated["generated_count"] + generated["deduped_count"] + generated["skipped_count"],
+            )
 
     def test_cases_generate_from_issues_reports_rename(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -356,6 +398,94 @@ democtl = "demo.cli:main"
             self.assertEqual(pr["status"], "dry_run")
             self.assertEqual(pr["pr_payload"]["head"], "qa-aist/issue-1")
 
+    def test_publish_wiki_render_uses_fixed_sections_and_dynamic_categories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.run_cli(["init-project", "--root", tmp])
+
+            code, payload = self.run_cli(["publish", "wiki", "render", "--root", tmp, "--json"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["page"], "Test status (Siri)")
+            report = (root / ".qa-aist-project" / "reports" / "wiki-status.md").read_text(encoding="utf-8")
+            for heading in [
+                "# Test status (Siri)",
+                "## 總覽",
+                "## 測試結果明細",
+                "## 補充 partial probes（不併入正式 case counters）",
+                "## 活動中的 Gitea issues",
+                "## 已關閉／歷史 issues（不列 active blocker）",
+                "## 六色帽回顧",
+            ]:
+                self.assertIn(heading, report)
+            self.assertIn("### CLI Smoke", report)
+            self.assertTrue((root / ".qa-aist-project" / "rules" / "wiki-categories.yaml").exists())
+
+    def test_cases_generate_init_auto_plans_wiki_without_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.run_cli(["init-project", "--root", tmp])
+
+            code, payload = self.run_cli(["cases", "generate", "--root", tmp, "--init", "--count", "2", "--json"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["wiki"]["auto_sync"]["event"], "case_generation")
+            self.assertEqual(payload["wiki"]["auto_sync"]["status"], "blocked")
+            self.assertTrue((root / ".qa-aist-project" / "state" / "wiki-plan.json").exists())
+            report = (root / ".qa-aist-project" / "reports" / "wiki-status.md").read_text(encoding="utf-8")
+            self.assertIn("NEEDS_INPUT", report)
+            self.assertNotIn("PASS：1", report)
+
+    def test_qa_test_run_one_auto_plans_test_result_wiki(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.run_cli(["init-project", "--root", tmp])
+
+            code, payload = self.run_cli(["qa-test", "run-one", "--root", tmp, "--json", "EXAMPLE-001"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["status"], "PASS")
+            self.assertEqual(payload["wiki"]["auto_sync"]["event"], "test_result")
+            self.assertTrue((root / ".qa-aist-project" / "state" / "latest-run.json").exists())
+            self.assertTrue((root / ".qa-aist-project" / "state" / "wiki-plan.json").exists())
+            report = (root / ".qa-aist-project" / "reports" / "wiki-status.md").read_text(encoding="utf-8")
+            self.assertIn("| EXAMPLE-001 | CLI Smoke | PASS |", report)
+
+    def test_publish_wiki_apply_blocks_mcp_backend_and_missing_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.init_gitea_mcp_project(tmp)
+            self.write_issue_case(root)
+            self.run_cli(["qa-test", "run-one", "--root", tmp, "ISSUE-1"])
+
+            code, plan = self.run_cli(["publish", "wiki", "plan", "--root", tmp, "--event", "test_result", "--json"])
+            self.assertEqual(code, 0)
+            self.assertEqual(plan["status"], "blocked")
+            self.assertIn("gitea_mcp_write_not_supported", plan["blocked_reasons"])
+
+            code, apply_result = self.run_cli(["publish", "wiki", "apply", "--root", tmp, "--json"])
+            self.assertEqual(code, 4)
+            self.assertEqual(apply_result["status"], "blocked")
+            self.assertIn("gitea_mcp_write_not_supported", apply_result["blocked_reasons"])
+
+    def test_publish_wiki_apply_http_token_updates_only_wiki(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.init_gitea_project(tmp)
+            self.write_issue_case(root)
+            self.run_cli(["qa-test", "run-one", "--root", tmp, "ISSUE-1"])
+
+            with patch.dict(os.environ, {"QA_AIST_GITEA_TOKEN": "test-token"}, clear=False):
+                with patch("qa_aist.wiki.GiteaClient.update_wiki_page", return_value={"ok": True}) as update_wiki:
+                    code, plan = self.run_cli(["publish", "wiki", "plan", "--root", tmp, "--event", "test_result", "--json"])
+                    self.assertEqual(code, 0)
+                    self.assertEqual(plan["status"], "ready")
+
+                    code, apply_result = self.run_cli(["publish", "wiki", "apply", "--root", tmp, "--json"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(apply_result["status"], "ok")
+            self.assertEqual(apply_result["applied"][0]["type"], "wiki_update")
+            update_wiki.assert_called_once()
+
     def test_hermes_new_workflow_commands_and_qa_test_without_subcommand(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self.init_gitea_project(tmp)
@@ -385,7 +515,17 @@ democtl = "demo.cli:main"
             self.assertEqual(init["status"], "needs_input")
             self.assertEqual(init["payload"]["source"], "init")
             self.assertIn("init_context:", init["chat_response"])
-            self.assertIn("questions:", init["chat_response"])
+            self.assertIn("missing_inputs:", init["chat_response"])
+            self.assertTrue(init["payload"]["input_required"])
+            self.assertEqual(init["payload"]["interaction"]["type"], "needs_input")
+            self.assertEqual(init["payload"]["interaction"]["handler"], "clarify")
+            self.assertEqual(init["payload"]["hermes_needs_input"]["status"], "required")
+            self.assertEqual(init["payload"]["hermes_needs_input"]["title"], "QA-AIST clarify")
+            self.assertEqual(init["payload"]["hermes_needs_input"]["preferred_mechanism"], "clarify")
+            self.assertTrue(init["payload"]["hermes_needs_input"]["questions"])
+            self.assertLessEqual(len(init["payload"]["hermes_needs_input"]["questions"]), 4)
+            self.assertNotIn("Hermes needs your input", init["chat_response"])
+            self.assertIn("需要補充資訊", init["chat_response"])
             self.assertTrue(any(action.get("kind") == "ask_user" for action in init["payload"]["next_actions"]))
 
     def test_hermes_mcp_snapshot_error_guides_next_action(self) -> None:

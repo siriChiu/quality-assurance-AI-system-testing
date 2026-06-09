@@ -167,6 +167,21 @@ def render_chat_response(payload: dict[str, Any], *, exit_code: int = 0) -> str:
         lines.append(f"         latest_run_json: {payload.get('latest_run_json')}")
     if payload.get("report_path"):
         lines.append(f"         report: {payload.get('report_path')}")
+    if isinstance(payload.get("wiki"), dict):
+        wiki = payload["wiki"]
+        auto = wiki.get("auto_sync") if isinstance(wiki.get("auto_sync"), dict) else {}
+        if auto:
+            lines.append(f"         wiki.auto_sync: {auto.get('status')}")
+        if wiki.get("page"):
+            lines.append(f"         wiki.page: {wiki.get('page')}")
+        if wiki.get("plan_path"):
+            lines.append(f"         wiki.plan: {wiki.get('plan_path')}")
+        if wiki.get("apply_result_path"):
+            lines.append(f"         wiki.apply: {wiki.get('apply_result_path')}")
+        if wiki.get("blocked_by_gate") is not None:
+            lines.append(f"         wiki.blocked_by_gate: {wiki.get('blocked_by_gate')}")
+    elif payload.get("page") and ("wiki" in str(payload.get("schema", "")) or "wiki" in str(payload.get("event", "")) or payload.get("report_path") == ".qa-aist-project/reports/wiki-status.md"):
+        lines.append(f"         wiki.page: {payload.get('page')}")
     if isinstance(payload.get("tracker_writes"), dict):
         blocked = payload["tracker_writes"].get("blocked_by_gate")
         lines.append(f"         tracker_writes.blocked_by_gate: {blocked}")
@@ -206,6 +221,10 @@ def render_chat_response(payload: dict[str, Any], *, exit_code: int = 0) -> str:
         attention = _attention_check_lines(payload["checks"])
         if attention:
             lines.extend(attention)
+
+    needs_input = payload.get("hermes_needs_input")
+    if isinstance(needs_input, dict) and needs_input.get("status") == "required":
+        lines.extend(["", *_needs_input_lines(needs_input)])
 
     first_result = _first_result(payload)
     if first_result:
@@ -278,16 +297,157 @@ def _next_actions_lines(next_actions: list[Any]) -> list[str]:
 
 def _with_next_actions(payload: dict[str, Any], engine_argv: list[str], exit_code: int) -> dict[str, Any]:
     if isinstance(payload.get("next_actions"), list):
-        return payload
+        return _with_hermes_needs_input(payload)
     actions = suggest_next_actions(payload, engine_argv, exit_code)
     if not actions:
+        return _with_hermes_needs_input(payload)
+    return _with_hermes_needs_input({**payload, "next_actions": actions})
+
+
+def _with_hermes_needs_input(payload: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(payload.get("hermes_needs_input"), dict):
         return payload
-    return {**payload, "next_actions": actions}
+    questions = _collect_needs_input_questions(payload)
+    if not questions:
+        return payload
+    needs_input = {
+        "status": "required",
+        "title": "QA-AIST clarify",
+        "language": "zh-Hant",
+        "mode": "questionnaire",
+        "preferred_mechanism": "clarify",
+        "clarify": {
+            "tool": "clarify",
+            "mode": "one_question_at_a_time",
+            "question_field": "prompt",
+        },
+        "questions": questions,
+        "answer_format": "請逐題回覆；可用題號回答，也可以直接補充 fixture、輸入檔、成功條件或不可碰範圍。",
+        "ui_hint": "Call Hermes clarify for each question. Do not render a separate needs-input title.",
+    }
+    return {
+        **payload,
+        "input_required": True,
+        "interaction": {
+            "type": "needs_input",
+            "title": "QA-AIST clarify",
+            "field": "payload.hermes_needs_input",
+            "handler": "clarify",
+        },
+        "hermes_needs_input": needs_input,
+    }
+
+
+def _needs_input_lines(needs_input: dict[str, Any]) -> list[str]:
+    lines = ["需要補充資訊："]
+    questions = needs_input.get("questions")
+    if isinstance(questions, list):
+        for index, item in enumerate([q for q in questions if isinstance(q, dict)][:8], start=1):
+            case_suffix = f" [{item.get('case_id')}]" if item.get("case_id") else ""
+            prompt = item.get("prompt") or item.get("label") or "請補充需要的資訊。"
+            lines.append(f"{index}.{case_suffix} {prompt}")
+        if len(questions) > 8:
+            lines.append(f"... 還有 {len(questions) - 8} 題，請先回答前面的必要資訊。")
+    answer_format = needs_input.get("answer_format")
+    if answer_format:
+        lines.append(str(answer_format))
+    return lines
+
+
+def _collect_needs_input_questions(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    questions: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(prompt: Any, *, source: str, case_id: Any = None, label: Any = None) -> None:
+        prompt_text = str(prompt or "").strip()
+        if not prompt_text:
+            return
+        key = f"{source}:{case_id or ''}:{prompt_text}"
+        if key in seen:
+            return
+        seen.add(key)
+        item: dict[str, Any] = {
+            "id": _question_id(source, case_id, len(questions) + 1),
+            "prompt": prompt_text,
+            "source": source,
+            "required": True,
+        }
+        if case_id:
+            item["case_id"] = str(case_id)
+        if label:
+            item["label"] = str(label)
+        questions.append(item)
+
+    _collect_question_groups(payload.get("questions"), source="payload.questions", add=add)
+    _collect_question_groups(payload.get("drafts"), source="draft.questions", add=add, nested_key="questions")
+
+    missing_inputs = payload.get("missing_inputs")
+    if isinstance(missing_inputs, list):
+        for item in missing_inputs:
+            add(_missing_input_prompt(item), source="payload.missing_inputs")
+
+    next_actions = payload.get("next_actions")
+    if isinstance(next_actions, list):
+        for action in next_actions:
+            if isinstance(action, dict) and action.get("kind") == "ask_user":
+                add(action.get("label") or "請補充使用者決策或設定資訊。", source="next_actions.ask_user")
+
+    if str(payload.get("status") or "").lower() == "needs_input" and not questions:
+        add("請補齊 QA-AIST 回報的必要測試資訊後再繼續。", source="payload.status")
+    return questions
+
+
+def _missing_input_prompt(item: Any) -> str:
+    if isinstance(item, dict):
+        prompt = item.get("prompt") or item.get("message") or item.get("id")
+        return str(prompt or "").strip()
+    text = str(item or "").strip()
+    if not text:
+        return ""
+    if text.startswith(("請", "是否", "如果", "目前")):
+        return text
+    return f"請補齊測試需要的資訊：{text}"
+
+
+def _collect_question_groups(
+    value: Any,
+    *,
+    source: str,
+    add: Any,
+    nested_key: str | None = None,
+) -> None:
+    if isinstance(value, str):
+        add(value, source=source)
+        return
+    if not isinstance(value, list):
+        return
+    for group in value:
+        if isinstance(group, str):
+            add(group, source=source)
+            continue
+        if not isinstance(group, dict):
+            continue
+        case_id = group.get("case_id") or group.get("id")
+        candidates = group.get(nested_key) if nested_key else group.get("questions")
+        if isinstance(candidates, list):
+            for question in candidates:
+                add(question, source=source, case_id=case_id)
+        elif isinstance(candidates, str):
+            add(candidates, source=source, case_id=case_id)
+
+
+def _question_id(source: str, case_id: Any, index: int) -> str:
+    raw = f"{source}-{case_id or 'general'}-{index}"
+    chars = []
+    for char in raw.lower():
+        chars.append(char if char.isalnum() else "_")
+    return "_".join(part for part in "".join(chars).split("_") if part)[:80] or f"question_{index}"
 
 
 def suggest_next_actions(payload: dict[str, Any], engine_argv: list[str], exit_code: int = 0) -> list[dict[str, Any]]:
     args = _positional_args(engine_argv)
     current = " ".join(args[:2]) if len(args) >= 2 else (args[0] if args else "")
+    current3 = " ".join(args[:3]) if len(args) >= 3 else current
     status = str(payload.get("status") or "").lower()
     error = str(payload.get("error") or "")
     message = str(payload.get("message") or "")
@@ -415,11 +575,13 @@ def suggest_next_actions(payload: dict[str, Any], engine_argv: list[str], exit_c
             ]
         if status == "needs_input":
             return [
+                _next("查看 Wiki draft 狀態", "/qa-aist publish wiki status"),
                 _next("審查待補資訊", "/qa-aist cases review"),
                 {"label": "逐題回答 fixture、輸入檔、成功條件與不可碰範圍", "kind": "ask_user"},
                 _next("補完後驗證 cases", "/qa-aist cases validate"),
             ]
         return [
+            _next("查看 Wiki draft 狀態", "/qa-aist publish wiki status"),
             _next("審查產生的 cases", "/qa-aist cases review"),
             _next("驗證 cases", "/qa-aist cases validate"),
             _next("列出可跑測試", "/qa-aist qa-test list"),
@@ -450,25 +612,49 @@ def suggest_next_actions(payload: dict[str, Any], engine_argv: list[str], exit_c
             return [_next("列出 cases", "/qa-aist qa-test list")]
         if args[:2] in (["qa-test", "run"], ["qa-test", "run-one"]):
             return [
+                _next("查看 Wiki 自動同步狀態", "/qa-aist publish wiki status"),
                 _next("產生報告", "/qa-aist report status"),
-                _next("產生 publish plan", "/qa-aist publish plan", confirm=True),
+                _next("手動重建 Wiki plan", "/qa-aist publish wiki plan", confirm=True),
                 _next("查看 latest run JSON", "/qa-aist report json"),
             ]
     if current == "close-loop run-once":
         return [
+            _next("查看 Wiki 自動同步狀態", "/qa-aist publish wiki status"),
             _next("產生報告", "/qa-aist report status"),
-            _next("產生 publish plan", "/qa-aist publish plan", confirm=True),
+            _next("手動重建 Wiki plan", "/qa-aist publish wiki plan", confirm=True),
         ]
     if current == "report status":
         return [
-            _next("產生 publish plan", "/qa-aist publish plan", confirm=True),
+            _next("更新 Wiki plan", "/qa-aist publish wiki plan", confirm=True),
             _next("查看 latest run JSON", "/qa-aist report json"),
+        ]
+    if current3 == "publish wiki plan":
+        if payload.get("status") == "ready":
+            return [
+                _next("套用 Wiki 更新", "/qa-aist publish wiki apply", confirm=True, destructive=True),
+                _next("查看 Wiki 狀態", "/qa-aist publish wiki status"),
+            ]
+        return [
+            _next("查看 Wiki 狀態", "/qa-aist publish wiki status"),
+            _next("執行 doctor 檢查 token/backend/gate", "/qa-aist doctor"),
+        ]
+    if current3 == "publish wiki apply":
+        if status == "blocked":
+            return [
+                _next("查看 Wiki 狀態", "/qa-aist publish wiki status"),
+                _next("重新產生 Wiki plan", "/qa-aist publish wiki plan", confirm=True),
+            ]
+        return [_next("查看 Wiki 狀態", "/qa-aist publish wiki status")]
+    if current3 in {"publish wiki status", "publish wiki render"}:
+        return [
+            _next("重建 Wiki plan", "/qa-aist publish wiki plan", confirm=True),
+            _next("只重新 render 本地 Wiki", "/qa-aist publish wiki render"),
         ]
     if current == "publish plan":
         if payload.get("status") == "ready" or payload.get("blocked_by_gate") == 0:
             return [
                 _next("套用 Gitea 寫入計畫", "/qa-aist publish apply", confirm=True, destructive=True),
-                _next("查看 publish 狀態", "/qa-aist publish status"),
+                _next("查看 Wiki 狀態", "/qa-aist publish wiki status"),
             ]
         return [
             _next("查看 publish 狀態", "/qa-aist publish status"),
@@ -499,6 +685,7 @@ def suggest_next_actions(payload: dict[str, Any], engine_argv: list[str], exit_c
     if current == "fix-issues submit-pr":
         return [
             _next("查看 PR lifecycle 狀態", "/qa-aist fix-issues status"),
+            _next("查看 Wiki 自動同步狀態", "/qa-aist publish wiki status"),
             _next("產生/更新報告", "/qa-aist report status"),
         ]
     return []
@@ -570,7 +757,7 @@ def build_agent_manifest(*, wrapper_path: str | None = None, runner_command: str
             f"{PRIMARY_PREFIX} cases generate --growing",
             f"{PRIMARY_PREFIX} cases generate --init --feature <name>",
             f"{PRIMARY_PREFIX} cases generate --init --profile auto|cli|api|hardware|repo",
-            f"{PRIMARY_PREFIX} cases generate --init --count 5",
+            f"{PRIMARY_PREFIX} cases generate --init --count <max>",
             f"{PRIMARY_PREFIX} cases generate --growing --candidate-json <path>",
             f"{PRIMARY_PREFIX} cases review",
             f"{PRIMARY_PREFIX} cases validate",
@@ -580,6 +767,10 @@ def build_agent_manifest(*, wrapper_path: str | None = None, runner_command: str
             f"{PRIMARY_PREFIX} qa-test run",
             f"{PRIMARY_PREFIX} qa-test run-one <case_id>",
             f"{PRIMARY_PREFIX} qa-test help",
+            f"{PRIMARY_PREFIX} publish wiki plan",
+            f"{PRIMARY_PREFIX} publish wiki apply",
+            f"{PRIMARY_PREFIX} publish wiki status",
+            f"{PRIMARY_PREFIX} publish wiki render",
             f"{PRIMARY_PREFIX} publish plan",
             f"{PRIMARY_PREFIX} publish apply",
             f"{PRIMARY_PREFIX} publish status",
@@ -609,7 +800,10 @@ def build_agent_manifest(*, wrapper_path: str | None = None, runner_command: str
             "chat_response_field": "chat_response",
             "payload_field": "payload",
             "next_actions_field": "payload.next_actions",
-            "interaction_style": "guided_menu",
+            "needs_input_field": "payload.hermes_needs_input",
+            "input_required_field": "payload.input_required",
+            "interaction_field": "payload.interaction",
+            "interaction_style": "guided_menu_with_needs_input",
         },
     }
 
@@ -695,7 +889,7 @@ This SKILL.md is the current Hermes integration for QA-AIST.
 
 It makes `/qa-aist ...` visible to Hermes as a dynamic skill slash command, then instructs the Hermes agent to call the deterministic QA-AIST dispatcher. This is skill-mediated. It is not a native Hermes router, not a pre-LLM command hook, and not a Python package autoload mechanism.
 
-QA-AIST is responsible for issue sync, case contracts, test execution, evidence, write gate, Gitea wiki/issues publishing, and Gitea PR creation. Hermes may answer questions and make code changes, but it must not bypass QA-AIST for tracker/wiki/PR decisions.
+QA-AIST is responsible for issue sync, case contracts, test execution, evidence, write gate, automatic Gitea Wiki status sync, gated issue publishing, and Gitea PR creation. Hermes may answer questions and make code changes, but it must not bypass QA-AIST for tracker/wiki/PR decisions.
 
 ## Required Behavior For Every `/qa-aist` Turn
 
@@ -706,8 +900,9 @@ When the user invokes `/qa-aist <arguments>`, you must:
 3. Execute the dispatcher through the terminal. Do not answer from memory.
 4. Read the returned JSON.
 5. Reply primarily with the JSON `chat_response` field.
-6. If `chat_response` is missing, summarize `status`, `payload.status`, `payload.error`, `payload.message`, `latest_run_json`, `report_path`, and evidence paths.
-7. Preserve failures. If the dispatcher exits non-zero or emits invalid JSON, tell the user the exit code and useful stderr/stdout details.
+6. If `payload.hermes_needs_input.status == "required"` or `payload.input_required == true`, call Hermes `clarify` one question at a time using `payload.hermes_needs_input.questions[]`; do not downgrade it to a normal next-action menu.
+7. If `chat_response` is missing, summarize `status`, `payload.status`, `payload.error`, `payload.message`, `latest_run_json`, `report_path`, and evidence paths.
+8. Preserve failures. If the dispatcher exits non-zero or emits invalid JSON, tell the user the exit code and useful stderr/stdout details.
 
 Gitea MCP rule: if the product repo config uses `tracker.gitea.backend: mcp`, you may use Hermes' configured Gitea MCP tooling only to read issue data before `/qa-aist issues sync`. Write the raw MCP issue result as JSON to `.qa-aist-project/state/gitea-mcp/issues.json`, unless `.qa-aist.yaml` or `QA_AIST_GITEA_MCP_ISSUES_JSON` specifies another path. Then run the QA-AIST dispatcher normally. Do not treat the MCP read itself as a completed sync.
 
@@ -726,6 +921,17 @@ Setup rule: `/qa-aist setup` auto-detects `git remote origin`. If the remote loo
 
 Do not behave like a passive command relay. After every QA-AIST turn, guide the user toward the next useful step in Traditional Chinese.
 
+Hermes clarify / needs-input contract:
+
+- `payload.input_required: true` means QA-AIST needs a user answer before the workflow should continue.
+- `payload.interaction.type: "needs_input"` points Hermes to the interaction type.
+- `payload.interaction.handler: "clarify"` says the Hermes agent should call `clarify`, not invent a custom prompt flow.
+- `payload.hermes_needs_input.preferred_mechanism` is `clarify`.
+- `payload.hermes_needs_input.questions[]` is the canonical question list. Each item has `id`, `prompt`, `source`, `required`, and sometimes `case_id`.
+- Call `clarify` once per question, in order. Since `clarify` handles one prompt at a time, start with the first unanswered required question.
+- If `clarify` is unavailable in the current Hermes runtime, render the same questions in chat under a short Traditional Chinese heading, then wait for the user's answer.
+- Do not run `qa-test`, publish, create issues, or submit PRs from a draft that still has unanswered needs-input questions.
+
 Use this pattern:
 
 1. Briefly explain what just happened.
@@ -733,7 +939,7 @@ Use this pattern:
 3. Ask the user to choose a number, approve the recommended action, or type another `/qa-aist ...` command.
 4. If the next action is safe and read-only, you may offer to run it immediately.
 5. If the next action writes files, runs tests, uses Gitea MCP, publishes to Gitea, pushes a branch, or creates a PR, ask for confirmation first.
-6. If the command returns questions or missing inputs, ask the questions one at a time in Traditional Chinese and wait for the user's answer.
+6. If the command returns `payload.hermes_needs_input`, call `clarify` for the listed questions one at a time in Traditional Chinese and wait for the user's answer.
 
 Preferred menu style:
 
@@ -753,12 +959,14 @@ Recommended interaction by situation:
 - After `/qa-aist doctor` warning: explain the warning and suggest the smallest check that resolves it.
 - After `gitea_mcp_snapshot_missing`: offer to use Hermes Gitea MCP read-only fetch, write the snapshot, then rerun `/qa-aist issues sync`.
 - After `/qa-aist issues sync`: suggest `/qa-aist issues dedupe` and `/qa-aist cases generate --growing`.
-- If the user asks for first-time test ideas or has no cases yet, run `/qa-aist cases generate --init`; it scans README, code, package metadata, existing runners, existing cases, and project rules to create an initial SWQA test map.
+- If the user asks for first-time test ideas or has no cases yet, run `/qa-aist cases generate --init`; it acts as an opinionated SWQA engineer, scans README, code, package metadata, existing runners, existing cases, and project rules, then creates an initial test map across functional, positive, negative, boundary, invalid-input, side-effect-safe, and stress/timeout-risk coverage. It should ask only a few blocking questions through `clarify`.
 - If the user asks for follow-up ideas after issues/PRs/runs changed, run `/qa-aist cases generate --growing`; it creates incremental growth draft cases from repo, issues, PR references, latest run, reports, existing cases, and runners.
 - If the user types bare `/qa-aist cases generate`, run the dispatcher and present its mode-selection error; do not silently choose a mode.
-- After `cases generate --init` or `cases generate --growing` returns questions: ask the questions interactively before treating the draft as runnable.
+- After `cases generate --init` or `cases generate --growing` returns `payload.hermes_needs_input`: call `clarify` one question at a time before treating the draft as runnable.
 - After `/qa-aist qa-test list`: suggest dry-run or running one selected case, not all cases by default.
-- After a test run: suggest `/qa-aist report status` and `/qa-aist publish plan`.
+- After `cases generate --init` or `cases generate --growing`: QA-AIST auto-plans the Wiki draft/missing-input status. Suggest `/qa-aist publish wiki status`.
+- After a test run: QA-AIST auto-plans or applies the Wiki test-result status. Suggest `/qa-aist publish wiki status` and `/qa-aist report status`.
+- If the user explicitly wants to update only the Wiki, use `/qa-aist publish wiki plan`, then `/qa-aist publish wiki apply` after confirmation. This path must never create issue comments, new issues, or PRs.
 - Before `/qa-aist publish apply` or `/qa-aist fix-issues submit-pr`: ask for explicit confirmation and summarize what will be written remotely.
 
 Use this command shape:
@@ -780,11 +988,14 @@ Examples:
 {runner_command} --root "$PWD" /qa-aist issues sync
 {runner_command} --root "$PWD" /qa-aist cases generate --init
 {runner_command} --root "$PWD" /qa-aist cases generate --growing
-{runner_command} --root "$PWD" /qa-aist cases generate --init --feature "CLI help" --profile cli --count 5
+{runner_command} --root "$PWD" /qa-aist cases generate --init --feature "CLI help" --profile cli
 {runner_command} --root "$PWD" /qa-aist cases generate --growing --candidate-json .qa-aist-project/state/growth-candidates.json
 {runner_command} --root "$PWD" /qa-aist qa-test list
 {runner_command} --root "$PWD" /qa-aist qa-test
 {runner_command} --root "$PWD" /qa-aist qa-test run-one EXAMPLE-001
+{runner_command} --root "$PWD" /qa-aist publish wiki status
+{runner_command} --root "$PWD" /qa-aist publish wiki plan
+{runner_command} --root "$PWD" /qa-aist publish wiki apply
 {runner_command} --root "$PWD" /qa-aist publish plan
 {runner_command} --root "$PWD" /qa-aist publish apply
 {runner_command} --root "$PWD" /qa-aist fix-issues plan --issue 123
@@ -810,7 +1021,7 @@ Examples:
 - `/qa-aist cases generate --growing`
 - `/qa-aist cases generate --init --feature <name>`
 - `/qa-aist cases generate --init --profile auto|cli|api|hardware|repo`
-- `/qa-aist cases generate --init --count 5`
+- `/qa-aist cases generate --init --count <max>`
 - `/qa-aist cases generate --growing --candidate-json <path>`
 - `/qa-aist cases review`
 - `/qa-aist cases validate`
@@ -820,6 +1031,10 @@ Examples:
 - `/qa-aist qa-test run`
 - `/qa-aist qa-test run-one <case_id>`
 - `/qa-aist qa-test help`
+- `/qa-aist publish wiki plan`
+- `/qa-aist publish wiki apply`
+- `/qa-aist publish wiki status`
+- `/qa-aist publish wiki render`
 - `/qa-aist publish plan`
 - `/qa-aist publish apply`
 - `/qa-aist publish status`
@@ -835,14 +1050,15 @@ Examples:
 
 ## Safety Rules
 
-- Do not directly write Gitea comments, issues, wiki pages, or PRs. Remote writes are allowed only by `/qa-aist publish apply` or `/qa-aist fix-issues submit-pr` after QA-AIST write gate passes.
+- Do not directly write Gitea comments, issues, wiki pages, or PRs. Wiki remote writes are allowed only by QA-AIST auto-sync or `/qa-aist publish wiki apply` after the Wiki gate passes. Issue/wiki mixed publishing remains behind `/qa-aist publish apply`; PR creation remains behind `/qa-aist fix-issues submit-pr`.
+- Automatic Wiki sync must only update the configured Wiki page. It must not create issue comments, create issues, or open PRs.
 - Do not use Gitea MCP for remote writes. In QA-AIST V1, `tracker.gitea.backend: mcp` is read-only and only feeds `/qa-aist issues sync` through a local JSON snapshot.
 - Do not reorder the QA-AIST close-loop pipeline.
 - Do not invent evidence paths.
 - Do not print raw secrets.
 - Do not run arbitrary shell commands assembled from chat. The only command you should run for `/qa-aist ...` is the dispatcher command above with the user's QA-AIST arguments.
 - Do not bypass `write_gate`, issue sync, duplicate checks, or case contracts, even if the user asks you to write tracker output directly.
-- If `/qa-aist cases generate --init` or `/qa-aist cases generate --growing` returns questions, ask those questions in Traditional Chinese and wait for answers before treating a draft as runnable.
+- If `/qa-aist cases generate --init` or `/qa-aist cases generate --growing` returns `payload.hermes_needs_input`, call `clarify` one question at a time in Traditional Chinese, and wait for answers before treating a draft as runnable.
 - If you open a separate growth session/agent, it may only write candidate JSON for `/qa-aist cases generate --growing --candidate-json <path>`; it must not directly edit case YAML, tracker, wiki, PRs, or reports.
 - If the user types `/qa-aist qa-test` without a subcommand, show the QA test help instead of guessing.
 
@@ -929,7 +1145,7 @@ Filtering rule:
 - Exclude `html_url` containing `/pulls/` or entries carrying explicit PR markers.
 - Preserve real issue bodies/comments when available; closed issues may be minimal because QA-AIST only needs them to remove stale mirrors.
 
-Remote write rule: never use Gitea MCP for comments/wiki/PR writes in QA-AIST. Only `/qa-aist publish apply` and `/qa-aist fix-issues submit-pr` may perform gated writes.
+Remote write rule: never use Gitea MCP for comments/wiki/PR writes in QA-AIST. Only QA-AIST auto Wiki sync, `/qa-aist publish wiki apply`, legacy `/qa-aist publish apply`, and `/qa-aist fix-issues submit-pr` may perform gated writes.
 """
 
 
@@ -1022,7 +1238,7 @@ def _overview_help_payload() -> dict[str, Any]:
         {"command": "/qa-aist issues dedupe", "purpose": "檢查本地 active issues 是否疑似重複"},
         {"command": "/qa-aist cases generate --init", "purpose": "首次全 repo SWQA 建案，依 README/code/metadata 產生 draft cases"},
         {"command": "/qa-aist cases generate --growing", "purpose": "依最新 issues/PR/latest-run/reports 狀態擴散 draft cases"},
-        {"command": "/qa-aist cases generate --init --feature \"CLI help\" --profile cli --count 5", "purpose": "指定功能、profile 與數量來引導初始建案"},
+        {"command": "/qa-aist cases generate --init --feature \"CLI help\" --profile cli", "purpose": "指定功能與 profile，引導完整初始建案"},
         {"command": "/qa-aist cases generate --growing --candidate-json <path>", "purpose": "匯入 Hermes growth session 候選 JSON，經 engine 驗證後寫入 draft"},
         {"command": "/qa-aist cases review", "purpose": "查看 draft cases 與待回答問題"},
         {"command": "/qa-aist cases validate", "purpose": "驗證 generated case YAML 是否可被 qa-test 執行"},
@@ -1032,9 +1248,13 @@ def _overview_help_payload() -> dict[str, Any]:
         {"command": "/qa-aist qa-test help", "purpose": "等同 /qa-aist help qa-test"},
         {"command": "/qa-aist qa-test run-one <case_id>", "purpose": "只跑一個 case，最適合第一次測試"},
         {"command": "/qa-aist qa-test run", "purpose": "跑全部 case"},
-        {"command": "/qa-aist publish plan", "purpose": "把 latest run 轉成 wiki/issue write plan 並跑 gate"},
-        {"command": "/qa-aist publish apply", "purpose": "gate 通過後真的寫 Gitea wiki/issues"},
-        {"command": "/qa-aist publish status", "purpose": "查看最新 publish plan/apply 結果"},
+        {"command": "/qa-aist publish wiki status", "purpose": "查看自動 Wiki 狀態同步結果"},
+        {"command": "/qa-aist publish wiki plan", "purpose": "手動產生 Wiki-only gated plan"},
+        {"command": "/qa-aist publish wiki apply", "purpose": "gate 通過後只更新 Gitea Wiki，不建立 issue/PR"},
+        {"command": "/qa-aist publish wiki render", "purpose": "只重新產生本地 Wiki markdown"},
+        {"command": "/qa-aist publish plan", "purpose": "相容舊版：把 latest run 轉成 wiki/issue write plan 並跑 gate"},
+        {"command": "/qa-aist publish apply", "purpose": "相容舊版：gate 通過後寫 Gitea wiki/issues"},
+        {"command": "/qa-aist publish status", "purpose": "查看舊版 publish plan/apply 結果"},
         {"command": "/qa-aist fix-issues plan --issue <id>", "purpose": "修復前同步/去重/檢查 open issue"},
         {"command": "/qa-aist fix-issues run --issue <id>", "purpose": "產生給 Hermes 的最小修復 handoff"},
         {"command": "/qa-aist fix-issues submit-pr --issue <id>", "purpose": "push branch 並用 Gitea API 建 PR"},
@@ -1120,8 +1340,8 @@ def _overview_help_text(commands: list[dict[str, str]]) -> str:
             "4. `/qa-aist cases generate --init`：首次分析 README、程式碼、metadata 與 rules，建立 SWQA draft cases。",
             "5. `/qa-aist cases review`：回答缺少的測試輸入問題。",
             "6. `/qa-aist qa-test run-one <case_id>`：先跑一個 case。",
-            "7. `/qa-aist publish plan`：產生 wiki/issues 寫入計畫並通過 gate。",
-            "8. `/qa-aist publish apply`：明確要求後才真的寫 Gitea。",
+            "7. 測試或產生 cases 後，QA-AIST 會自動更新本地 Wiki plan；查看 `/qa-aist publish wiki status`。",
+            "8. 若需要手動更新遠端 Wiki，跑 `/qa-aist publish wiki plan` 再確認 `/qa-aist publish wiki apply`。",
             "",
             "常用指令：",
             *command_lines,
@@ -1150,14 +1370,15 @@ def _workflow_help_payload(topic: str) -> dict[str, Any]:
             "如果輸出 questions，Hermes 必須用繁中問答補齊 fixture、輸入檔、成功條件和副作用邊界。",
         ],
         "publish": [
-            "publish 用來把 latest run 變成 Gitea wiki/issues 寫入。",
-            "`publish plan` 只產生 gated plan；`publish apply` 才真的寫遠端。",
-            "gate blocked 時，Hermes 不得自己改用 curl 或 API 繞過。",
+            "publish wiki 是主要狀態看板，用來把 draft cases、missing input、latest run 與 Gitea write summary 更新到單一 Wiki 頁。",
+            "`publish wiki plan` 只產生 gated Wiki plan；`publish wiki apply` 只更新 Wiki，不建立 issue comments、issues 或 PR。",
+            "`publish plan/apply/status` 保留為相容舊版的 mixed wiki/issues 發布流程。",
+            "gate blocked 時，Hermes 不得自己改用 curl、Gitea MCP 或 API 繞過。",
         ],
         "fix-issues": [
             "fix-issues 用來修復 synced open issue 並送 PR。",
             "先跑 `fix-issues plan --issue <id>` 確認 sync、dedupe、case/evidence 狀態。",
-            "Hermes 修碼後再跑測試、publish plan，最後 `submit-pr` 建 Gitea PR。",
+            "Hermes 修碼後再跑測試、查看 `publish wiki status`，若需要 issue 發布再跑 legacy `publish plan`，最後 `submit-pr` 建 Gitea PR。",
         ],
     }
     lines = topic_text[topic]
@@ -1218,6 +1439,7 @@ def _positional_args(argv: list[str]) -> list[str]:
         "--config",
         "--count",
         "--expected-contract-hash",
+        "--event",
         "--feature",
         "--issue",
         "--issues-json",

@@ -29,12 +29,13 @@ tracker:
     repo: "owner/repo"
     token_env: QA_AIST_GITEA_TOKEN
     mcp_issues_json: .qa-aist-project/state/gitea-mcp/issues.json
-    wiki_page: "Test status"
+    wiki_page: "Test status (Siri)"
     branch_prefix: "qa-aist/issue-"
 
 policy:
   deterministic_first: true
   require_write_gate: true
+  auto_publish_wiki: true
   prohibit_closed_issue_comments: true
   prohibit_raw_secrets_in_repo: true
   require_swqa_pattern_expansion: true
@@ -55,7 +56,7 @@ The SWQA policy fields require every confirmed bug to be expanded into sibling-s
 
 | Backend | Purpose | Token required for `issues sync` | Remote writes |
 |---|---|---:|---|
-| `http` | QA-AIST calls Gitea REST API directly | yes, via `token_env` | yes, only through gated `publish apply` / `submit-pr` |
+| `http` | QA-AIST calls Gitea REST API directly | yes, via `token_env` | yes, automatic gated Wiki sync, `publish wiki apply`, legacy `publish apply`, and `submit-pr` |
 | `mcp` | Hermes uses Gitea MCP read tooling, writes a JSON snapshot, then QA-AIST imports it | no | no, blocked in V1 |
 
 MCP read-only config:
@@ -72,6 +73,25 @@ tracker:
 When `backend: mcp`, Hermes must fetch Gitea issues through its configured Gitea MCP tool and write the raw issue JSON to `tracker.gitea.mcp_issues_json` before running `/qa-aist issues sync`. The environment variable `QA_AIST_GITEA_MCP_ISSUES_JSON` can override that path.
 
 Do not use Gitea MCP to write comments, wiki pages, issues, or PRs directly. QA-AIST V1 only accepts MCP as a read input for issue sync.
+
+## Wiki Status
+
+`/qa-aist setup` creates `.qa-aist-project/rules/wiki-categories.yaml` and defaults `tracker.gitea.wiki_page` to `Test status (Siri)`.
+
+Wiki auto-sync is enabled by default through `policy.auto_publish_wiki: true`. It runs after case generation, test execution, close-loop execution, and successful Gitea writes. Remote Wiki writes require:
+
+- `tracker.provider: gitea`
+- `tracker.gitea.backend: http`
+- `tracker.gitea.base_url`
+- `tracker.gitea.repo`
+- token env present
+- Wiki gate allowed
+
+If any requirement is missing, QA-AIST only writes local Wiki state:
+
+- `.qa-aist-project/state/wiki-plan.json`
+- `.qa-aist-project/state/wiki-apply-result.json`
+- `.qa-aist-project/reports/wiki-status.md`
 
 Gitea HTTP remote writes require:
 

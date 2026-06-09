@@ -20,11 +20,12 @@ tracker:
     repo: ""
     token_env: QA_AIST_GITEA_TOKEN
     mcp_issues_json: .qa-aist-project/state/gitea-mcp/issues.json
-    wiki_page: "Test status"
+    wiki_page: "Test status (Siri)"
     branch_prefix: "qa-aist/issue-"
 policy:
   deterministic_first: true
   require_write_gate: true
+  auto_publish_wiki: true
   prohibit_closed_issue_comments: true
   prohibit_raw_secrets_in_repo: true
   require_swqa_pattern_expansion: true

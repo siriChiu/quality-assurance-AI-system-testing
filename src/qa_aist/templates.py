@@ -23,6 +23,40 @@ set -euo pipefail
 python3 --version
 """
 
+WIKI_CATEGORIES_RULE = """# QA-AIST Wiki category seed
+# Edit this file in the host project to map cases into your product domains.
+fallback: Uncategorized
+categories:
+  - name: Authentication
+    keywords: [auth, login, credential, token, session]
+  - name: BIOS
+    keywords: [bios, uefi, boot, setup]
+  - name: CLI Smoke
+    keywords: [cli, command, help, version, smoke]
+  - name: Collect
+    keywords: [collect, inventory, gather]
+  - name: Diagnostic
+    keywords: [diagnostic, diagnose, health, check]
+  - name: Ethernet
+    keywords: [ethernet, nic, network, lan]
+  - name: Firmware
+    keywords: [firmware, update, flash]
+  - name: Logs
+    keywords: [log, journal, event]
+  - name: Multi-BMC
+    keywords: [multi-bmc, multiple bmc, bmc]
+  - name: Multi-BMC Virtual Media
+    keywords: [multi-bmc virtual media, multi virtual media]
+  - name: MC Info
+    keywords: [mc info, manager info, controller info]
+  - name: Sensors
+    keywords: [sensor, telemetry, reading]
+  - name: Virtual Media
+    keywords: [virtual media, mount, iso]
+  - name: Virtual Media (SMB/CIFS)
+    keywords: [smb, cifs, samba, network share]
+"""
+
 SWQA_TEST_DESIGN_RULE = """# SWQA test-design rule
 
 QA-AIST treats each confirmed bug as a reusable failure pattern, not as a

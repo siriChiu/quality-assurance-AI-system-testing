@@ -152,12 +152,12 @@ def generate_cases_init(
     *,
     feature: str | None = None,
     profile: str = "auto",
-    count: int = DEFAULT_SCRATCH_COUNT,
+    count: int | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
     if profile not in SUPPORTED_PROFILES:
         raise CaseGenerationError(f"unsupported profile: {profile}")
-    if count < 1:
+    if count is not None and count < 1:
         raise CaseGenerationError("count must be >= 1")
 
     config.paths.cases.mkdir(parents=True, exist_ok=True)
@@ -208,10 +208,15 @@ def generate_cases_init(
         )
 
     missing_inputs = init_missing_inputs(context)
+    needs_input = bool(questions or missing_inputs)
     return {
-        "status": "needs_input" if questions else "ok",
+        "status": "needs_input" if needs_input else "ok",
         "source": "init",
         "mode": "init",
+        "generation_strategy": "opinionated_swqa_init",
+        "generation_limit": "all_init_seed_dimension_pairs" if count is None else "manual_count_cap",
+        "requested_count": count,
+        "assumption_policy": "Generate the initial SWQA map first; ask only for blocking execution inputs.",
         "feature": context["feature"],
         "requested_profile": profile,
         "resolved_profile": context["resolved_profile"],
@@ -230,7 +235,11 @@ def generate_cases_init(
         "policy_pack": context["policy_pack"]["name"],
         "policy_dimensions": context["policy_pack"]["swqa_dimensions"],
         "closed_loop_steps": context["policy_pack"]["closed_loop_steps"],
-        "message": "Initial SWQA draft cases generated; answer questions before treating them as runnable.",
+        "message": (
+            "Initial SWQA draft map generated with opinionated coverage; answer the small clarify set before treating drafts as runnable."
+            if needs_input else
+            "Initial SWQA draft map generated."
+        ),
     }
 
 
@@ -239,13 +248,15 @@ def generate_cases_growing(
     *,
     feature: str | None = None,
     profile: str = "auto",
-    count: int = DEFAULT_SCRATCH_COUNT,
+    count: int | None = DEFAULT_SCRATCH_COUNT,
     force: bool = False,
     candidate_json: str | Path | None = None,
     issue_id: int | None = None,
 ) -> dict[str, Any]:
     if profile not in SUPPORTED_PROFILES:
         raise CaseGenerationError(f"unsupported profile: {profile}")
+    if count is None:
+        count = DEFAULT_SCRATCH_COUNT
     if count < 1:
         raise CaseGenerationError("count must be >= 1")
 
@@ -447,23 +458,20 @@ def build_init_seeds(context: dict[str, Any]) -> list[dict[str, Any]]:
     return seeds
 
 
-def build_init_candidates(context: dict[str, Any], *, count: int) -> list[dict[str, Any]]:
+def build_init_candidates(context: dict[str, Any], *, count: int | None = None) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     seeds = context.get("init_seeds", [])
     specs = init_dimension_specs()
-    for index in range(count):
-        seed = seeds[index % len(seeds)]
-        spec = specs[index % len(specs)]
-        candidates.append(candidate_from_init_seed(context, seed, spec))
+    for seed in seeds:
+        for spec in specs:
+            candidates.append(candidate_from_init_seed(context, seed, spec))
+    if count is not None:
+        return candidates[:count]
     return candidates
 
 
 def candidate_from_init_seed(context: dict[str, Any], seed: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
     feature = str(seed.get("title") or context["feature"])
-    questions = common_questions(feature=feature, profile=context["resolved_profile"], has_confirmed_command=False)
-    suggested_command = context["repo_signals"].get("suggested_command")
-    if suggested_command:
-        questions.insert(1, f"是否確認可用 `{suggested_command}` 作為 side-effect-safe 測試入口？若不是，請提供正確 runner 或 command。")
     return {
         "title": f"{feature}: {spec['title']}",
         "feature": feature,
@@ -472,7 +480,7 @@ def candidate_from_init_seed(context: dict[str, Any], seed: dict[str, Any], spec
         "swqa_dimensions": spec["dimensions"],
         "init_seed": seed,
         "analysis_reason": f"Initial full-repo SWQA map expands {seed.get('type')} through {spec['key']} coverage.",
-        "questions": questions,
+        "questions": [],
         "risk_controls": [
             "review_required_before_run",
             "do_not_publish_until_write_gate_passes",
@@ -961,17 +969,22 @@ def scan_repo_inventory(config: ProjectConfig) -> dict[str, Any]:
 def init_missing_inputs(context: dict[str, Any]) -> list[str]:
     missing: list[str] = []
     signals = context.get("repo_signals", {})
-    if not signals.get("suggested_command"):
-        missing.append("confirmed_runner_or_command")
-    if not context.get("existing_runners"):
-        missing.append("project_runner")
-    missing.extend(
-        [
-            "fixture_or_input_file",
-            "success_criteria",
-            "side_effect_boundary",
-            "stress_timeout_baseline",
-        ]
+    suggested_command = str(signals.get("suggested_command") or "").strip()
+    existing_runners = context.get("existing_runners")
+    if suggested_command:
+        missing.append(
+            f"QA-AIST 建議先用 `{suggested_command}` 作為 read-only/dry-run 初始測試入口；若這不是正確入口，請提供要使用的 runner 或 command。"
+        )
+    elif existing_runners:
+        missing.append(
+            "QA-AIST 找到既有 runner；請確認哪一個 runner 作為初始測試入口，或回覆可由 QA-AIST 依 profile 選擇。"
+        )
+    else:
+        missing.append(
+            "請提供一個 side-effect-safe 的初始測試入口，例如 CLI help/status、dry-run command、parser-only runner 或 repo health check。"
+        )
+    missing.append(
+        "請列出必要 fixture/lab target/輸入檔/credential env 名稱與不可碰範圍；不要貼 secret。若沒有特別限制，回覆「使用 repo-only 與 dry-run 優先」。"
     )
     return missing
 

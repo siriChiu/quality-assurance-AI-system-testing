@@ -51,7 +51,7 @@ def gitea_config_from_project(config_data: dict[str, Any]) -> GiteaConfig:
         token_env=token_env,
         token=os.getenv(token_env) or None,
         mcp_issues_json=str(gitea.get("mcp_issues_json") or tracker.get("mcp_issues_json") or ".qa-aist-project/state/gitea-mcp/issues.json"),
-        wiki_page=str(gitea.get("wiki_page") or "Test status"),
+        wiki_page=str(gitea.get("wiki_page") or "Test status (Siri)"),
         branch_prefix=str(gitea.get("branch_prefix") or "qa-aist/issue-"),
     )
 

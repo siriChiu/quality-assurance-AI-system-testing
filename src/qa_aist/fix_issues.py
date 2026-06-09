@@ -48,6 +48,7 @@ def plan_fix_issue(config: ProjectConfig, *, issue_id: int) -> dict[str, Any]:
         "preflight": [
             "/qa-aist issues sync",
             f"/qa-aist qa-test run-one {case_ids[0]}" if case_ids else "/qa-aist cases generate --growing",
+            "/qa-aist publish wiki status",
             "/qa-aist publish plan",
         ],
         "handoff": "Hermes may perform the minimal code change only after this plan is ready.",
@@ -72,7 +73,7 @@ def run_fix_issue(config: ProjectConfig, *, issue_id: int) -> dict[str, Any]:
             "Create or switch to the planned branch.",
             "Make the minimal product code change needed for the synced open issue.",
             "Run the linked QA-AIST case contracts.",
-            "Run /qa-aist publish plan before any remote write.",
+            "Check /qa-aist publish wiki status, then run /qa-aist publish plan before any issue remote write.",
             "Run /qa-aist fix-issues submit-pr --issue <id> only after tests and gate pass.",
         ],
     }
