@@ -153,16 +153,21 @@ def generate_cases_init(
     feature: str | None = None,
     profile: str = "auto",
     count: int | None = None,
+    fast: bool = False,
     force: bool = False,
 ) -> dict[str, Any]:
     if profile not in SUPPORTED_PROFILES:
         raise CaseGenerationError(f"unsupported profile: {profile}")
     if count is not None and count < 1:
-        raise CaseGenerationError("count must be >= 1")
+        raise CaseGenerationError("generated_count must be >= 1")
 
     config.paths.cases.mkdir(parents=True, exist_ok=True)
     config.paths.state.mkdir(parents=True, exist_ok=True)
     context = build_init_context(config, feature=feature, profile=profile)
+    context["fast"] = bool(fast)
+    context["generated_count_limit"] = count
+    context["interaction_scope"] = "autonomous" if fast else "category"
+    context["fast_mode_assumptions"] = fast_mode_assumptions(context) if fast else []
     context_path = init_context_path(config)
     context_path.write_text(json_dumps(context) + "\n", encoding="utf-8")
 
@@ -174,7 +179,7 @@ def generate_cases_init(
     seen = existing_case_fingerprints(config)
     in_batch: set[str] = set()
 
-    for index, candidate in enumerate(candidates[:count], start=1):
+    for index, candidate in enumerate(candidates, start=1):
         fingerprint = candidate_fingerprint(candidate)
         if fingerprint in seen or fingerprint in in_batch:
             deduped.append(
@@ -207,16 +212,25 @@ def generate_cases_init(
             }
         )
 
-    missing_inputs = init_missing_inputs(context)
+    missing_inputs = [] if fast else init_missing_inputs(context)
     needs_input = bool(questions or missing_inputs)
     return {
         "status": "needs_input" if needs_input else "ok",
         "source": "init",
         "mode": "init",
+        "fast": bool(fast),
+        "interaction_scope": "autonomous" if fast else "category",
         "generation_strategy": "opinionated_swqa_init",
-        "generation_limit": "all_init_seed_dimension_pairs" if count is None else "manual_count_cap",
+        "generation_limit": "all_init_seed_dimension_pairs" if count is None else "manual_generated_count_cap",
+        "generated_count_limit": count,
+        "requested_generated_count": count,
         "requested_count": count,
-        "assumption_policy": "Generate the initial SWQA map first; ask only for blocking execution inputs.",
+        "assumption_policy": (
+            "Fast mode: QA-AIST chooses the strictest safe defaults and does not ask case-by-case questions."
+            if fast else
+            "Generate the initial SWQA map first; ask only category-level blocking execution inputs."
+        ),
+        "fast_mode_assumptions": context["fast_mode_assumptions"],
         "feature": context["feature"],
         "requested_profile": profile,
         "resolved_profile": context["resolved_profile"],
@@ -236,7 +250,9 @@ def generate_cases_init(
         "policy_dimensions": context["policy_pack"]["swqa_dimensions"],
         "closed_loop_steps": context["policy_pack"]["closed_loop_steps"],
         "message": (
-            "Initial SWQA draft map generated with opinionated coverage; answer the small clarify set before treating drafts as runnable."
+            "Initial SWQA draft map generated in fast autonomous mode with strict safe defaults."
+            if fast else
+            "Initial SWQA draft map generated with opinionated coverage; answer the small category-level clarify set before treating drafts as runnable."
             if needs_input else
             "Initial SWQA draft map generated."
         ),
@@ -249,6 +265,7 @@ def generate_cases_growing(
     feature: str | None = None,
     profile: str = "auto",
     count: int | None = DEFAULT_SCRATCH_COUNT,
+    fast: bool = False,
     force: bool = False,
     candidate_json: str | Path | None = None,
     issue_id: int | None = None,
@@ -263,6 +280,10 @@ def generate_cases_growing(
     config.paths.cases.mkdir(parents=True, exist_ok=True)
     config.paths.state.mkdir(parents=True, exist_ok=True)
     context = build_growth_context(config, feature=feature, profile=profile, issue_id=issue_id)
+    context["fast"] = bool(fast)
+    context["generated_count_limit"] = count
+    context["interaction_scope"] = "autonomous" if fast else "category"
+    context["fast_mode_assumptions"] = fast_mode_assumptions(context) if fast else []
     context_path = growth_context_path(config)
     context_path.write_text(json_dumps(context) + "\n", encoding="utf-8")
 
@@ -314,10 +335,14 @@ def generate_cases_growing(
             }
         )
 
+    missing_inputs = [] if fast else growth_missing_inputs(context)
+    needs_input = bool(questions or missing_inputs)
     return {
-        "status": "needs_input" if questions else "ok",
+        "status": "needs_input" if needs_input else "ok",
         "source": "growth",
         "mode": "growing",
+        "fast": bool(fast),
+        "interaction_scope": "autonomous" if fast else "category",
         "feature": context["feature"],
         "requested_profile": profile,
         "resolved_profile": context["resolved_profile"],
@@ -332,10 +357,26 @@ def generate_cases_growing(
         "skipped_count": len(skipped),
         "deduped_count": len(deduped),
         "questions": questions,
+        "missing_inputs": missing_inputs,
+        "missing_input_count": len(missing_inputs),
+        "generation_limit": "manual_generated_count_cap",
+        "generated_count_limit": count,
+        "requested_generated_count": count,
+        "requested_count": count,
+        "assumption_policy": (
+            "Fast mode: QA-AIST chooses the strictest safe defaults and does not ask case-by-case questions."
+            if fast else
+            "Growing generation asks only category-level blocking inputs, never one question per test case."
+        ),
+        "fast_mode_assumptions": context["fast_mode_assumptions"],
         "policy_pack": context["policy_pack"]["name"],
         "policy_dimensions": context["policy_pack"]["swqa_dimensions"],
         "closed_loop_steps": context["policy_pack"]["closed_loop_steps"],
-        "message": "Growth draft cases generated; answer questions before treating them as runnable.",
+        "message": (
+            "Growth draft cases generated in fast autonomous mode with strict safe defaults."
+            if fast else
+            "Growth draft cases generated; answer only category-level blocking inputs before treating drafts as runnable."
+        ),
     }
 
 
@@ -520,6 +561,9 @@ def draft_contract_from_init(
             "draft": True,
             "generation_mode": "init",
             "review_required_before_run": True,
+            "interaction_scope": context.get("interaction_scope", "category"),
+            "fast_mode": bool(context.get("fast")),
+            "fast_mode_assumptions": context.get("fast_mode_assumptions", []),
             "questions": candidate.get("questions", []),
             "policy_pack": context["policy_pack"]["name"],
             "closed_loop_steps": context["policy_pack"]["closed_loop_steps"],
@@ -622,7 +666,7 @@ def candidate_from_seed(context: dict[str, Any], seed: dict[str, Any], spec: dic
         "growth_seed": seed,
         "growth_reason": f"Expand {seed.get('type')} signal through {spec['key']} coverage.",
         "six_hats": six_hats_for(seed, spec),
-        "questions": common_questions(feature=str(seed.get("title") or context["feature"]), profile=context["resolved_profile"], has_confirmed_command=False),
+        "questions": [],
         "risk_controls": [
             "review_required_before_run",
             "dedupe_against_existing_cases",
@@ -669,6 +713,9 @@ def draft_contract_from_growth(
             "draft": True,
             "generation_mode": "growth",
             "review_required_before_run": True,
+            "interaction_scope": context.get("interaction_scope", "category"),
+            "fast_mode": bool(context.get("fast")),
+            "fast_mode_assumptions": context.get("fast_mode_assumptions", []),
             "questions": candidate.get("questions", []),
             "policy_pack": context["policy_pack"]["name"],
             "closed_loop_steps": context["policy_pack"]["closed_loop_steps"],
@@ -987,6 +1034,34 @@ def init_missing_inputs(context: dict[str, Any]) -> list[str]:
         "請列出必要 fixture/lab target/輸入檔/credential env 名稱與不可碰範圍；不要貼 secret。若沒有特別限制，回覆「使用 repo-only 與 dry-run 優先」。"
     )
     return missing
+
+
+def growth_missing_inputs(context: dict[str, Any]) -> list[str]:
+    seeds = context.get("growth_seeds") if isinstance(context.get("growth_seeds"), list) else []
+    seed_types = sorted({str(seed.get("type")) for seed in seeds if isinstance(seed, dict) and seed.get("type")})
+    scope = ", ".join(seed_types) if seed_types else "repo/latest status"
+    return [
+        (
+            f"QA-AIST 會依 {scope} 的最新訊號自行擴散測試；若有大分類優先順序或不可碰範圍，請一次列出。"
+            "若沒有，回覆「由 QA-AIST 依風險排序」。"
+        ),
+        (
+            "若 growth 測試需要共用 fixture、lab target、輸入檔或 credential env 名稱，請一次列出分類；"
+            "不要貼 secret。若沒有，回覆「repo-only 與 dry-run 優先」。"
+        ),
+    ]
+
+
+def fast_mode_assumptions(context: dict[str, Any]) -> list[str]:
+    profile = str(context.get("resolved_profile") or context.get("requested_profile") or "auto")
+    return [
+        "Use repo-only, read-only, dry-run, parser-only, mock, no-op fixture, or help/status paths before any state-changing operation.",
+        "Treat missing lab targets, fixture files, credentials, or destructive permissions as HOLD/BLOCK, not as PASS or product FAIL.",
+        "Never infer or print raw secrets; only refer to credential environment variable names.",
+        "Prefer broad SWQA coverage across functional, positive, negative, boundary, invalid input, sibling surface, side-effect-safe, and stress/timeout-risk dimensions.",
+        "Stress and timeout-risk cases must be bounded and require a baseline before defect filing.",
+        f"Resolve ambiguous profile as `{profile}` and choose the strictest side-effect-safe interpretation.",
+    ]
 
 
 def extract_repro_command(body: str) -> str | None:

@@ -203,15 +203,16 @@ agent 應該在目前產品 repo root 執行：
 
 - 使用者回覆 `1`、`2`、`3` 時，執行對應的 `next_actions[].command`。
 - 若 payload 出現 `input_required: true`、`interaction.type: "needs_input"` 或 `hermes_needs_input.status: "required"`，呼叫 Hermes `clarify`。題目來源固定是 `hermes_needs_input.questions[]`，不要自己重寫問題。
-- 如果目前 Hermes runtime 沒有 `clarify`，請用聊天室 fallback：用簡短繁中標題列出同一批問題，逐題等待使用者回答。
+- 如果目前 Hermes runtime 沒有 `clarify`，請用聊天室 fallback：用簡短繁中標題列出同一批大分類問題，等待使用者一次補齊。
 - 安全查詢類動作可主動詢問「要我現在跑嗎？」。
 - `/qa-aist status` 和 `/qa-aist doctor` 會提前檢查 issue sync readiness。若看到 `tracker_provider_disabled`、`gitea_mcp_snapshot_missing` 或 `gitea_http_token_missing`，先依選單補齊設定，不要等到 `issues sync` 才處理。
 - 寫檔、跑測試、Gitea MCP 讀取、publish、push branch、建立 PR 都要先取得確認。
 - `next_actions[].requires_confirmation: true` 時，不可直接執行。
-- 若 `next_actions` 的 kind 是 `ask_user` 或結果內有 questions，dispatcher 會整理成 `hermes_needs_input`；請用該欄位逐題呼叫 `clarify`，不要自行猜測。
+- `next_actions` 是下一步選單，不是 needs-input 問卷；只有 payload 的 `questions` / `missing_inputs` 會整理成 `hermes_needs_input`。請用該欄位呼叫 `clarify`，不要自行猜測。
 - `/qa-aist cases generate` 無參數時會回 `explicit_generation_mode_required`，Hermes 必須引導使用者選 `/qa-aist cases generate --init` 或 `/qa-aist cases generate --growing`，不可默默猜模式。
-- `/qa-aist cases generate --init` 是首次全 repo SWQA 建案；它會像有主見的 SWQA 工程師先建立「基本都要測」的初始地圖，讀 README、程式碼 inventory、metadata、既有 cases/runners/rules，產生功能、正向、反向、邊界、invalid input、side-effect-safe、壓力/timeout 等 draft cases。它只應透過 `clarify` 問少量阻擋執行的問題。
-- `/qa-aist cases generate --growing` 是後續增量擴散；它會讀 repo、issues、PR references、latest run、reports、既有 cases/runners。若 draft 有 `review_required_before_run`，不要把它當成可直接執行的正式測試，先用 `cases review` 問答補齊 command、fixture、target、成功條件與副作用邊界。
+- `/qa-aist cases generate --init` 是首次全 repo SWQA 建案；它會像有主見的 SWQA 工程師先建立「基本都要測」的初始地圖，讀 README、程式碼 inventory、metadata、既有 cases/runners/rules，產生功能、正向、反向、邊界、invalid input、side-effect-safe、壓力/timeout 等 draft cases。它只應透過 `clarify` 問少量大分類阻擋問題，不可逐一確認 testcase。
+- `/qa-aist cases generate --init --generated_count 5` 可限制第一批 draft 數量；`/qa-aist cases generate --init --fast` 會以最高安全標準自行決策，避免互動問答。
+- `/qa-aist cases generate --growing` 是後續增量擴散；它會讀 repo、issues、PR references、latest run、reports、既有 cases/runners。若 draft 有 `review_required_before_run`，不要把它當成可直接執行的正式測試，先用 `cases review` 依大分類補齊 command、fixture、target、成功條件與副作用邊界。
 - 若需要獨立 growth session/agent，它只能產生 candidate JSON，再交給 `/qa-aist cases generate --growing --candidate-json <path>`；不可直接寫 case YAML、tracker、wiki 或 PR。
 
 若產品 repo 的 `.qa-aist.yaml` 包含：

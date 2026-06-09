@@ -68,6 +68,8 @@ The policy pack is intentionally generic. It defines stable dimensions such as e
 
 `cases generate --growing` builds `.qa-aist-project/state/growth-context.json` from repo metadata, issue snapshots, PR references, latest run, publish plan, existing cases, runners, and rules. It then writes `source.type: growth` draft case contracts under `.qa-aist-project/cases/`.
 
+`--generated_count <max>` is the explicit generation limit for users who want a smaller batch. `--fast` switches case generation to autonomous strict-safe defaults: QA-AIST asks no interactive category questions, records its assumptions, and leaves unsafe or unconfirmed execution as HOLD/BLOCK rather than pretending a draft is runnable.
+
 Hermes may use a separate growth session to analyze the context, but that session may only produce candidate JSON. QA-AIST validates candidate schema, dedupe fingerprints, secret leakage, internal prompt leakage, dangerous `.qa` runtime paths, and command fields before writing YAML.
 
 ## Invariants

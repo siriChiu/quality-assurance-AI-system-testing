@@ -322,7 +322,7 @@ def _with_hermes_needs_input(payload: dict[str, Any]) -> dict[str, Any]:
             "question_field": "prompt",
         },
         "questions": questions,
-        "answer_format": "請逐題回覆；可用題號回答，也可以直接補充 fixture、輸入檔、成功條件或不可碰範圍。",
+        "answer_format": "請用大分類一次回覆；可用題號回答，也可以直接補充 fixture、輸入檔、成功條件或不可碰範圍。",
         "ui_hint": "Call Hermes clarify for each question. Do not render a separate needs-input title.",
     }
     return {
@@ -385,12 +385,6 @@ def _collect_needs_input_questions(payload: dict[str, Any]) -> list[dict[str, An
     if isinstance(missing_inputs, list):
         for item in missing_inputs:
             add(_missing_input_prompt(item), source="payload.missing_inputs")
-
-    next_actions = payload.get("next_actions")
-    if isinstance(next_actions, list):
-        for action in next_actions:
-            if isinstance(action, dict) and action.get("kind") == "ask_user":
-                add(action.get("label") or "請補充使用者決策或設定資訊。", source="next_actions.ask_user")
 
     if str(payload.get("status") or "").lower() == "needs_input" and not questions:
         add("請補齊 QA-AIST 回報的必要測試資訊後再繼續。", source="payload.status")
@@ -577,7 +571,7 @@ def suggest_next_actions(payload: dict[str, Any], engine_argv: list[str], exit_c
             return [
                 _next("查看 Wiki draft 狀態", "/qa-aist publish wiki status"),
                 _next("審查待補資訊", "/qa-aist cases review"),
-                {"label": "逐題回答 fixture、輸入檔、成功條件與不可碰範圍", "kind": "ask_user"},
+                {"label": "一次補齊大分類 fixture、輸入檔、成功條件與不可碰範圍", "kind": "ask_user"},
                 _next("補完後驗證 cases", "/qa-aist cases validate"),
             ]
         return [
@@ -757,7 +751,8 @@ def build_agent_manifest(*, wrapper_path: str | None = None, runner_command: str
             f"{PRIMARY_PREFIX} cases generate --growing",
             f"{PRIMARY_PREFIX} cases generate --init --feature <name>",
             f"{PRIMARY_PREFIX} cases generate --init --profile auto|cli|api|hardware|repo",
-            f"{PRIMARY_PREFIX} cases generate --init --count <max>",
+            f"{PRIMARY_PREFIX} cases generate --init --generated_count <max>",
+            f"{PRIMARY_PREFIX} cases generate --init --fast",
             f"{PRIMARY_PREFIX} cases generate --growing --candidate-json <path>",
             f"{PRIMARY_PREFIX} cases review",
             f"{PRIMARY_PREFIX} cases validate",
@@ -900,7 +895,7 @@ When the user invokes `/qa-aist <arguments>`, you must:
 3. Execute the dispatcher through the terminal. Do not answer from memory.
 4. Read the returned JSON.
 5. Reply primarily with the JSON `chat_response` field.
-6. If `payload.hermes_needs_input.status == "required"` or `payload.input_required == true`, call Hermes `clarify` one question at a time using `payload.hermes_needs_input.questions[]`; do not downgrade it to a normal next-action menu.
+6. If `payload.hermes_needs_input.status == "required"` or `payload.input_required == true`, call Hermes `clarify` for the category-level blocking inputs in `payload.hermes_needs_input.questions[]`; do not downgrade it to a normal next-action menu.
 7. If `chat_response` is missing, summarize `status`, `payload.status`, `payload.error`, `payload.message`, `latest_run_json`, `report_path`, and evidence paths.
 8. Preserve failures. If the dispatcher exits non-zero or emits invalid JSON, tell the user the exit code and useful stderr/stdout details.
 
@@ -927,8 +922,8 @@ Hermes clarify / needs-input contract:
 - `payload.interaction.type: "needs_input"` points Hermes to the interaction type.
 - `payload.interaction.handler: "clarify"` says the Hermes agent should call `clarify`, not invent a custom prompt flow.
 - `payload.hermes_needs_input.preferred_mechanism` is `clarify`.
-- `payload.hermes_needs_input.questions[]` is the canonical question list. Each item has `id`, `prompt`, `source`, `required`, and sometimes `case_id`.
-- Call `clarify` once per question, in order. Since `clarify` handles one prompt at a time, start with the first unanswered required question.
+- `payload.hermes_needs_input.questions[]` is the canonical question list. It should contain category-level blocking inputs, not one question per generated test case.
+- Call `clarify` only for these category-level questions, in order. Since `clarify` handles one prompt at a time, start with the first unanswered required question.
 - If `clarify` is unavailable in the current Hermes runtime, render the same questions in chat under a short Traditional Chinese heading, then wait for the user's answer.
 - Do not run `qa-test`, publish, create issues, or submit PRs from a draft that still has unanswered needs-input questions.
 
@@ -939,7 +934,7 @@ Use this pattern:
 3. Ask the user to choose a number, approve the recommended action, or type another `/qa-aist ...` command.
 4. If the next action is safe and read-only, you may offer to run it immediately.
 5. If the next action writes files, runs tests, uses Gitea MCP, publishes to Gitea, pushes a branch, or creates a PR, ask for confirmation first.
-6. If the command returns `payload.hermes_needs_input`, call `clarify` for the listed questions one at a time in Traditional Chinese and wait for the user's answer.
+6. If the command returns `payload.hermes_needs_input`, call `clarify` for the listed category-level questions in Traditional Chinese and wait for the user's answer.
 
 Preferred menu style:
 
@@ -959,10 +954,12 @@ Recommended interaction by situation:
 - After `/qa-aist doctor` warning: explain the warning and suggest the smallest check that resolves it.
 - After `gitea_mcp_snapshot_missing`: offer to use Hermes Gitea MCP read-only fetch, write the snapshot, then rerun `/qa-aist issues sync`.
 - After `/qa-aist issues sync`: suggest `/qa-aist issues dedupe` and `/qa-aist cases generate --growing`.
-- If the user asks for first-time test ideas or has no cases yet, run `/qa-aist cases generate --init`; it acts as an opinionated SWQA engineer, scans README, code, package metadata, existing runners, existing cases, and project rules, then creates an initial test map across functional, positive, negative, boundary, invalid-input, side-effect-safe, and stress/timeout-risk coverage. It should ask only a few blocking questions through `clarify`.
+- If the user asks for first-time test ideas or has no cases yet, run `/qa-aist cases generate --init`; it acts as an opinionated SWQA engineer, scans README, code, package metadata, existing runners, existing cases, and project rules, then creates an initial test map across functional, positive, negative, boundary, invalid-input, side-effect-safe, and stress/timeout-risk coverage. It must not ask case-by-case confirmation questions.
+- If the user wants a quick autonomous pass, run `/qa-aist cases generate --init --fast`; fast mode uses the strictest side-effect-safe defaults and avoids interactive category questions.
+- If the user wants a smaller first batch, run `/qa-aist cases generate --init --generated_count 5`.
 - If the user asks for follow-up ideas after issues/PRs/runs changed, run `/qa-aist cases generate --growing`; it creates incremental growth draft cases from repo, issues, PR references, latest run, reports, existing cases, and runners.
 - If the user types bare `/qa-aist cases generate`, run the dispatcher and present its mode-selection error; do not silently choose a mode.
-- After `cases generate --init` or `cases generate --growing` returns `payload.hermes_needs_input`: call `clarify` one question at a time before treating the draft as runnable.
+- After `cases generate --init` or `cases generate --growing` returns `payload.hermes_needs_input`: call `clarify` for the category-level blocking inputs before treating the draft as runnable. Do not discuss each generated case one by one unless the user explicitly asks.
 - After `/qa-aist qa-test list`: suggest dry-run or running one selected case, not all cases by default.
 - After `cases generate --init` or `cases generate --growing`: QA-AIST auto-plans the Wiki draft/missing-input status. Suggest `/qa-aist publish wiki status`.
 - After a test run: QA-AIST auto-plans or applies the Wiki test-result status. Suggest `/qa-aist publish wiki status` and `/qa-aist report status`.
@@ -987,6 +984,8 @@ Examples:
 {runner_command} --root "$PWD" /qa-aist doctor
 {runner_command} --root "$PWD" /qa-aist issues sync
 {runner_command} --root "$PWD" /qa-aist cases generate --init
+{runner_command} --root "$PWD" /qa-aist cases generate --init --generated_count 5
+{runner_command} --root "$PWD" /qa-aist cases generate --init --fast
 {runner_command} --root "$PWD" /qa-aist cases generate --growing
 {runner_command} --root "$PWD" /qa-aist cases generate --init --feature "CLI help" --profile cli
 {runner_command} --root "$PWD" /qa-aist cases generate --growing --candidate-json .qa-aist-project/state/growth-candidates.json
@@ -1021,7 +1020,8 @@ Examples:
 - `/qa-aist cases generate --growing`
 - `/qa-aist cases generate --init --feature <name>`
 - `/qa-aist cases generate --init --profile auto|cli|api|hardware|repo`
-- `/qa-aist cases generate --init --count <max>`
+- `/qa-aist cases generate --init --generated_count <max>`
+- `/qa-aist cases generate --init --fast`
 - `/qa-aist cases generate --growing --candidate-json <path>`
 - `/qa-aist cases review`
 - `/qa-aist cases validate`
@@ -1058,7 +1058,7 @@ Examples:
 - Do not print raw secrets.
 - Do not run arbitrary shell commands assembled from chat. The only command you should run for `/qa-aist ...` is the dispatcher command above with the user's QA-AIST arguments.
 - Do not bypass `write_gate`, issue sync, duplicate checks, or case contracts, even if the user asks you to write tracker output directly.
-- If `/qa-aist cases generate --init` or `/qa-aist cases generate --growing` returns `payload.hermes_needs_input`, call `clarify` one question at a time in Traditional Chinese, and wait for answers before treating a draft as runnable.
+- If `/qa-aist cases generate --init` or `/qa-aist cases generate --growing` returns `payload.hermes_needs_input`, call `clarify` for category-level blocking inputs in Traditional Chinese, and wait for answers before treating a draft as runnable. Do not force the user to approve test cases one by one.
 - If you open a separate growth session/agent, it may only write candidate JSON for `/qa-aist cases generate --growing --candidate-json <path>`; it must not directly edit case YAML, tracker, wiki, PRs, or reports.
 - If the user types `/qa-aist qa-test` without a subcommand, show the QA test help instead of guessing.
 
@@ -1237,6 +1237,8 @@ def _overview_help_payload() -> dict[str, Any]:
         {"command": "/qa-aist issues show <issue_id>", "purpose": "查看單一 issue mirror"},
         {"command": "/qa-aist issues dedupe", "purpose": "檢查本地 active issues 是否疑似重複"},
         {"command": "/qa-aist cases generate --init", "purpose": "首次全 repo SWQA 建案，依 README/code/metadata 產生 draft cases"},
+        {"command": "/qa-aist cases generate --init --generated_count 5", "purpose": "限制初始建案第一批 draft case 數量"},
+        {"command": "/qa-aist cases generate --init --fast", "purpose": "用最高安全標準自主產生初始 draft cases，減少互動問答"},
         {"command": "/qa-aist cases generate --growing", "purpose": "依最新 issues/PR/latest-run/reports 狀態擴散 draft cases"},
         {"command": "/qa-aist cases generate --init --feature \"CLI help\" --profile cli", "purpose": "指定功能與 profile，引導完整初始建案"},
         {"command": "/qa-aist cases generate --growing --candidate-json <path>", "purpose": "匯入 Hermes growth session 候選 JSON，經 engine 驗證後寫入 draft"},
@@ -1366,8 +1368,8 @@ def _workflow_help_payload(topic: str) -> dict[str, Any]:
             "cases 用來產生可審查的 growth draft case contract。",
             "首次導入先跑 `/qa-aist cases generate --init`，QA-AIST 會讀 README、程式碼、metadata、既有 runners/cases/rules，建立功能、正向、反向、邊界與壓力測試 draft。",
             "後續有新 issues、PR、latest run 或 reports 時跑 `/qa-aist cases generate --growing`，讓 case 從最新狀態繼續擴散。",
-            "可用 `--feature`、`--profile auto|cli|api|hardware|repo`、`--count` 控制生成方向；獨立 growth session 的候選 JSON 必須搭配 `--growing --candidate-json` 匯入。",
-            "如果輸出 questions，Hermes 必須用繁中問答補齊 fixture、輸入檔、成功條件和副作用邊界。",
+            "可用 `--feature`、`--profile auto|cli|api|hardware|repo`、`--generated_count` 控制生成方向；`--fast` 會由 QA-AIST 用最高安全標準自行決策，避免互動問答。",
+            "如果輸出 questions，Hermes 必須用繁中問答一次補齊大分類 fixture、輸入檔、成功條件和副作用邊界，不要逐一討論每個 case。",
         ],
         "publish": [
             "publish wiki 是主要狀態看板，用來把 draft cases、missing input、latest run 與 Gitea write summary 更新到單一 Wiki 頁。",
@@ -1438,6 +1440,8 @@ def _positional_args(argv: list[str]) -> list[str]:
         "--candidate-json",
         "--config",
         "--count",
+        "--generated_count",
+        "--generated-count",
         "--expected-contract-hash",
         "--event",
         "--feature",

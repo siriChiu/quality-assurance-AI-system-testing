@@ -376,6 +376,20 @@ def cmd_issues_dedupe(args: argparse.Namespace) -> int:
 def cmd_cases_generate(args: argparse.Namespace) -> int:
     try:
         config = load_project_config(Path(args.root), args.config)
+        generated_count = args.generated_count if args.generated_count is not None else args.count
+        if args.generated_count is not None and args.count is not None and args.generated_count != args.count:
+            return print_json(
+                {
+                    "status": "error",
+                    "error": "conflicting_generated_count",
+                    "message": "Use only one generation limit. Prefer --generated_count; legacy --count is kept only for compatibility.",
+                    "choices": [
+                        "/qa-aist cases generate --init --generated_count 5",
+                        "/qa-aist cases generate --init --fast",
+                    ],
+                },
+                exit_code=2,
+            )
         if args.from_issues:
             return print_json(
                 {
@@ -428,7 +442,8 @@ def cmd_cases_generate(args: argparse.Namespace) -> int:
                 config,
                 feature=args.feature,
                 profile=args.profile,
-                count=args.count,
+                count=generated_count,
+                fast=args.fast,
                 force=args.force,
             )
         else:
@@ -436,7 +451,8 @@ def cmd_cases_generate(args: argparse.Namespace) -> int:
                 config,
                 feature=args.feature,
                 profile=args.profile,
-                count=args.count,
+                count=generated_count,
+                fast=args.fast,
                 force=args.force,
                 candidate_json=args.candidate_json,
                 issue_id=args.issue,
@@ -813,7 +829,9 @@ def build_parser() -> argparse.ArgumentParser:
     cases_generate.add_argument("--candidate-json", default=None, help="Import Hermes growth-session candidates from JSON after QA-AIST validation")
     cases_generate.add_argument("--feature", default=None, help="Feature or user-visible surface to bias growth generation")
     cases_generate.add_argument("--profile", default="auto", choices=["auto", "cli", "api", "hardware", "repo"], help="Generation profile; auto inspects repo signals")
-    cases_generate.add_argument("--count", type=int, default=None, help="Optional maximum number of draft cases. --init defaults to the full seed x dimension map; --growing defaults to 5.")
+    cases_generate.add_argument("--generated_count", "--generated-count", dest="generated_count", type=int, default=None, help="Optional maximum number of draft cases to generate, for example --generated_count 5")
+    cases_generate.add_argument("--count", type=int, default=None, help="Legacy alias for --generated_count")
+    cases_generate.add_argument("--fast", action="store_true", help="Use strict autonomous SWQA defaults and avoid interactive category questions")
     cases_generate.add_argument("--issue", type=int, default=None, help=argparse.SUPPRESS)
     cases_generate.add_argument("--force", action="store_true", help="Overwrite existing generated case YAML")
     cases_generate.set_defaults(func=cmd_cases_generate)

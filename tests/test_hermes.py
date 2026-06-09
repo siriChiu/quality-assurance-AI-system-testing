@@ -142,7 +142,7 @@ class HermesDispatchTest(unittest.TestCase):
 
             buf = StringIO()
             with redirect_stdout(buf):
-                code = hermes.main(["--root", tmp, "/qa-aist", "cases", "generate", "--init", "--feature", "CLI help", "--profile", "cli", "--count", "1"])
+                code = hermes.main(["--root", tmp, "/qa-aist", "cases", "generate", "--init", "--feature", "CLI help", "--profile", "cli", "--generated_count", "1"])
             payload = json.loads(buf.getvalue())
             self.assertEqual(code, 0)
             self.assertEqual(payload["payload"]["source"], "init")
@@ -156,6 +156,8 @@ class HermesDispatchTest(unittest.TestCase):
             self.assertIn("/qa-aist help", manifest["commands"])
             self.assertIn("/qa-aist help qa-test", manifest["commands"])
             self.assertIn("/qa-aist cases generate --init", manifest["commands"])
+            self.assertIn("/qa-aist cases generate --init --generated_count <max>", manifest["commands"])
+            self.assertIn("/qa-aist cases generate --init --fast", manifest["commands"])
             self.assertIn("/qa-aist cases generate --growing", manifest["commands"])
             self.assertIn("/qa-aist qa-test help", manifest["commands"])
             self.assertEqual(manifest["permissions"]["tracker_write"], "write_gate_apply_only")
@@ -242,6 +244,8 @@ class HermesDispatchTest(unittest.TestCase):
             self.assertIn("/qa-aist cases generate --init", text)
             self.assertIn("opinionated SWQA engineer", text)
             self.assertIn("initial test map", text)
+            self.assertIn("--generated_count 5", text)
+            self.assertIn("--fast", text)
             self.assertIn("candidate JSON", text)
             self.assertIn("/usr/bin/env PYTHONPATH=/repo/QA-AIST/src python3 -m qa_aist.hermes", text)
             reference_path = Path(payload["reference_path"])

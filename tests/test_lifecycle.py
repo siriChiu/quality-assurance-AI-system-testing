@@ -148,7 +148,9 @@ expected: CLI help path remains callable.
             self.assertEqual(generated["mode"], "growing")
             self.assertGreaterEqual(generated["growth_seed_count"], 1)
             self.assertTrue((root / ".qa-aist-project" / "state" / "growth-context.json").exists())
-            self.assertGreater(generated["generated"][0]["question_count"], 0)
+            self.assertEqual(generated["interaction_scope"], "category")
+            self.assertEqual(generated["generated"][0]["question_count"], 0)
+            self.assertEqual(generated["missing_input_count"], 2)
             first_case = generated["generated"][0]["case_id"]
             first_yaml = load_yaml(root / generated["generated"][0]["path"])
             self.assertEqual(first_yaml["source"]["type"], "growth")
@@ -223,7 +225,7 @@ democtl = "demo.cli:main"
                 "CLI help",
                 "--profile",
                 "cli",
-                "--count",
+                "--generated_count",
                 "5",
                 "--json",
             ])
@@ -232,8 +234,10 @@ democtl = "demo.cli:main"
             self.assertEqual(generated["status"], "needs_input")
             self.assertEqual(generated["source"], "init")
             self.assertEqual(generated["mode"], "init")
-            self.assertEqual(generated["generation_limit"], "manual_count_cap")
+            self.assertEqual(generated["generation_limit"], "manual_generated_count_cap")
+            self.assertEqual(generated["requested_generated_count"], 5)
             self.assertEqual(generated["requested_count"], 5)
+            self.assertEqual(generated["interaction_scope"], "category")
             self.assertEqual(generated["resolved_profile"], "cli")
             self.assertGreaterEqual(generated["analyzed_files_count"], 2)
             self.assertTrue((root / ".qa-aist-project" / "state" / "init-context.json").exists())
@@ -278,7 +282,7 @@ democtl = "demo.cli:main"
                 "CLI help",
                 "--profile",
                 "cli",
-                "--count",
+                "--generated_count",
                 "5",
                 "--json",
             ])
@@ -317,12 +321,48 @@ democtl = "demo.cli:main"
 
             self.assertEqual(code, 0)
             self.assertEqual(generated["generation_limit"], "all_init_seed_dimension_pairs")
+            self.assertIsNone(generated["requested_generated_count"])
             self.assertIsNone(generated["requested_count"])
             self.assertGreater(generated["generated_count"], 5)
             self.assertEqual(
                 generated["candidate_count"],
                 generated["generated_count"] + generated["deduped_count"] + generated["skipped_count"],
             )
+
+    def test_cases_generate_init_fast_uses_autonomous_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.init_gitea_project(tmp)
+            (root / "README.md").write_text("# Demo CLI\n\nUse democtl for status checks.\n", encoding="utf-8")
+            (root / "pyproject.toml").write_text(
+                """[project]
+name = "demo"
+
+[project.scripts]
+democtl = "demo.cli:main"
+""",
+                encoding="utf-8",
+            )
+
+            code, generated = self.run_cli([
+                "cases",
+                "generate",
+                "--root",
+                tmp,
+                "--init",
+                "--fast",
+                "--generated_count",
+                "5",
+                "--json",
+            ])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(generated["status"], "ok")
+            self.assertTrue(generated["fast"])
+            self.assertEqual(generated["interaction_scope"], "autonomous")
+            self.assertEqual(generated["missing_input_count"], 0)
+            self.assertEqual(generated["questions"], [])
+            self.assertEqual(generated["requested_generated_count"], 5)
+            self.assertTrue(generated["fast_mode_assumptions"])
 
     def test_cases_generate_from_issues_reports_rename(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -426,7 +466,7 @@ democtl = "demo.cli:main"
             root = Path(tmp)
             self.run_cli(["init-project", "--root", tmp])
 
-            code, payload = self.run_cli(["cases", "generate", "--root", tmp, "--init", "--count", "2", "--json"])
+            code, payload = self.run_cli(["cases", "generate", "--root", tmp, "--init", "--generated_count", "2", "--json"])
 
             self.assertEqual(code, 0)
             self.assertEqual(payload["wiki"]["auto_sync"]["event"], "case_generation")
@@ -511,7 +551,7 @@ democtl = "demo.cli:main"
             self.assertEqual(mode_required["payload"]["error"], "explicit_generation_mode_required")
             self.assertEqual(mode_required["payload"]["next_actions"][0]["command"], "/qa-aist cases generate --init")
 
-            init = hermes.dispatch_chat_command('/qa-aist cases generate --init --feature "CLI help" --profile cli --count 2', root=root)
+            init = hermes.dispatch_chat_command('/qa-aist cases generate --init --feature "CLI help" --profile cli --generated_count 2', root=root)
             self.assertEqual(init["status"], "needs_input")
             self.assertEqual(init["payload"]["source"], "init")
             self.assertIn("init_context:", init["chat_response"])
@@ -523,10 +563,15 @@ democtl = "demo.cli:main"
             self.assertEqual(init["payload"]["hermes_needs_input"]["title"], "QA-AIST clarify")
             self.assertEqual(init["payload"]["hermes_needs_input"]["preferred_mechanism"], "clarify")
             self.assertTrue(init["payload"]["hermes_needs_input"]["questions"])
-            self.assertLessEqual(len(init["payload"]["hermes_needs_input"]["questions"]), 4)
+            self.assertLessEqual(len(init["payload"]["hermes_needs_input"]["questions"]), 2)
             self.assertNotIn("Hermes needs your input", init["chat_response"])
             self.assertIn("需要補充資訊", init["chat_response"])
             self.assertTrue(any(action.get("kind") == "ask_user" for action in init["payload"]["next_actions"]))
+
+            fast = hermes.dispatch_chat_command('/qa-aist cases generate --init --feature "CLI help" --profile cli --fast --generated_count 1', root=root)
+            self.assertEqual(fast["status"], "ok")
+            self.assertFalse(fast["payload"].get("input_required", False))
+            self.assertNotIn("hermes_needs_input", fast["payload"])
 
     def test_hermes_mcp_snapshot_error_guides_next_action(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
