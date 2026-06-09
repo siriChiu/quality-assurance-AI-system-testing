@@ -23,7 +23,7 @@
 /qa-aist status
 /qa-aist doctor
 /qa-aist issues sync
-/qa-aist cases generate --from-issues
+/qa-aist cases generate --init
 /qa-aist qa-test list
 /qa-aist qa-test
 /qa-aist publish plan
@@ -206,6 +206,10 @@ agent 應該在目前產品 repo root 執行：
 - 寫檔、跑測試、Gitea MCP 讀取、publish、push branch、建立 PR 都要先取得確認。
 - `next_actions[].requires_confirmation: true` 時，不可直接執行。
 - 若 `next_actions` 的 kind 是 `ask_user` 或結果內有 questions，逐題用繁體中文詢問，不要自行猜測。
+- `/qa-aist cases generate` 無參數時會回 `explicit_generation_mode_required`，Hermes 必須引導使用者選 `/qa-aist cases generate --init` 或 `/qa-aist cases generate --growing`，不可默默猜模式。
+- `/qa-aist cases generate --init` 是首次全 repo SWQA 建案；它會讀 README、程式碼 inventory、metadata、既有 cases/runners/rules，產生功能、正向、反向、邊界、壓力/timeout 等 draft cases。
+- `/qa-aist cases generate --growing` 是後續增量擴散；它會讀 repo、issues、PR references、latest run、reports、既有 cases/runners。若 draft 有 `review_required_before_run`，不要把它當成可直接執行的正式測試，先用 `cases review` 問答補齊 command、fixture、target、成功條件與副作用邊界。
+- 若需要獨立 growth session/agent，它只能產生 candidate JSON，再交給 `/qa-aist cases generate --growing --candidate-json <path>`；不可直接寫 case YAML、tracker、wiki 或 PR。
 
 若產品 repo 的 `.qa-aist.yaml` 包含：
 

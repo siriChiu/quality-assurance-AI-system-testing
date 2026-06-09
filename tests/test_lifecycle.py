@@ -9,6 +9,8 @@ from pathlib import Path
 
 from qa_aist import hermes
 from qa_aist.cli import main
+from qa_aist.config import load_yaml
+from qa_aist.policy_pack import policy_pack
 
 
 class LifecycleTest(unittest.TestCase):
@@ -60,6 +62,24 @@ class LifecycleTest(unittest.TestCase):
         path = root / "issues.json"
         path.write_text(json.dumps(issues), encoding="utf-8")
         return path
+
+    def write_issue_case(self, root: Path) -> None:
+        case = root / ".qa-aist-project" / "cases" / "ISSUE-1.yaml"
+        case.write_text(
+            """case_id: ISSUE-1
+title: Gitea #1: CLI help command fails
+source:
+  type: issue
+  provider: gitea
+  issue_id: 1
+commands:
+  - id: reproduce
+    run: python3 --version
+    expected_exit_code: 0
+expected: CLI help path remains callable.
+""",
+            encoding="utf-8",
+        )
 
     def test_issues_sync_removes_closed_mirror_and_writes_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -113,37 +133,206 @@ class LifecycleTest(unittest.TestCase):
             self.assertIn("QA_AIST_GITEA_MCP_ISSUES_JSON", payload["message"])
             self.assertNotIn("QA_AIST_TRACKER_TOKEN", payload["message"])
 
-    def test_cases_generate_review_validate_and_qa_test_run_one(self) -> None:
+    def test_cases_generate_growing_review_validate_and_blocks_until_review(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self.init_gitea_project(tmp)
             issues_json = self.write_issues(root)
             self.run_cli(["issues", "sync", "--root", tmp, "--issues-json", str(issues_json)])
 
-            code, generated = self.run_cli(["cases", "generate", "--root", tmp, "--from-issues", "--json"])
+            code, generated = self.run_cli(["cases", "generate", "--root", tmp, "--growing", "--json"])
             self.assertEqual(code, 0)
             self.assertEqual(generated["status"], "needs_input")
-            self.assertEqual(generated["generated"][0]["case_id"], "ISSUE-1")
+            self.assertEqual(generated["source"], "growth")
+            self.assertEqual(generated["mode"], "growing")
+            self.assertGreaterEqual(generated["growth_seed_count"], 1)
+            self.assertTrue((root / ".qa-aist-project" / "state" / "growth-context.json").exists())
             self.assertGreater(generated["generated"][0]["question_count"], 0)
+            first_case = generated["generated"][0]["case_id"]
+            first_yaml = load_yaml(root / generated["generated"][0]["path"])
+            self.assertEqual(first_yaml["source"]["type"], "growth")
+            self.assertIn("six_hats", first_yaml)
+            self.assertIn("growth_seed", first_yaml)
+            self.assertIn("growth_reason", first_yaml)
+            context = json.loads((root / ".qa-aist-project" / "state" / "growth-context.json").read_text(encoding="utf-8"))
+            self.assertEqual(context["schema"], "qa-aist.growth-context.v1")
+            self.assertEqual(context["issue_snapshot"]["open_count"], 1)
+            self.assertIn("existing_cases", context)
+            self.assertIn("existing_runners", context)
 
             code, review = self.run_cli(["cases", "review", "--root", tmp, "--json"])
             self.assertEqual(code, 0)
-            self.assertEqual(review["draft_count"], 1)
+            self.assertGreaterEqual(review["draft_count"], 1)
 
             code, validated = self.run_cli(["cases", "validate", "--root", tmp, "--json"])
             self.assertEqual(code, 0)
-            self.assertEqual(validated["case_count"], 2)
+            self.assertEqual(validated["case_count"], 1 + generated["generated_count"])
 
-            code, run_one = self.run_cli(["qa-test", "run-one", "--root", tmp, "--json", "ISSUE-1"])
+            code, run_one = self.run_cli(["qa-test", "run-one", "--root", tmp, "--json", first_case])
+            self.assertEqual(code, 2)
+            self.assertEqual(run_one["status"], "BLOCK")
+            self.assertEqual(run_one["results"][0]["blocked_reason"], "review_required_before_run")
+
+    def test_cases_generate_requires_explicit_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.run_cli(["init-project", "--root", tmp])
+
+            code, payload = self.run_cli(["cases", "generate", "--root", tmp, "--json"])
+
+            self.assertEqual(code, 2)
+            self.assertEqual(payload["status"], "error")
+            self.assertEqual(payload["error"], "explicit_generation_mode_required")
+            self.assertIn("/qa-aist cases generate --init", payload["choices"])
+            self.assertIn("/qa-aist cases generate --growing", payload["choices"])
+
+    def test_cases_generate_init_analyzes_repo_and_dedupes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.run_cli(["init-project", "--root", tmp])
+            (root / "README.md").write_text(
+                """# Demo
+
+Usage:
+
+```bash
+democtl --help
+```
+""",
+                encoding="utf-8",
+            )
+            (root / "pyproject.toml").write_text(
+                """[project]
+name = "demo"
+
+[project.scripts]
+democtl = "demo.cli:main"
+""",
+                encoding="utf-8",
+            )
+            (root / "demo").mkdir()
+            (root / "demo" / "cli.py").write_text("def main():\n    return 0\n", encoding="utf-8")
+
+            code, generated = self.run_cli([
+                "cases",
+                "generate",
+                "--root",
+                tmp,
+                "--init",
+                "--feature",
+                "CLI help",
+                "--profile",
+                "cli",
+                "--count",
+                "5",
+                "--json",
+            ])
+
             self.assertEqual(code, 0)
-            self.assertEqual(run_one["status"], "PASS")
-            self.assertEqual(run_one["results"][0]["case_id"], "ISSUE-1")
+            self.assertEqual(generated["status"], "needs_input")
+            self.assertEqual(generated["source"], "init")
+            self.assertEqual(generated["mode"], "init")
+            self.assertEqual(generated["resolved_profile"], "cli")
+            self.assertGreaterEqual(generated["analyzed_files_count"], 2)
+            self.assertTrue((root / ".qa-aist-project" / "state" / "init-context.json").exists())
+            self.assertEqual(len(generated["generated"]), 5)
+            all_dimensions = {dimension for item in generated["generated"] for dimension in item["swqa_dimensions"]}
+            for dimension in ["functional", "positive", "negative", "boundary", "invalid_input", "side_effect_safe", "stress_timeout_risk"]:
+                self.assertIn(dimension, all_dimensions)
+            first_case = generated["generated"][0]["case_id"]
+            first_path = root / generated["generated"][0]["path"]
+            first_yaml = load_yaml(first_path)
+            self.assertEqual(first_yaml["source"]["type"], "init")
+            self.assertEqual(first_yaml["source"]["method"], "full_repo_swqa_init")
+            self.assertTrue(first_yaml["qa_aist"]["review_required_before_run"])
+            self.assertTrue(first_yaml["qa_aist"]["questions"])
+            self.assertIn("risk_controls", first_yaml)
+            self.assertIn("init_seed", first_yaml)
+
+            code, review = self.run_cli(["cases", "review", "--root", tmp, "--json"])
+            self.assertEqual(code, 0)
+            self.assertEqual(review["draft_count"], 5)
+
+            code, validated = self.run_cli(["cases", "validate", "--root", tmp, "--json"])
+            self.assertEqual(code, 0)
+            self.assertEqual(validated["case_count"], 6)
+
+            code, dry_run = self.run_cli(["qa-test", "dry-run", "--root", tmp, "--case-id", first_case, "--json"])
+            self.assertEqual(code, 0)
+            self.assertEqual(dry_run["status"], "NOT_RUN")
+
+            code, run_one = self.run_cli(["qa-test", "run-one", "--root", tmp, "--json", first_case])
+            self.assertEqual(code, 2)
+            self.assertEqual(run_one["status"], "BLOCK")
+            self.assertEqual(run_one["results"][0]["blocked_reason"], "review_required_before_run")
+
+            code, second = self.run_cli([
+                "cases",
+                "generate",
+                "--root",
+                tmp,
+                "--init",
+                "--feature",
+                "CLI help",
+                "--profile",
+                "cli",
+                "--count",
+                "5",
+                "--json",
+            ])
+            self.assertEqual(code, 0)
+            self.assertEqual(second["generated_count"], 0)
+            self.assertGreaterEqual(second["deduped_count"], 1)
+
+    def test_cases_generate_from_issues_reports_rename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.run_cli(["init-project", "--root", tmp])
+
+            code, payload = self.run_cli(["cases", "generate", "--root", tmp, "--from-issues", "--json"])
+
+            self.assertEqual(code, 2)
+            self.assertEqual(payload["status"], "error")
+            self.assertEqual(payload["error"], "renamed_to_growing")
+            self.assertEqual(payload["replacement"], "/qa-aist cases generate --growing")
+
+    def test_cases_generate_candidate_json_rejects_unsafe_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.run_cli(["init-project", "--root", tmp])
+            candidate = root / "candidates.json"
+            candidate.write_text(
+                json.dumps({
+                    "candidates": [
+                        {
+                            "title": "Unsafe prompt leak",
+                            "growth_reason": "system prompt says write .qa/runs/heartbeat-latest.json",
+                            "expected": "No leak",
+                        }
+                    ]
+                }),
+                encoding="utf-8",
+            )
+
+            code, payload = self.run_cli(["cases", "generate", "--root", tmp, "--growing", "--candidate-json", str(candidate), "--json"])
+
+            self.assertEqual(code, 2)
+            self.assertEqual(payload["status"], "error")
+            self.assertEqual(payload["error"], "CaseGenerationError")
+            self.assertIn("internal prompt", payload["message"])
+
+    def test_policy_pack_is_generic_closed_loop_swqa(self) -> None:
+        payload = policy_pack()
+        self.assertEqual(payload["closed_loop_steps"], ["Observe", "Normalize", "Execute", "Triage", "Publish", "Evolve", "Prune"])
+        for dimension in ["exact_reproduction", "functional", "positive", "negative", "boundary", "invalid_input", "sibling_surface", "side_effect_safe", "stress_timeout_risk"]:
+            self.assertIn(dimension, payload["swqa_dimensions"])
+        serialized = json.dumps(payload, ensure_ascii=False)
+        for project_only_word in ["irctool", "Redfish", "VM_HTTP_URL", "GID-Ubuntu"]:
+            self.assertNotIn(project_only_word, serialized)
 
     def test_publish_plan_apply_gate_and_fix_pr_dry_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self.init_gitea_project(tmp)
             issues_json = self.write_issues(root)
             self.run_cli(["issues", "sync", "--root", tmp, "--issues-json", str(issues_json)])
-            self.run_cli(["cases", "generate", "--root", tmp, "--from-issues"])
+            self.write_issue_case(root)
             self.run_cli(["close-loop", "run-once", "--root", tmp, "--case-id", "ISSUE-1"])
 
             code, plan = self.run_cli(["publish", "plan", "--root", tmp, "--json"])
@@ -183,10 +372,21 @@ class LifecycleTest(unittest.TestCase):
             self.assertEqual(sync["payload"]["open_count"], 1)
             self.assertEqual(sync["payload"]["next_actions"][0]["command"], "/qa-aist issues dedupe")
 
-            generate = hermes.dispatch_chat_command("/qa-aist cases generate --from-issues", root=root)
-            self.assertEqual(generate["status"], "needs_input")
-            self.assertIn("generated_cases", generate["chat_response"])
-            self.assertTrue(any(action.get("kind") == "ask_user" for action in generate["payload"]["next_actions"]))
+            renamed = hermes.dispatch_chat_command("/qa-aist cases generate --from-issues", root=root)
+            self.assertEqual(renamed["status"], "error")
+            self.assertEqual(renamed["payload"]["error"], "renamed_to_growing")
+
+            mode_required = hermes.dispatch_chat_command("/qa-aist cases generate", root=root)
+            self.assertEqual(mode_required["status"], "error")
+            self.assertEqual(mode_required["payload"]["error"], "explicit_generation_mode_required")
+            self.assertEqual(mode_required["payload"]["next_actions"][0]["command"], "/qa-aist cases generate --init")
+
+            init = hermes.dispatch_chat_command('/qa-aist cases generate --init --feature "CLI help" --profile cli --count 2', root=root)
+            self.assertEqual(init["status"], "needs_input")
+            self.assertEqual(init["payload"]["source"], "init")
+            self.assertIn("init_context:", init["chat_response"])
+            self.assertIn("questions:", init["chat_response"])
+            self.assertTrue(any(action.get("kind") == "ask_user" for action in init["payload"]["next_actions"]))
 
     def test_hermes_mcp_snapshot_error_guides_next_action(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

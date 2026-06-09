@@ -176,6 +176,24 @@ def render_chat_response(payload: dict[str, Any], *, exit_code: int = 0) -> str:
         lines.append(f"         open_issues: {payload.get('open_count')}")
     if "generated" in payload and isinstance(payload.get("generated"), list):
         lines.append(f"         generated_cases: {len(payload.get('generated', []))}")
+    if "growth_seed_count" in payload:
+        lines.append(f"         growth_seeds: {payload.get('growth_seed_count')}")
+    if "deduped_count" in payload:
+        lines.append(f"         deduped_cases: {payload.get('deduped_count')}")
+    if payload.get("init_context_path"):
+        lines.append(f"         init_context: {payload.get('init_context_path')}")
+    if "analyzed_files_count" in payload:
+        lines.append(f"         analyzed_files: {payload.get('analyzed_files_count')}")
+    if "missing_input_count" in payload:
+        lines.append(f"         missing_inputs: {payload.get('missing_input_count')}")
+    if payload.get("growth_context_path"):
+        lines.append(f"         growth_context: {payload.get('growth_context_path')}")
+    if payload.get("source"):
+        lines.append(f"         source: {payload.get('source')}")
+    if payload.get("resolved_profile"):
+        lines.append(f"         profile: {payload.get('resolved_profile')}")
+    if isinstance(payload.get("questions"), list) and payload.get("questions"):
+        lines.append(f"         questions: {len(payload.get('questions', []))}")
     if "plan_path" in payload:
         lines.append(f"         plan: {payload.get('plan_path')}")
     if "blocked_by_gate" in payload:
@@ -304,7 +322,7 @@ def suggest_next_actions(payload: dict[str, Any], engine_argv: list[str], exit_c
             _next("初始化產品 repo", "/qa-aist setup", confirm=True),
             _next("執行健康檢查", "/qa-aist doctor"),
             _next("同步 Gitea issues", "/qa-aist issues sync", confirm=True),
-            _next("看 qa-test 教學", "/qa-aist help qa-test"),
+            _next("首次建立 SWQA cases", "/qa-aist cases generate --init", confirm=True),
         ]
     if current == "setup":
         if "gitea_mcp_snapshot_missing" in blockers:
@@ -349,6 +367,7 @@ def suggest_next_actions(payload: dict[str, Any], engine_argv: list[str], exit_c
             ]
         return [
             _next("同步 Gitea issues", "/qa-aist issues sync", confirm=True),
+            _next("首次建立 SWQA cases", "/qa-aist cases generate --init", confirm=True),
             _next("列出測試 cases", "/qa-aist qa-test list"),
         ]
     if current == "config validate":
@@ -360,7 +379,7 @@ def suggest_next_actions(payload: dict[str, Any], engine_argv: list[str], exit_c
         if exit_code == 0 and status in {"ok", "dry_run"}:
             return [
                 _next("檢查重複 issue", "/qa-aist issues dedupe"),
-                _next("從 issues 產生測試 cases", "/qa-aist cases generate --from-issues", confirm=True),
+                _next("用最新狀態長出測試 cases", "/qa-aist cases generate --growing", confirm=True),
                 _next("查看 issue sync 狀態", "/qa-aist issues status"),
             ]
         return [
@@ -375,14 +394,25 @@ def suggest_next_actions(payload: dict[str, Any], engine_argv: list[str], exit_c
             ]
         return [
             _next("檢查重複 issue", "/qa-aist issues dedupe"),
-            _next("產生測試 cases", "/qa-aist cases generate --from-issues", confirm=True),
+            _next("長出測試 cases", "/qa-aist cases generate --growing", confirm=True),
         ]
     if current == "issues dedupe":
         return [
-            _next("產生測試 cases", "/qa-aist cases generate --from-issues", confirm=True),
+            _next("長出測試 cases", "/qa-aist cases generate --growing", confirm=True),
             _next("查看單一 issue", "/qa-aist issues show <issue_id>"),
         ]
     if current == "cases generate":
+        if error == "explicit_generation_mode_required":
+            return [
+                _next("首次全 repo SWQA 建案", "/qa-aist cases generate --init", confirm=True),
+                _next("依最新狀態擴散 cases", "/qa-aist cases generate --growing", confirm=True),
+                _next("查看 cases 教學", "/qa-aist help cases"),
+            ]
+        if error == "candidate_json_requires_growing":
+            return [
+                _next("用 growing 匯入候選 JSON", "/qa-aist cases generate --growing --candidate-json <path>", confirm=True),
+                _next("首次全 repo SWQA 建案", "/qa-aist cases generate --init", confirm=True),
+            ]
         if status == "needs_input":
             return [
                 _next("審查待補資訊", "/qa-aist cases review"),
@@ -536,7 +566,12 @@ def build_agent_manifest(*, wrapper_path: str | None = None, runner_command: str
             f"{PRIMARY_PREFIX} issues status",
             f"{PRIMARY_PREFIX} issues show <issue_id>",
             f"{PRIMARY_PREFIX} issues dedupe",
-            f"{PRIMARY_PREFIX} cases generate --from-issues",
+            f"{PRIMARY_PREFIX} cases generate --init",
+            f"{PRIMARY_PREFIX} cases generate --growing",
+            f"{PRIMARY_PREFIX} cases generate --init --feature <name>",
+            f"{PRIMARY_PREFIX} cases generate --init --profile auto|cli|api|hardware|repo",
+            f"{PRIMARY_PREFIX} cases generate --init --count 5",
+            f"{PRIMARY_PREFIX} cases generate --growing --candidate-json <path>",
             f"{PRIMARY_PREFIX} cases review",
             f"{PRIMARY_PREFIX} cases validate",
             f"{PRIMARY_PREFIX} qa-test list",
@@ -676,6 +711,15 @@ When the user invokes `/qa-aist <arguments>`, you must:
 
 Gitea MCP rule: if the product repo config uses `tracker.gitea.backend: mcp`, you may use Hermes' configured Gitea MCP tooling only to read issue data before `/qa-aist issues sync`. Write the raw MCP issue result as JSON to `.qa-aist-project/state/gitea-mcp/issues.json`, unless `.qa-aist.yaml` or `QA_AIST_GITEA_MCP_ISSUES_JSON` specifies another path. Then run the QA-AIST dispatcher normally. Do not treat the MCP read itself as a completed sync.
 
+Gitea MCP snapshot workflow (when the user confirms, chooses a suggested sync option, or invokes `/qa-aist issues sync` after `gitea_mcp_snapshot_missing`):
+1. Use Gitea MCP read-only pagination for the configured repo, typically `state=all` and `perPage=50`, until an empty page is returned.
+2. Preserve the MCP payload shape as JSON and write it to the configured `mcp_issues_json` path, creating parent directories if needed.
+3. If the MCP list response includes pull requests mixed with issues, keep only real Gitea issues before writing the QA-AIST `issues` list. A reliable guard is `html_url` containing `/issues/` and excluding `/pulls/`.
+4. Immediately run `/qa-aist issues sync` via the dispatcher command.
+5. Never use Gitea MCP for remote writes; publish/PR writes must remain gated through QA-AIST commands.
+
+Reference: see `references/gitea-mcp-snapshot.md` for the MCP snapshot pitfall and recommended JSON shape.
+
 Setup rule: `/qa-aist setup` auto-detects `git remote origin`. If the remote looks like Gitea, setup writes `tracker.provider: gitea`, `tracker.gitea.backend: mcp`, `base_url`, `repo`, and the MCP snapshot path into `.qa-aist.yaml`. Do not ask the user to hand-edit this unless detection is wrong or they explicitly want HTTP token mode.
 
 ## Interactive Guidance Model
@@ -708,8 +752,11 @@ Recommended interaction by situation:
 - If setup reports `auto_configured_mcp: true`, explain that QA-AIST is configured and the remaining step is a Hermes Gitea MCP read to create the local snapshot.
 - After `/qa-aist doctor` warning: explain the warning and suggest the smallest check that resolves it.
 - After `gitea_mcp_snapshot_missing`: offer to use Hermes Gitea MCP read-only fetch, write the snapshot, then rerun `/qa-aist issues sync`.
-- After `/qa-aist issues sync`: suggest `/qa-aist issues dedupe` and `/qa-aist cases generate --from-issues`.
-- After `cases generate` returns questions: ask the questions interactively before treating the draft as runnable.
+- After `/qa-aist issues sync`: suggest `/qa-aist issues dedupe` and `/qa-aist cases generate --growing`.
+- If the user asks for first-time test ideas or has no cases yet, run `/qa-aist cases generate --init`; it scans README, code, package metadata, existing runners, existing cases, and project rules to create an initial SWQA test map.
+- If the user asks for follow-up ideas after issues/PRs/runs changed, run `/qa-aist cases generate --growing`; it creates incremental growth draft cases from repo, issues, PR references, latest run, reports, existing cases, and runners.
+- If the user types bare `/qa-aist cases generate`, run the dispatcher and present its mode-selection error; do not silently choose a mode.
+- After `cases generate --init` or `cases generate --growing` returns questions: ask the questions interactively before treating the draft as runnable.
 - After `/qa-aist qa-test list`: suggest dry-run or running one selected case, not all cases by default.
 - After a test run: suggest `/qa-aist report status` and `/qa-aist publish plan`.
 - Before `/qa-aist publish apply` or `/qa-aist fix-issues submit-pr`: ask for explicit confirmation and summarize what will be written remotely.
@@ -731,7 +778,10 @@ Examples:
 {runner_command} --root "$PWD" /qa-aist status
 {runner_command} --root "$PWD" /qa-aist doctor
 {runner_command} --root "$PWD" /qa-aist issues sync
-{runner_command} --root "$PWD" /qa-aist cases generate --from-issues
+{runner_command} --root "$PWD" /qa-aist cases generate --init
+{runner_command} --root "$PWD" /qa-aist cases generate --growing
+{runner_command} --root "$PWD" /qa-aist cases generate --init --feature "CLI help" --profile cli --count 5
+{runner_command} --root "$PWD" /qa-aist cases generate --growing --candidate-json .qa-aist-project/state/growth-candidates.json
 {runner_command} --root "$PWD" /qa-aist qa-test list
 {runner_command} --root "$PWD" /qa-aist qa-test
 {runner_command} --root "$PWD" /qa-aist qa-test run-one EXAMPLE-001
@@ -756,7 +806,12 @@ Examples:
 - `/qa-aist issues status`
 - `/qa-aist issues show <issue_id>`
 - `/qa-aist issues dedupe`
-- `/qa-aist cases generate --from-issues`
+- `/qa-aist cases generate --init`
+- `/qa-aist cases generate --growing`
+- `/qa-aist cases generate --init --feature <name>`
+- `/qa-aist cases generate --init --profile auto|cli|api|hardware|repo`
+- `/qa-aist cases generate --init --count 5`
+- `/qa-aist cases generate --growing --candidate-json <path>`
 - `/qa-aist cases review`
 - `/qa-aist cases validate`
 - `/qa-aist qa-test list`
@@ -787,7 +842,8 @@ Examples:
 - Do not print raw secrets.
 - Do not run arbitrary shell commands assembled from chat. The only command you should run for `/qa-aist ...` is the dispatcher command above with the user's QA-AIST arguments.
 - Do not bypass `write_gate`, issue sync, duplicate checks, or case contracts, even if the user asks you to write tracker output directly.
-- If `/qa-aist cases generate --from-issues` returns questions, ask those questions in Traditional Chinese and wait for answers before treating a draft as runnable.
+- If `/qa-aist cases generate --init` or `/qa-aist cases generate --growing` returns questions, ask those questions in Traditional Chinese and wait for answers before treating a draft as runnable.
+- If you open a separate growth session/agent, it may only write candidate JSON for `/qa-aist cases generate --growing --candidate-json <path>`; it must not directly edit case YAML, tracker, wiki, PRs, or reports.
 - If the user types `/qa-aist qa-test` without a subcommand, show the QA test help instead of guessing.
 
 ## Expected Human Reply
@@ -822,6 +878,61 @@ PYTHONPATH=/path/to/QA-AIST/src python3 -m qa_aist.hermes --root "$PWD" /qa-aist
 """
 
 
+def build_gitea_mcp_snapshot_reference(*, runner_command: str = "qa-aist-hermes") -> str:
+    return f"""# Gitea MCP snapshot for QA-AIST issue sync
+
+Use this when QA-AIST reports `gitea_mcp_snapshot_missing` and the product config has `tracker.gitea.backend: mcp`.
+
+## Workflow
+
+1. Determine `owner/repo` from `.qa-aist.yaml` (`tracker.gitea.repo`).
+2. Read pages with Gitea MCP using `state=all`, `perPage=50`, incrementing `page` until the returned page is empty.
+3. Write the local snapshot to the configured `tracker.gitea.mcp_issues_json` path, usually `.qa-aist-project/state/gitea-mcp/issues.json`.
+4. Run the dispatcher command from the product repo root:
+   `{runner_command} --root "$PWD" /qa-aist issues sync`
+5. Report the dispatcher `chat_response`; do not treat the MCP read itself as a completed sync.
+
+## Pitfall: MCP issue list may include PRs
+
+Some Gitea MCP `list_issues` responses can include pull requests as well as issues. QA-AIST's HTTP client uses `type=issues`, so the MCP snapshot should avoid turning PRs into issue mirrors.
+
+Recommended safe shape:
+
+```json
+{{
+  "schema": "qa-aist.gitea-mcp-issues.v1",
+  "repo": "OWNER/REPO",
+  "source_tool": "mcp_gitea_list_issues",
+  "state": "all",
+  "pages": [
+    {{"page": 1, "perPage": 50, "returned": 50}},
+    {{"page": 2, "perPage": 50, "returned": 0}}
+  ],
+  "issues": [
+    {{
+      "number": 123,
+      "state": "open",
+      "title": "...",
+      "body": "...",
+      "html_url": "https://.../issues/123",
+      "labels": ["qa-auto"],
+      "comments": [],
+      "updated_at": "..."
+    }}
+  ]
+}}
+```
+
+Filtering rule:
+
+- Keep `html_url` containing `/issues/`.
+- Exclude `html_url` containing `/pulls/` or entries carrying explicit PR markers.
+- Preserve real issue bodies/comments when available; closed issues may be minimal because QA-AIST only needs them to remove stale mirrors.
+
+Remote write rule: never use Gitea MCP for comments/wiki/PR writes in QA-AIST. Only `/qa-aist publish apply` and `/qa-aist fix-issues submit-pr` may perform gated writes.
+"""
+
+
 def install_skill(
     skills_dir: str | Path | None = None,
     *,
@@ -843,11 +954,15 @@ def install_skill(
         }
     skill_dir.mkdir(parents=True, exist_ok=True)
     skill_path.write_text(build_skill_markdown(runner_command=runner_command), encoding="utf-8")
+    reference_path = skill_dir / "references" / "gitea-mcp-snapshot.md"
+    reference_path.parent.mkdir(parents=True, exist_ok=True)
+    reference_path.write_text(build_gitea_mcp_snapshot_reference(runner_command=runner_command), encoding="utf-8")
     return {
         "status": "ok",
         "skills_dir": str(base),
         "skill_dir": str(skill_dir),
         "skill_path": str(skill_path),
+        "reference_path": str(reference_path),
         "command_prefix": PRIMARY_PREFIX,
         "reload_command": "/reload-skills",
         "runner_command": runner_command,
@@ -905,7 +1020,10 @@ def _overview_help_payload() -> dict[str, Any]:
         {"command": "/qa-aist issues status", "purpose": "查看本地 issue snapshot 是否已同步"},
         {"command": "/qa-aist issues show <issue_id>", "purpose": "查看單一 issue mirror"},
         {"command": "/qa-aist issues dedupe", "purpose": "檢查本地 active issues 是否疑似重複"},
-        {"command": "/qa-aist cases generate --from-issues", "purpose": "依 synced issues 產生 draft test cases，缺資訊會列問題"},
+        {"command": "/qa-aist cases generate --init", "purpose": "首次全 repo SWQA 建案，依 README/code/metadata 產生 draft cases"},
+        {"command": "/qa-aist cases generate --growing", "purpose": "依最新 issues/PR/latest-run/reports 狀態擴散 draft cases"},
+        {"command": "/qa-aist cases generate --init --feature \"CLI help\" --profile cli --count 5", "purpose": "指定功能、profile 與數量來引導初始建案"},
+        {"command": "/qa-aist cases generate --growing --candidate-json <path>", "purpose": "匯入 Hermes growth session 候選 JSON，經 engine 驗證後寫入 draft"},
         {"command": "/qa-aist cases review", "purpose": "查看 draft cases 與待回答問題"},
         {"command": "/qa-aist cases validate", "purpose": "驗證 generated case YAML 是否可被 qa-test 執行"},
         {"command": "/qa-aist qa-test list", "purpose": "列出可以跑的測試 case"},
@@ -999,7 +1117,7 @@ def _overview_help_text(commands: list[dict[str, str]]) -> str:
             "1. `/qa-aist setup`：初始化目前產品 repo。",
             "2. `/qa-aist doctor`：確認設定和目錄健康。",
             "3. `/qa-aist issues sync`：同步 Gitea issues 到本地 mirror。",
-            "4. `/qa-aist cases generate --from-issues`：依 issue 產生 draft cases。",
+            "4. `/qa-aist cases generate --init`：首次分析 README、程式碼、metadata 與 rules，建立 SWQA draft cases。",
             "5. `/qa-aist cases review`：回答缺少的測試輸入問題。",
             "6. `/qa-aist qa-test run-one <case_id>`：先跑一個 case。",
             "7. `/qa-aist publish plan`：產生 wiki/issues 寫入計畫並通過 gate。",
@@ -1025,8 +1143,10 @@ def _workflow_help_payload(topic: str) -> dict[str, Any]:
             "再用 `/qa-aist issues dedupe` 確認沒有重複 active issue。",
         ],
         "cases": [
-            "cases 用來從 synced issues 產生可審查的 test case contract。",
-            "先跑 `/qa-aist cases generate --from-issues`。",
+            "cases 用來產生可審查的 growth draft case contract。",
+            "首次導入先跑 `/qa-aist cases generate --init`，QA-AIST 會讀 README、程式碼、metadata、既有 runners/cases/rules，建立功能、正向、反向、邊界與壓力測試 draft。",
+            "後續有新 issues、PR、latest run 或 reports 時跑 `/qa-aist cases generate --growing`，讓 case 從最新狀態繼續擴散。",
+            "可用 `--feature`、`--profile auto|cli|api|hardware|repo`、`--count` 控制生成方向；獨立 growth session 的候選 JSON 必須搭配 `--growing --candidate-json` 匯入。",
             "如果輸出 questions，Hermes 必須用繁中問答補齊 fixture、輸入檔、成功條件和副作用邊界。",
         ],
         "publish": [
@@ -1094,12 +1214,16 @@ def _positional_args(argv: list[str]) -> list[str]:
     value_options = {
         "--agent-dir",
         "--case-id",
+        "--candidate-json",
         "--config",
+        "--count",
         "--expected-contract-hash",
+        "--feature",
         "--issue",
         "--issues-json",
         "--latest-run",
         "--plan",
+        "--profile",
         "--result",
         "--root",
         "--runner-command",
@@ -1210,7 +1334,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", default=".", help="Product repository root provided by Hermes context")
     parser.add_argument("message", nargs=argparse.REMAINDER, help="Hermes chat message, for example: /qa-aist status")
     args = parser.parse_args(argv)
-    message = " ".join(args.message).strip()
+    message = args.message[0].strip() if len(args.message) == 1 else shlex.join(args.message).strip()
     result = dispatch_chat_command(message, root=args.root)
     print(json_dumps(result))
     return int(result["exit_code"])

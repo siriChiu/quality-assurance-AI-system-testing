@@ -24,6 +24,8 @@ def run_case(contract: CaseContract, context: RunContext, *, dry_run: bool = Fal
     started_at = utc_now()
     case_evidence_dir = context.evidence_dir / contract.case_id
     case_evidence_dir.mkdir(parents=True, exist_ok=True)
+    if not dry_run and _review_required_before_run(contract):
+        return _blocked_case(contract, context.root, case_evidence_dir, started_at)
     command_results = []
     status = "PASS"
     exit_code = 0
@@ -49,6 +51,49 @@ def run_case(contract: CaseContract, context: RunContext, *, dry_run: bool = Fal
     result_path = case_evidence_dir / "result.json"
     result_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     payload["result_path"] = _relative_or_str(result_path, context.root)
+    return payload
+
+
+def _review_required_before_run(contract: CaseContract) -> bool:
+    qa = contract.raw.get("qa_aist") if isinstance(contract.raw.get("qa_aist"), dict) else {}
+    return bool(qa.get("review_required_before_run"))
+
+
+def _blocked_case(contract: CaseContract, root: Path, evidence_dir: Path, started_at: str) -> dict[str, Any]:
+    ended_at = utc_now()
+    command_results = [
+        {
+            "id": command.id,
+            "run": command.run,
+            "expected_exit_code": command.expected_exit_code,
+            "exit_code": 2,
+            "status": "BLOCK",
+            "started_at": None,
+            "ended_at": None,
+            "stdout": None,
+            "stderr": None,
+            "rc": None,
+            "meta": None,
+            "blocked_reason": "review_required_before_run",
+        }
+        for command in contract.commands
+    ]
+    payload = {
+        "case_id": contract.case_id,
+        "title": contract.title,
+        "status": "BLOCK",
+        "commands": command_results,
+        "evidence": [],
+        "contract_hash": contract.contract_hash,
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "exit_code": 2,
+        "blocked_reason": "review_required_before_run",
+    }
+    result_path = evidence_dir / "result.json"
+    result_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    payload["result_path"] = _relative_or_str(result_path, root)
+    payload["evidence"] = [payload["result_path"]]
     return payload
 
 

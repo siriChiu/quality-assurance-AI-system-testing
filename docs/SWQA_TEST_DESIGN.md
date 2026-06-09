@@ -47,6 +47,65 @@ bug_pattern_card:
     unconfirmed_claims: forbidden
 ```
 
+## Init and growing case generation
+
+`/qa-aist cases generate` requires an explicit mode so users do not confuse first-time test design with incremental growth.
+
+`/qa-aist cases generate --init` is the first-time full-repo SWQA map. It scans README, code inventory, package metadata, existing runners, existing cases, and project rules, then proposes a small high-value set of draft cases for functional, positive, negative, boundary, side-effect-safe, and stress/timeout-risk coverage.
+
+`/qa-aist cases generate --growing` is the follow-up mode. It is not limited to issue-to-case conversion; it observes repo metadata, current issue mirrors, PR references, latest run state, reports, existing cases/runners, and project rules, then proposes new draft cases from fresh signals.
+
+```yaml
+growth_generation:
+  loop:
+    - Observe
+    - Normalize
+    - Triage
+    - Evolve
+    - Prune
+  six_hats:
+    white: facts from repo/issues/PR/latest-run
+    red: user-facing risk or pain
+    black: regression and side-effect risk
+    yellow: value of capturing this as a repeatable contract
+    green: sibling surfaces and alternative coverage
+    blue: decision such as add_new_tc or update_existing_tc
+  default_dimensions:
+    - exact_reproduction
+    - positive
+    - negative
+    - boundary
+    - invalid_input
+    - sibling_surface
+    - side_effect_safe
+    - stress_timeout_risk
+  repo_signals:
+    - code_inventory
+    - README
+    - pyproject_or_package_metadata
+    - existing_runners
+    - existing_case_contracts
+    - issue_snapshot
+    - pull_request_references
+    - latest_run
+    - reports
+  if_command_or_fixture_is_unclear:
+    draft: true
+    review_required_before_run: true
+    status_if_executed: BLOCK
+  ask_user_for:
+    - target_or_feature_surface
+    - runner_or_command
+    - fixture_or_input_file
+    - credential_env_names_only
+    - success_criteria
+    - side_effect_boundary
+```
+
+Do not invent a runnable command when only the testing idea is known. A draft may contain a review guard command for schema stability, but QA-AIST must block formal execution until the user or project contract confirms the real command, fixture, and expected result.
+
+Hermes may use a separate growth session or agent for broader analysis, but that session may only produce candidate JSON. QA-AIST remains the sole writer of case YAML and must validate schema, dedupe fingerprints, raw-secret leakage, internal prompt leakage, dangerous `.qa` runtime paths, and command fields before writing any draft contract.
+
 ## CLI parser and flag-order matrix
 
 When a bug involves CLI flags, arguments, parser normalization, contextual help, or command contracts, test the matrix below. Do not stop at the one command reported by the user.

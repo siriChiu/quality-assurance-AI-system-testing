@@ -11,7 +11,7 @@ Hermes 回覆不是純 JSON dump。QA-AIST dispatcher 會在 payload 裡放 `nex
 /qa-aist doctor
 /qa-aist issues sync
 /qa-aist issues dedupe
-/qa-aist cases generate --from-issues
+/qa-aist cases generate --init
 /qa-aist cases review
 /qa-aist cases validate
 /qa-aist qa-test list
@@ -29,7 +29,7 @@ Hermes 回覆不是純 JSON dump。QA-AIST dispatcher 會在 payload 裡放 `nex
 | setup | `setup`, `init-project`, `status`, `doctor` | bootstrap and health checks |
 | config | `show`, `validate` | inspect host-owned `.qa-aist.yaml` |
 | issues | `sync`, `status`, `show`, `dedupe` | sync Gitea issue mirrors and detect duplicates |
-| cases | `generate`, `review`, `validate` | generate/review case contracts from synced issues |
+| cases | `generate`, `review`, `validate` | generate/review growth draft case contracts |
 | qa-test | `list`, `validate`, `dry-run`, `run`, `run-one`, `help` | execute case contracts and collect evidence |
 | publish | `plan`, `apply`, `status` | convert latest run into gated Gitea wiki/issues writes |
 | fix-issues | `plan`, `run`, `submit-pr`, `status` | preflight repair work and create Gitea PRs |
@@ -53,7 +53,10 @@ Hermes 回覆不是純 JSON dump。QA-AIST dispatcher 會在 payload 裡放 `nex
 qa-aist init-project --root <target-repo>
 qa-aist init-project --root <target-repo> --tracker-provider gitea --gitea-backend mcp --gitea-base-url https://git.example.com --gitea-repo owner/repo
 qa-aist issues sync --root <target-repo>
-qa-aist cases generate --root <target-repo> --from-issues
+qa-aist cases generate --root <target-repo> --init
+qa-aist cases generate --root <target-repo> --init --feature "CLI help" --profile cli --count 5
+qa-aist cases generate --root <target-repo> --growing
+qa-aist cases generate --root <target-repo> --growing --candidate-json growth-candidates.json
 qa-aist qa-test run-one --root <target-repo> ISSUE-1
 qa-aist publish plan --root <target-repo>
 qa-aist publish apply --root <target-repo>
@@ -73,6 +76,23 @@ If `.qa-aist.yaml` uses `tracker.gitea.backend: mcp`, Hermes must first use its 
 ```text
 /qa-aist issues sync
 ```
+
+## Case Generation
+
+`cases generate` requires an explicit mode. Bare `/qa-aist cases generate` returns `explicit_generation_mode_required` so Hermes can ask the user which path they want:
+
+```text
+/qa-aist cases generate --init
+/qa-aist cases generate --growing
+/qa-aist cases generate --init --feature "CLI help" --profile cli --count 5
+/qa-aist cases generate --growing --candidate-json <path>
+```
+
+`--init` is the first-time full-repo SWQA map. It scans README, code inventory, package metadata, existing runners, existing cases, and rules to generate functional, positive, negative, boundary, side-effect-safe, and stress/timeout draft contracts.
+
+`--growing` is the follow-up mode. It creates draft YAML contracts under `.qa-aist-project/cases/` using repo signals, issue snapshot, PR references, latest run, reports, existing cases/runners, and the built-in SWQA policy pack. Drafts include `growth_seed`, `six_hats`, `growth_reason`, `qa_aist.questions`, and usually `review_required_before_run: true`; those cases are visible to `cases review` and `qa-test dry-run`, but formal execution returns `BLOCK` until the contract is reviewed and given a confirmed command/fixture.
+
+`--from-issues` has been replaced by growing mode and returns a structured `renamed_to_growing` error.
 
 ## Remote Write Rule
 

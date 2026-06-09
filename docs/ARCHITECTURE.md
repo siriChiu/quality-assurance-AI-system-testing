@@ -50,6 +50,26 @@ explicit no-op/dry-run stages unless a future adapter is enabled behind the
 write gate; they are still emitted in run summaries so automation can verify
 that no step was silently skipped.
 
+## SWQA policy pack
+
+Case generation and close-loop guidance share the built-in policy pack:
+
+```text
+Observe -> Normalize -> Execute -> Triage -> Publish -> Evolve -> Prune
+```
+
+The policy pack is intentionally generic. It defines stable dimensions such as exact reproduction, positive, negative, boundary, invalid input, sibling surface, side-effect-safe, and stress/timeout-risk coverage. Project-specific assumptions such as lab topology, hardware fixture paths, Redfish baselines, or VM images belong in the host project's `.qa-aist-project/rules/` or generated case contracts, not in QA-AIST core.
+
+## Init and growing case generation
+
+`cases generate` requires `--init` or `--growing`; a bare command returns `explicit_generation_mode_required`.
+
+`cases generate --init` builds `.qa-aist-project/state/init-context.json` from README presence, code inventory, package metadata, existing cases, runners, and rules. It writes `source.type: init` draft contracts for functional, positive, negative, boundary, side-effect-safe, and stress/timeout-risk coverage.
+
+`cases generate --growing` builds `.qa-aist-project/state/growth-context.json` from repo metadata, issue snapshots, PR references, latest run, publish plan, existing cases, runners, and rules. It then writes `source.type: growth` draft case contracts under `.qa-aist-project/cases/`.
+
+Hermes may use a separate growth session to analyze the context, but that session may only produce candidate JSON. QA-AIST validates candidate schema, dedupe fingerprints, secret leakage, internal prompt leakage, dangerous `.qa` runtime paths, and command fields before writing YAML.
+
 ## Invariants
 
 ```yaml

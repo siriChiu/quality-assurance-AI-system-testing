@@ -24,7 +24,8 @@ from .config import (
 )
 from .case_generation import (
     CaseGenerationError,
-    generate_cases_from_issues,
+    generate_cases_init,
+    generate_cases_growing,
     review_generated_cases,
     validate_generated_cases,
 )
@@ -348,9 +349,71 @@ def cmd_issues_dedupe(args: argparse.Namespace) -> int:
 def cmd_cases_generate(args: argparse.Namespace) -> int:
     try:
         config = load_project_config(Path(args.root), args.config)
-        if not args.from_issues:
-            return print_json({"status": "error", "error": "generation_source_required", "message": "Use --from-issues for V1."}, exit_code=2)
-        payload = generate_cases_from_issues(config, issue_id=args.issue, force=args.force)
+        if args.from_issues:
+            return print_json(
+                {
+                    "status": "error",
+                    "error": "renamed_to_growing",
+                    "message": "cases generate --from-issues has been replaced by the growing generator. Use /qa-aist cases generate --growing.",
+                    "replacement": "/qa-aist cases generate --growing",
+                },
+                exit_code=2,
+            )
+        modes = [name for name in ["init", "growing"] if getattr(args, name)]
+        if not modes:
+            return print_json(
+                {
+                    "status": "error",
+                    "error": "explicit_generation_mode_required",
+                    "message": "cases generate requires an explicit mode. Use /qa-aist cases generate --init for first-time full-repo SWQA generation, or /qa-aist cases generate --growing for incremental growth from latest repo/issues/PR/run state.",
+                    "choices": [
+                        "/qa-aist cases generate --init",
+                        "/qa-aist cases generate --growing",
+                    ],
+                },
+                exit_code=2,
+            )
+        if len(modes) > 1:
+            return print_json(
+                {
+                    "status": "error",
+                    "error": "ambiguous_generation_mode",
+                    "message": "Choose exactly one generation mode: --init or --growing.",
+                    "choices": [
+                        "/qa-aist cases generate --init",
+                        "/qa-aist cases generate --growing",
+                    ],
+                },
+                exit_code=2,
+            )
+        if args.candidate_json and not args.growing:
+            return print_json(
+                {
+                    "status": "error",
+                    "error": "candidate_json_requires_growing",
+                    "message": "--candidate-json is only for advanced growing sessions. Use /qa-aist cases generate --growing --candidate-json <path>.",
+                    "replacement": "/qa-aist cases generate --growing --candidate-json <path>",
+                },
+                exit_code=2,
+            )
+        if args.init:
+            payload = generate_cases_init(
+                config,
+                feature=args.feature,
+                profile=args.profile,
+                count=args.count,
+                force=args.force,
+            )
+        else:
+            payload = generate_cases_growing(
+                config,
+                feature=args.feature,
+                profile=args.profile,
+                count=args.count,
+                force=args.force,
+                candidate_json=args.candidate_json,
+                issue_id=args.issue,
+            )
     except (QAConfigError, CaseGenerationError, IssueSyncError) as exc:
         return _error_payload(exc)
     return print_json(payload, exit_code=0 if payload.get("status") != "error" else 2)
@@ -466,7 +529,10 @@ def _run_cases(args: argparse.Namespace, *, dry_run: bool, one: bool) -> int:
         status = "NOT_RUN"
     elif any(result["status"] == "FAIL" for result in results):
         status = "FAIL"
-    return print_json({"status": status, "results": results}, exit_code=1 if status == "FAIL" else 0)
+    elif any(result["status"] == "BLOCK" for result in results):
+        status = "BLOCK"
+    exit_code = 1 if status == "FAIL" else (2 if status == "BLOCK" else 0)
+    return print_json({"status": status, "results": results}, exit_code=exit_code)
 
 
 def cmd_close_loop_status(args: argparse.Namespace) -> int:
@@ -621,10 +687,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     cases = sub.add_parser("cases", help="Generate, review, and validate case contracts")
     cases_sub = cases.add_subparsers(dest="cases_command", required=True)
-    cases_generate = cases_sub.add_parser("generate", help="Generate draft case contracts from synced issues")
+    cases_generate = cases_sub.add_parser("generate", help="Generate draft case contracts; requires --init or --growing")
     _add_root_config(cases_generate)
-    cases_generate.add_argument("--from-issues", action="store_true", help="Generate from local issue mirrors/snapshot")
-    cases_generate.add_argument("--issue", type=int, default=None, help="Generate only one issue")
+    cases_generate.add_argument("--init", action="store_true", help="First-time full-repo SWQA generation from README, code, metadata, runners, and rules")
+    cases_generate.add_argument("--growing", action="store_true", help="Incremental growth-mode generation from latest repo/issues/PR/run/report state")
+    cases_generate.add_argument("--from-issues", action="store_true", help=argparse.SUPPRESS)
+    cases_generate.add_argument("--from-scratch", action="store_true", help=argparse.SUPPRESS)
+    cases_generate.add_argument("--candidate-json", default=None, help="Import Hermes growth-session candidates from JSON after QA-AIST validation")
+    cases_generate.add_argument("--feature", default=None, help="Feature or user-visible surface to bias growth generation")
+    cases_generate.add_argument("--profile", default="auto", choices=["auto", "cli", "api", "hardware", "repo"], help="Generation profile; auto inspects repo signals")
+    cases_generate.add_argument("--count", type=int, default=5, help="Maximum number of draft cases to generate")
+    cases_generate.add_argument("--issue", type=int, default=None, help=argparse.SUPPRESS)
     cases_generate.add_argument("--force", action="store_true", help="Overwrite existing generated case YAML")
     cases_generate.set_defaults(func=cmd_cases_generate)
     cases_review = cases_sub.add_parser("review", help="List generated drafts and Q&A prompts")

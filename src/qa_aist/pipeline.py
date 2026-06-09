@@ -56,7 +56,9 @@ def run_close_loop(config: ProjectConfig, *, case_id: str | None = None, dry_run
             results.append(result)
             if result["status"] == "FAIL":
                 status = "FAIL"
-        _mark(steps, "run_cases", "PASS" if status != "FAIL" else "FAIL")
+            elif result["status"] == "BLOCK" and status == "PASS":
+                status = "BLOCK"
+        _mark(steps, "run_cases", status)
         _mark(steps, "normalize_results", "PASS", {"result_count": len(results)})
         for result in results:
             gate_results.append(evaluate_write_gate(config_data=config.data, result=result).as_dict())

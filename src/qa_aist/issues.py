@@ -356,7 +356,7 @@ def render_issue_mirror(issue: NormalizedIssue, config: ProjectConfig) -> str:
             "",
             "- Source of truth is the live Gitea issue state.",
             "- Closed issues are removed from active mirrors and must not be reopened automatically.",
-            "- Use `/qa-aist cases generate --from-issues` to create or refresh draft case contracts.",
+            "- Use `/qa-aist cases generate --growing` to grow draft case contracts from current issue and repo state.",
             "",
         ]
     )

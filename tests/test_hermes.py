@@ -140,6 +140,14 @@ class HermesDispatchTest(unittest.TestCase):
             self.assertEqual(payload["command"], "/qa-aist status")
             self.assertEqual(payload["payload"]["tool"], "qa-aist")
 
+            buf = StringIO()
+            with redirect_stdout(buf):
+                code = hermes.main(["--root", tmp, "/qa-aist", "cases", "generate", "--init", "--feature", "CLI help", "--profile", "cli", "--count", "1"])
+            payload = json.loads(buf.getvalue())
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["payload"]["source"], "init")
+            self.assertEqual(payload["payload"]["feature"], "CLI help")
+
     def test_agent_manifest_install_status_and_wrapper(self) -> None:
         with tempfile.TemporaryDirectory() as agent_tmp, tempfile.TemporaryDirectory() as project_tmp:
             manifest = hermes.build_agent_manifest()
@@ -147,6 +155,8 @@ class HermesDispatchTest(unittest.TestCase):
             self.assertIn("qa-aist", manifest["aliases"])
             self.assertIn("/qa-aist help", manifest["commands"])
             self.assertIn("/qa-aist help qa-test", manifest["commands"])
+            self.assertIn("/qa-aist cases generate --init", manifest["commands"])
+            self.assertIn("/qa-aist cases generate --growing", manifest["commands"])
             self.assertIn("/qa-aist qa-test help", manifest["commands"])
             self.assertEqual(manifest["permissions"]["tracker_write"], "write_gate_apply_only")
 
@@ -219,11 +229,20 @@ class HermesDispatchTest(unittest.TestCase):
             self.assertIn("skill-mediated", text)
             self.assertIn("not a native Hermes router", text)
             self.assertIn("Do not answer from memory", text)
+            self.assertIn("Gitea MCP snapshot workflow", text)
             self.assertIn("chat_response", text)
             self.assertIn("product repository root", text)
             self.assertIn("/qa-aist help", text)
             self.assertIn("/qa-aist help qa-test", text)
+            self.assertIn("/qa-aist cases generate --init", text)
+            self.assertIn("initial SWQA test map", text)
+            self.assertIn("candidate JSON", text)
             self.assertIn("/usr/bin/env PYTHONPATH=/repo/QA-AIST/src python3 -m qa_aist.hermes", text)
+            reference_path = Path(payload["reference_path"])
+            self.assertTrue(reference_path.exists())
+            reference_text = reference_path.read_text(encoding="utf-8")
+            self.assertIn("MCP issue list may include PRs", reference_text)
+            self.assertIn("/qa-aist issues sync", reference_text)
 
             status = hermes.skill_status(skills_tmp)
             self.assertEqual(status["status"], "ok")

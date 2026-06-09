@@ -47,7 +47,7 @@ def plan_fix_issue(config: ProjectConfig, *, issue_id: int) -> dict[str, Any]:
         "duplicate_issue_ids": duplicate_issue_ids,
         "preflight": [
             "/qa-aist issues sync",
-            f"/qa-aist qa-test run-one {case_ids[0]}" if case_ids else "/qa-aist cases generate --from-issues",
+            f"/qa-aist qa-test run-one {case_ids[0]}" if case_ids else "/qa-aist cases generate --growing",
             "/qa-aist publish plan",
         ],
         "handoff": "Hermes may perform the minimal code change only after this plan is ready.",
