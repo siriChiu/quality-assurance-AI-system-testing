@@ -105,7 +105,7 @@ def submit_fix_pr(config: ProjectConfig, *, issue_id: int, dry_run: bool = False
         return {
             "status": "blocked",
             "error": "gitea_mcp_write_not_supported",
-            "message": "tracker.gitea.backend: mcp is read-only for issue sync. Configure HTTP backend with token_env before /qa-aist fix-issues submit-pr.",
+            "message": "tracker.gitea.backend: mcp supports issue sync and gated Wiki-only handoff. Configure HTTP backend with token_env before /qa-aist fix-issues submit-pr creates a pull request.",
             "backend": gitea_cfg.backend,
         }
     _push_branch(config.root, plan["branch"])

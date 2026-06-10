@@ -57,9 +57,9 @@ The SWQA policy fields require every confirmed bug to be expanded into sibling-s
 | Backend | Purpose | Token required for `issues sync` | Remote writes |
 |---|---|---:|---|
 | `http` | QA-AIST calls Gitea REST API directly | yes, via `token_env` | yes, automatic gated Wiki sync, `publish wiki apply`, legacy `publish apply`, and `submit-pr` |
-| `mcp` | Hermes uses Gitea MCP read tooling, writes a JSON snapshot, then QA-AIST imports it | no | no, blocked in V1 |
+| `mcp` | Hermes uses Gitea MCP read tooling for issues and gated Wiki handoff for the configured Wiki page | no | Wiki only through `needs_mcp_apply` + `complete-mcp`; issue/PR writes blocked |
 
-MCP read-only config:
+MCP config:
 
 ```yaml
 tracker:
@@ -72,13 +72,17 @@ tracker:
 
 When `backend: mcp`, Hermes must fetch Gitea issues through its configured Gitea MCP tool and write the raw issue JSON to `tracker.gitea.mcp_issues_json` before running `/qa-aist issues sync`. The environment variable `QA_AIST_GITEA_MCP_ISSUES_JSON` can override that path.
 
-Do not use Gitea MCP to write comments, wiki pages, issues, or PRs directly. QA-AIST V1 only accepts MCP as a read input for issue sync.
+For Wiki writes, Hermes must first run `/qa-aist publish wiki apply`. If QA-AIST returns `status: needs_mcp_apply`, Hermes may use Gitea MCP only for the exact `repo`, `page`, `body`, and `message` in `mcp_write_request`, then must write the MCP result JSON and run `/qa-aist publish wiki complete-mcp --result-json <path>`.
+
+Do not use Gitea MCP to write comments, issues, PRs, arbitrary Wiki pages, or anything not present in QA-AIST's gated request.
 
 ## Wiki Status
 
 `/qa-aist setup` creates `.qa-aist-project/rules/wiki-categories.yaml` and defaults `tracker.gitea.wiki_page` to `Test status (Siri)`.
 
-Wiki auto-sync is enabled by default through `policy.auto_publish_wiki: true`. It runs after case generation, test execution, close-loop execution, and successful Gitea writes. Remote Wiki writes require:
+Wiki auto-sync is enabled by default through `policy.auto_publish_wiki: true`. It runs after case generation, test execution, close-loop execution, and successful Gitea writes.
+
+Direct HTTP Wiki writes require:
 
 - `tracker.provider: gitea`
 - `tracker.gitea.backend: http`
@@ -87,7 +91,16 @@ Wiki auto-sync is enabled by default through `policy.auto_publish_wiki: true`. I
 - token env present
 - Wiki gate allowed
 
-If any requirement is missing, QA-AIST only writes local Wiki state:
+MCP Wiki writes require:
+
+- `tracker.provider: gitea`
+- `tracker.gitea.backend: mcp`
+- `tracker.gitea.base_url`
+- `tracker.gitea.repo`
+- Wiki gate allowed
+- Hermes completes the generated `mcp_write_request` with Gitea MCP and records it with `complete-mcp`
+
+If any requirement is missing or Hermes has not completed the MCP handoff yet, QA-AIST only writes local Wiki state:
 
 - `.qa-aist-project/state/wiki-plan.json`
 - `.qa-aist-project/state/wiki-apply-result.json`

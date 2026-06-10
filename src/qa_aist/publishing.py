@@ -105,7 +105,7 @@ def apply_publish_plan(config: ProjectConfig, *, plan_path: str | Path | None = 
         return {
             "status": "blocked",
             "error": "gitea_mcp_write_not_supported",
-            "message": "tracker.gitea.backend: mcp is read-only for issue sync. Configure HTTP backend with token_env before /qa-aist publish apply.",
+            "message": "tracker.gitea.backend: mcp supports issue sync and gated Wiki-only handoff. Configure HTTP backend with token_env before legacy /qa-aist publish apply writes issue comments or mixed publish output.",
             "backend": gitea_cfg.backend,
         }
     client = GiteaClient(gitea_cfg)

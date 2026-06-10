@@ -29,22 +29,23 @@
 /qa-aist publish wiki status
 /qa-aist publish wiki plan
 /qa-aist publish wiki apply
+/qa-aist publish wiki complete-mcp --result-json <path>
 /qa-aist fix-issues plan --issue 123
 /qa-aist fix-issues submit-pr --issue 123
 ```
 
 邊界請講清楚：這是 **skill-mediated flow**。Hermes 會把 `/qa-aist ...` 轉成 skill invocation，agent 再依 `SKILL.md` 的指示執行 QA-AIST dispatcher。這不是 native Hermes router，也不是 LLM 前置的 deterministic command hook。
 
-QA-AIST 可以真實寫 Gitea Wiki，但只有在自動 Wiki sync 或 `/qa-aist publish wiki apply` 通過 deterministic gate、且 HTTP token env 存在時才會碰遠端 Wiki。Issue comments/issues 仍只允許明確 `/qa-aist publish apply`；PR 仍只允許 `/qa-aist fix-issues submit-pr`。Hermes 不可以自己用 curl/API 繞過 QA-AIST。
+QA-AIST 可以真實寫 Gitea Wiki，但必須先通過 deterministic gate。HTTP backend 由 QA-AIST 直接寫 Wiki；MCP backend 由 QA-AIST 產生 `needs_mcp_apply` 與 gated `mcp_write_request`，Hermes 再用已設定好的 Gitea MCP 更新指定 Wiki page，最後執行 `complete-mcp` 回填結果。Issue comments/issues 仍只允許明確 `/qa-aist publish apply`；PR 仍只允許 `/qa-aist fix-issues submit-pr`。Hermes 不可以自己用 curl/API 繞過 QA-AIST。
 
-如果 Hermes 環境已經配置 Gitea MCP，QA-AIST 的正確用法仍然是 `/qa-aist issues sync`。差別只是 issue 來源改成 read-only MCP snapshot：
+如果 Hermes 環境已經配置 Gitea MCP，QA-AIST 的 issue sync 正確用法仍然是 `/qa-aist issues sync`。差別只是 issue 來源改成 MCP snapshot：
 
 1. `.qa-aist.yaml` 設定 `tracker.gitea.backend: mcp`。
 2. Hermes agent 依 `SKILL.md` 用 Gitea MCP 讀取 issues。
 3. Hermes 將原始 issue JSON 寫入 `.qa-aist-project/state/gitea-mcp/issues.json`，或 `QA_AIST_GITEA_MCP_ISSUES_JSON` 指定的路徑。
 4. Hermes 再執行 `/qa-aist issues sync`，由 QA-AIST 產生 mirror、snapshot 和後續 gate inputs。
 
-MCP backend 在 V1 是 read-only。Hermes 不可以用 Gitea MCP 直接新增 issue comment、更新 wiki 或建立 PR；遠端寫入仍必須走 QA-AIST HTTP backend、write gate、`publish wiki apply`、legacy `publish apply` 或 `submit-pr`。
+MCP backend 在 V1 只能做兩件事：讀 issues snapshot，以及在 `/qa-aist publish wiki apply` 回傳 gated request 後更新同一個 Wiki page。Hermes 不可以用 Gitea MCP 直接新增 issue comment、建立 issue、建立 PR 或修改其他 Wiki page。
 
 ## Install From Source Checkout
 
@@ -210,9 +211,9 @@ agent 應該在目前產品 repo root 執行：
 - `next_actions[].requires_confirmation: true` 時，不可直接執行。
 - `next_actions` 是下一步選單，不是 needs-input 問卷；只有 payload 的 `questions` / `missing_inputs` 會整理成 `hermes_needs_input`。請用該欄位呼叫 `clarify`，不要自行猜測。
 - `/qa-aist cases generate` 無參數時會回 `explicit_generation_mode_required`，Hermes 必須引導使用者選 `/qa-aist cases generate --init` 或 `/qa-aist cases generate --growing`，不可默默猜模式。
-- `/qa-aist cases generate --init` 是首次全 repo SWQA 建案；它會像有主見的 SWQA 工程師先建立「基本都要測」的初始地圖，讀 README、程式碼 inventory、metadata、既有 cases/runners/rules，產生功能、正向、反向、邊界、invalid input、side-effect-safe、壓力/timeout 等 draft cases。它只應透過 `clarify` 問少量大分類阻擋問題，不可逐一確認 testcase。
+- `/qa-aist cases generate --init` 是首次全 repo SWQA 建案；它會像有主見的 SWQA 工程師先建立「基本都要測」的初始地圖，讀 README、程式碼 inventory、metadata、既有 cases/runners/rules，產生功能、正向、反向、邊界、invalid input、side-effect-safe、壓力/timeout 等可執行 safe-probe cases。每個 `INIT-*` 都必須有 `commands[].run`，不可只是 placeholder，也不可逐一確認 testcase。
 - `/qa-aist cases generate --init --generated_count 5` 可限制第一批 draft 數量；`/qa-aist cases generate --init --fast` 會以最高安全標準自行決策，避免互動問答。
-- `/qa-aist cases generate --growing` 是後續增量擴散；它會讀 repo、issues、PR references、latest run、reports、既有 cases/runners。若 draft 有 `review_required_before_run`，不要把它當成可直接執行的正式測試，先用 `cases review` 依大分類補齊 command、fixture、target、成功條件與副作用邊界。
+- `/qa-aist cases generate --growing` 是後續增量擴散；它會讀 repo、issues、PR references、latest run、reports、既有 cases/runners，並先產生可執行 safe-probe cases。lab target、credential env、破壞性操作與真機 fixture 屬於後續補強，不是 init/growing 的阻塞條件。
 - 若需要獨立 growth session/agent，它只能產生 candidate JSON，再交給 `/qa-aist cases generate --growing --candidate-json <path>`；不可直接寫 case YAML、tracker、wiki 或 PR。
 
 若產品 repo 的 `.qa-aist.yaml` 包含：
@@ -227,6 +228,8 @@ tracker:
 ```
 
 agent 在執行 `/qa-aist issues sync` 前，可以使用 Hermes 已安裝的 Gitea MCP 讀取 issues，並只把讀到的 JSON 寫入 `mcp_issues_json`。之後仍然必須呼叫 QA-AIST dispatcher，不可以直接把 MCP 結果當成 QA-AIST sync 完成。
+
+若 `/qa-aist publish wiki apply` 回傳 `status: needs_mcp_apply`，agent 可以使用 Hermes 已安裝的 Gitea MCP 更新 request 指定的 Wiki page。流程是：讀取 `payload.mcp_write_request`，確認 schema/operation/safety，只用其中的 `repo`、`page`、`body`、`message` 呼叫 Gitea MCP，將結果寫入 `payload.mcp_write_result_path`，再跑 `/qa-aist publish wiki complete-mcp --result-json <path>`。
 
 如果 Hermes skill 有觸發，但 agent 只用文字回答、沒有執行 terminal command，這代表 skill-mediated flow 沒被 agent 遵守。請要求 agent 依 `~/.hermes/skills/qa-aist/SKILL.md` 呼叫 QA-AIST dispatcher。
 
@@ -255,5 +258,6 @@ return result["chat_response"]
 | `tracker_disabled` | provider 未啟用 | 設定 `tracker.provider: gitea` 與 `tracker.gitea.*`。 |
 | `gitea_not_configured` | apply/submit-pr 缺 token 或 repo 設定 | 設定 `QA_AIST_GITEA_TOKEN` 與 `.qa-aist.yaml`。 |
 | `gitea_mcp_snapshot_missing` | `backend: mcp` 但沒有 issue snapshot | 用 Hermes Gitea MCP 讀 issues 並寫入 `.qa-aist-project/state/gitea-mcp/issues.json`，或設定 `QA_AIST_GITEA_MCP_ISSUES_JSON`。 |
-| `gitea_mcp_write_not_supported` | MCP backend 嘗試寫遠端 | V1 MCP 只支援 issue sync 讀取；真實寫入請改 HTTP backend/token。 |
+| `needs_mcp_apply` | Wiki gate 已通過，但 backend 是 MCP | Hermes 讀取 `mcp_write_request`，用 Gitea MCP 更新指定 Wiki page，再執行 `publish wiki complete-mcp --result-json <path>`。 |
+| `gitea_mcp_write_not_supported` | MCP backend 嘗試寫 issue/PR 或 legacy mixed publish | MCP 只支援 issue sync 與 gated Wiki handoff；issue comment、issue create、PR 請改 HTTP backend/token。 |
 | `write_gate_blocked` | QA-AIST 拒絕遠端寫入 | 先修 sync/evidence/contract/duplicate/secret 問題，不要繞過 gate。 |

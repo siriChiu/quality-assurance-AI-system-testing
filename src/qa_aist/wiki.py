@@ -21,8 +21,11 @@ WIKI_PLAN_NAME = "wiki-plan.json"
 WIKI_APPLY_NAME = "wiki-apply-result.json"
 WIKI_REPORT_NAME = "wiki-status.md"
 WIKI_CATEGORIES_NAME = "wiki-categories.yaml"
+WIKI_MCP_REQUEST_NAME = "wiki-write-request.json"
+WIKI_MCP_RESULT_NAME = "wiki-write-result.json"
 DEFAULT_WIKI_PAGE = "Test status (Siri)"
 WIKI_SCHEMA = "qa-aist.wiki-plan.v1"
+WIKI_MCP_REQUEST_SCHEMA = "qa-aist.gitea-mcp-wiki-write-request.v1"
 
 WIKI_EVENTS = {"manual", "case_generation", "test_result", "gitea_write_summary"}
 
@@ -107,6 +110,25 @@ def apply_wiki_plan(config: ProjectConfig, *, plan_path: str | Path | None = Non
         return payload
 
     gitea_cfg = gitea_config_from_project(config.data)
+    if gitea_cfg.uses_mcp:
+        request_payload = _build_mcp_wiki_request(config, plan=plan, remote=remote)
+        request_path = wiki_mcp_request_path(config)
+        request_path.parent.mkdir(parents=True, exist_ok=True)
+        request_path.write_text(json_dumps(request_payload) + "\n", encoding="utf-8")
+        payload = {
+            "status": "needs_mcp_apply",
+            "event": plan.get("event"),
+            "page": plan.get("page"),
+            "applied_count": 0,
+            "mcp_write_request": request_payload,
+            "mcp_write_request_path": _relative_or_str(request_path, config.root),
+            "mcp_write_result_path": _relative_or_str(wiki_mcp_result_path(config), config.root),
+            "next_action": "/qa-aist publish wiki complete-mcp",
+            "remote": remote,
+        }
+        path = _write_wiki_apply_result(config, payload)
+        return {**payload, "apply_result_path": _relative_or_str(path, config.root)}
+
     try:
         response = GiteaClient(gitea_cfg).update_wiki_page(
             page=str(plan.get("page") or gitea_cfg.wiki_page),
@@ -122,6 +144,46 @@ def apply_wiki_plan(config: ProjectConfig, *, plan_path: str | Path | None = Non
         "applied_count": 1,
         "applied": [{"id": "wiki-status", "type": "wiki_update", "response": response}],
         "remote": remote,
+    }
+    path = _write_wiki_apply_result(config, payload)
+    return {**payload, "apply_result_path": _relative_or_str(path, config.root)}
+
+
+def complete_mcp_wiki_apply(config: ProjectConfig, *, result_json: str | Path | None = None) -> dict[str, Any]:
+    request_path = wiki_mcp_request_path(config)
+    if not request_path.exists():
+        raise WikiPublishError(f"mcp wiki write request not found: {request_path}")
+    request_payload = _load_json_file(request_path)
+    if not isinstance(request_payload, dict):
+        raise WikiPublishError("mcp wiki write request must be a JSON object")
+
+    result_path = Path(result_json) if result_json else wiki_mcp_result_path(config)
+    if not result_path.is_absolute():
+        result_path = config.root / result_path
+    if not result_path.exists():
+        raise WikiPublishError(f"mcp wiki write result not found: {result_path}")
+    result_payload = _load_json_file(result_path)
+    if not isinstance(result_payload, dict):
+        raise WikiPublishError("mcp wiki write result must be a JSON object")
+
+    success = result_payload.get("ok") is True or str(result_payload.get("status") or "").lower() in {"ok", "success", "applied"}
+    payload = {
+        "status": "ok" if success else "blocked",
+        "event": request_payload.get("event"),
+        "page": request_payload.get("page"),
+        "applied_count": 1 if success else 0,
+        "applied": [
+            {
+                "id": "wiki-status",
+                "type": "wiki_update",
+                "backend": "hermes_gitea_mcp",
+                "response": result_payload,
+            }
+        ] if success else [],
+        "error": None if success else "gitea_mcp_wiki_write_failed",
+        "mcp_write_request_path": _relative_or_str(request_path, config.root),
+        "mcp_write_result_path": _relative_or_str(result_path, config.root),
+        "remote": wiki_remote_readiness(config, {"allowed": True}),
     }
     path = _write_wiki_apply_result(config, payload)
     return {**payload, "apply_result_path": _relative_or_str(path, config.root)}
@@ -197,13 +259,27 @@ def auto_sync_wiki(
         payload = _wiki_payload_from_plan(plan, status="planned")
         if plan.get("status") == "ready":
             applied = apply_wiki_plan(config)
+            applied_status = str(applied.get("status") or "")
+            if applied_status == "ok":
+                auto_status = "applied"
+                reason = None
+            elif applied_status == "needs_mcp_apply":
+                auto_status = "needs_mcp_apply"
+                reason = "hermes_gitea_mcp_apply_required"
+            else:
+                auto_status = "blocked"
+                reason = applied.get("error") or ",".join(applied.get("blocked_reasons", [])) or "wiki_write_blocked"
             payload["auto_sync"] = {
-                "status": "applied" if applied.get("status") == "ok" else "blocked",
+                "status": auto_status,
                 "event": event,
                 "remote_apply": applied.get("status") == "ok",
-                "reason": applied.get("error"),
+                "reason": reason,
             }
             payload["apply_result_path"] = applied.get("apply_result_path") or payload.get("apply_result_path")
+            if applied.get("mcp_write_request_path"):
+                payload["mcp_write_request_path"] = applied.get("mcp_write_request_path")
+            if applied.get("mcp_write_result_path"):
+                payload["mcp_write_result_path"] = applied.get("mcp_write_result_path")
             payload["blocked_by_gate"] = applied.get("blocked_by_gate", payload.get("blocked_by_gate"))
             payload["next_action"] = "/qa-aist publish wiki status"
             return payload
@@ -271,21 +347,26 @@ def wiki_remote_readiness(config: ProjectConfig, gate: dict[str, Any]) -> dict[s
     blockers: list[str] = []
     if provider != "gitea":
         blockers.append("tracker_disabled")
-    if gitea.uses_mcp:
-        blockers.append("gitea_mcp_write_not_supported")
     if not gitea.base_url or not gitea.repo:
         blockers.append("gitea_not_configured")
     if gitea.uses_http and not gitea.token:
         blockers.append("gitea_http_token_missing")
     if gate and not gate.get("allowed", False):
         blockers.append("write_gate_blocked")
+    gate_allowed = bool(gate.get("allowed", True))
+    mcp_ready = provider == "gitea" and gitea.uses_mcp and bool(gitea.base_url and gitea.repo) and gate_allowed
+    http_ready = provider == "gitea" and gitea.uses_http and bool(gitea.base_url and gitea.repo and gitea.token) and gate_allowed
     return {
         "provider": provider,
         "backend": gitea.backend,
         "page": gitea.wiki_page,
         "token_env": gitea.token_env,
         "token_present": bool(gitea.token),
-        "remote_write_ready": provider == "gitea" and gitea.uses_http and bool(gitea.base_url and gitea.repo and gitea.token) and bool(gate.get("allowed", True)),
+        "remote_write_ready": http_ready or mcp_ready,
+        "write_backend": "hermes_gitea_mcp" if gitea.uses_mcp else "gitea_http",
+        "requires_hermes_mcp_apply": bool(mcp_ready),
+        "mcp_write_request_path": _relative_or_str(wiki_mcp_request_path(config), config.root) if gitea.uses_mcp else None,
+        "mcp_write_result_path": _relative_or_str(wiki_mcp_result_path(config), config.root) if gitea.uses_mcp else None,
         "blockers": sorted(set(blockers)),
     }
 
@@ -422,6 +503,14 @@ def wiki_report_path(config: ProjectConfig) -> Path:
 
 def wiki_categories_path(config: ProjectConfig) -> Path:
     return config.paths.rules / WIKI_CATEGORIES_NAME
+
+
+def wiki_mcp_request_path(config: ProjectConfig) -> Path:
+    return config.paths.state / "gitea-mcp" / WIKI_MCP_REQUEST_NAME
+
+
+def wiki_mcp_result_path(config: ProjectConfig) -> Path:
+    return config.paths.state / "gitea-mcp" / WIKI_MCP_RESULT_NAME
 
 
 def _load_latest_run(config: ProjectConfig, latest_run: str | Path | dict[str, Any] | None) -> dict[str, Any] | None:
@@ -685,6 +774,39 @@ def _wiki_commit_message(event: str) -> str:
 def _auto_wiki_enabled(config: ProjectConfig) -> bool:
     policy = config.data.get("policy") if isinstance(config.data.get("policy"), dict) else {}
     return policy.get("auto_publish_wiki", True) is not False
+
+
+def _build_mcp_wiki_request(config: ProjectConfig, *, plan: dict[str, Any], remote: dict[str, Any]) -> dict[str, Any]:
+    gitea = gitea_config_from_project(config.data)
+    return {
+        "schema": WIKI_MCP_REQUEST_SCHEMA,
+        "operation": "gitea.wiki.update_page",
+        "provider": "gitea",
+        "backend": "hermes_gitea_mcp",
+        "base_url": gitea.base_url,
+        "repo": gitea.repo,
+        "page": str(plan.get("page") or gitea.wiki_page),
+        "message": str(plan.get("message") or "QA-AIST wiki status update"),
+        "body": str(plan.get("body") or ""),
+        "event": plan.get("event"),
+        "plan_path": _relative_or_str(wiki_plan_path(config), config.root),
+        "result_path": _relative_or_str(wiki_mcp_result_path(config), config.root),
+        "write_gate_result": plan.get("write_gate_result", {}),
+        "remote": remote,
+        "safety": {
+            "allowed_targets": ["wiki"],
+            "forbidden_targets": ["issue_comment", "issue_create", "pull_request"],
+            "requires_existing_gate_allowed": True,
+            "do_not_modify_other_pages": True,
+        },
+        "hermes_instructions": [
+            "Call the configured Hermes Gitea MCP wiki update/write-page tool for this repo and page only.",
+            "Use `body` as the full Wiki page content and `message` as the edit message when the MCP tool supports it.",
+            "Do not create issue comments, issues, pull requests, or other Wiki pages for this request.",
+            "Write the MCP tool result JSON to `result_path`, then run `/qa-aist publish wiki complete-mcp --result-json <result_path>`.",
+        ],
+        "created_at": utc_now(),
+    }
 
 
 def _wiki_payload_from_plan(plan: dict[str, Any], *, status: str) -> dict[str, Any]:

@@ -43,6 +43,7 @@ from .wiki import (
     WikiPublishError,
     apply_wiki_plan,
     auto_sync_wiki,
+    complete_mcp_wiki_apply,
     plan_wiki,
     render_wiki,
     wiki_readiness,
@@ -525,6 +526,15 @@ def cmd_publish_wiki_apply(args: argparse.Namespace) -> int:
         payload = apply_wiki_plan(config, plan_path=args.plan)
     except (QAConfigError, WikiPublishError, GiteaError) as exc:
         return _error_payload(exc)
+    return print_json(payload, exit_code=0 if payload.get("status") in {"ok", "needs_mcp_apply"} else 4)
+
+
+def cmd_publish_wiki_complete_mcp(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        payload = complete_mcp_wiki_apply(config, result_json=args.result_json)
+    except (QAConfigError, WikiPublishError) as exc:
+        return _error_payload(exc)
     return print_json(payload, exit_code=0 if payload.get("status") == "ok" else 4)
 
 
@@ -895,6 +905,10 @@ def build_parser() -> argparse.ArgumentParser:
     _add_root_config(wiki_apply)
     wiki_apply.add_argument("--plan", default=None)
     wiki_apply.set_defaults(func=cmd_publish_wiki_apply)
+    wiki_complete_mcp = wiki_sub.add_parser("complete-mcp", help="Record a Hermes Gitea MCP Wiki write result")
+    _add_root_config(wiki_complete_mcp)
+    wiki_complete_mcp.add_argument("--result-json", default=None, help="Path to the Hermes Gitea MCP write result JSON")
+    wiki_complete_mcp.set_defaults(func=cmd_publish_wiki_complete_mcp)
     wiki_status_cmd = wiki_sub.add_parser("status", help="Show latest Wiki plan/apply status")
     _add_root_config(wiki_status_cmd)
     wiki_status_cmd.set_defaults(func=cmd_publish_wiki_status)

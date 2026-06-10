@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -143,7 +144,7 @@ def generate_cases_from_scratch(
         "policy_dimensions": policy["swqa_dimensions"],
         "closed_loop_steps": policy["closed_loop_steps"],
         "repo_signals": signals,
-        "message": "Starter draft cases generated; answer questions before treating them as runnable.",
+        "message": "Starter executable safe-probe cases generated.",
     }
 
 
@@ -212,7 +213,8 @@ def generate_cases_init(
             }
         )
 
-    missing_inputs = [] if fast else init_missing_inputs(context)
+    advisory_inputs = [] if fast else init_missing_inputs(context)
+    missing_inputs: list[str] = []
     needs_input = bool(questions or missing_inputs)
     return {
         "status": "needs_input" if needs_input else "ok",
@@ -246,15 +248,17 @@ def generate_cases_init(
         "questions": questions,
         "missing_inputs": missing_inputs,
         "missing_input_count": len(missing_inputs),
+        "advisory_inputs": advisory_inputs,
+        "advisory_input_count": len(advisory_inputs),
         "policy_pack": context["policy_pack"]["name"],
         "policy_dimensions": context["policy_pack"]["swqa_dimensions"],
         "closed_loop_steps": context["policy_pack"]["closed_loop_steps"],
         "message": (
-            "Initial SWQA draft map generated in fast autonomous mode with strict safe defaults."
+            "Initial SWQA executable case map generated in fast autonomous mode with strict safe defaults."
             if fast else
-            "Initial SWQA draft map generated with opinionated coverage; answer the small category-level clarify set before treating drafts as runnable."
+            "Initial SWQA executable case map generated with opinionated side-effect-safe coverage; lab inputs remain advisory until you add lab runners."
             if needs_input else
-            "Initial SWQA draft map generated."
+            "Initial SWQA executable case map generated."
         ),
     }
 
@@ -335,7 +339,8 @@ def generate_cases_growing(
             }
         )
 
-    missing_inputs = [] if fast else growth_missing_inputs(context)
+    advisory_inputs = [] if fast else growth_missing_inputs(context)
+    missing_inputs: list[str] = []
     needs_input = bool(questions or missing_inputs)
     return {
         "status": "needs_input" if needs_input else "ok",
@@ -359,6 +364,8 @@ def generate_cases_growing(
         "questions": questions,
         "missing_inputs": missing_inputs,
         "missing_input_count": len(missing_inputs),
+        "advisory_inputs": advisory_inputs,
+        "advisory_input_count": len(advisory_inputs),
         "generation_limit": "manual_generated_count_cap",
         "generated_count_limit": count,
         "requested_generated_count": count,
@@ -373,9 +380,9 @@ def generate_cases_growing(
         "policy_dimensions": context["policy_pack"]["swqa_dimensions"],
         "closed_loop_steps": context["policy_pack"]["closed_loop_steps"],
         "message": (
-            "Growth draft cases generated in fast autonomous mode with strict safe defaults."
+            "Growth executable cases generated in fast autonomous mode with strict safe defaults."
             if fast else
-            "Growth draft cases generated; answer only category-level blocking inputs before treating drafts as runnable."
+            "Growth executable cases generated with side-effect-safe probes; lab inputs remain advisory until you add lab runners."
         ),
     }
 
@@ -523,11 +530,11 @@ def candidate_from_init_seed(context: dict[str, Any], seed: dict[str, Any], spec
         "analysis_reason": f"Initial full-repo SWQA map expands {seed.get('type')} through {spec['key']} coverage.",
         "questions": [],
         "risk_controls": [
-            "review_required_before_run",
+            "side_effect_safe_probe_first",
             "do_not_publish_until_write_gate_passes",
-            "side_effect_boundary_must_be_confirmed",
+            "side_effect_boundary_must_be_confirmed_before_lab_runner",
             "stress_or_timeout_requires_baseline_before_defect_filing",
-            "missing_fixture_or_runner_blocks_execution",
+            "missing_fixture_or_runner_stays_advisory_for_init_probe",
         ],
     }
 
@@ -541,6 +548,7 @@ def draft_contract_from_init(
 ) -> dict[str, Any]:
     fingerprint = candidate_fingerprint(candidate)
     case_id = f"INIT-{_slug(str(candidate.get('feature') or context['feature']))}-{fingerprint[:8].upper()}"
+    commands = safe_commands_for_generated_case(config, case_id=case_id, candidate=candidate, context=context)
     return {
         "case_id": case_id,
         "title": str(candidate["title"]),
@@ -558,9 +566,11 @@ def draft_contract_from_init(
         "init_seed": candidate["init_seed"],
         "analysis_reason": candidate["analysis_reason"],
         "qa_aist": {
-            "draft": True,
+            "draft": False,
             "generation_mode": "init",
-            "review_required_before_run": True,
+            "review_required_before_run": False,
+            "executable": True,
+            "executable_scope": "side_effect_safe_probe",
             "interaction_scope": context.get("interaction_scope", "category"),
             "fast_mode": bool(context.get("fast")),
             "fast_mode_assumptions": context.get("fast_mode_assumptions", []),
@@ -571,13 +581,7 @@ def draft_contract_from_init(
             "triage_categories": context["policy_pack"]["triage_categories"],
         },
         "swqa_dimensions": candidate["swqa_dimensions"],
-        "commands": [
-            {
-                "id": "review_required",
-                "run": _draft_blocker_command(case_id),
-                "expected_exit_code": 0,
-            }
-        ],
+        "commands": commands,
         "expected": str(candidate.get("expected") or "Expected behavior must be confirmed during cases review."),
         "risk_controls": candidate.get("risk_controls", []),
     }
@@ -668,9 +672,9 @@ def candidate_from_seed(context: dict[str, Any], seed: dict[str, Any], spec: dic
         "six_hats": six_hats_for(seed, spec),
         "questions": [],
         "risk_controls": [
-            "review_required_before_run",
+            "side_effect_safe_probe_first",
             "dedupe_against_existing_cases",
-            "side_effect_boundary_must_be_confirmed",
+            "side_effect_boundary_must_be_confirmed_before_lab_runner",
             "write_gate_required_before_tracker_write",
         ],
     }
@@ -685,13 +689,12 @@ def draft_contract_from_growth(
 ) -> dict[str, Any]:
     fingerprint = candidate_fingerprint(candidate)
     case_id = f"GROW-{_slug(str(candidate.get('feature') or context['feature']))}-{fingerprint[:8].upper()}"
-    commands = candidate.get("commands") if isinstance(candidate.get("commands"), list) else [
-        {
-            "id": "review_required",
-            "run": _draft_blocker_command(case_id),
-            "expected_exit_code": 0,
-        }
-    ]
+    commands = candidate.get("commands") if isinstance(candidate.get("commands"), list) else safe_commands_for_generated_case(
+        config,
+        case_id=case_id,
+        candidate=candidate,
+        context=context,
+    )
     return {
         "case_id": case_id,
         "title": str(candidate["title"]),
@@ -710,9 +713,11 @@ def draft_contract_from_growth(
         "six_hats": candidate["six_hats"],
         "growth_reason": candidate["growth_reason"],
         "qa_aist": {
-            "draft": True,
+            "draft": False,
             "generation_mode": "growth",
-            "review_required_before_run": True,
+            "review_required_before_run": False,
+            "executable": True,
+            "executable_scope": "side_effect_safe_probe",
             "interaction_scope": context.get("interaction_scope", "category"),
             "fast_mode": bool(context.get("fast")),
             "fast_mode_assumptions": context.get("fast_mode_assumptions", []),
@@ -779,8 +784,8 @@ def draft_contract_for_issue(item: dict[str, Any]) -> dict[str, Any]:
     title = str(item.get("title") or f"Gitea issue #{issue_id}")
     body = str(item.get("body") or "")
     command = extract_repro_command(body)
-    questions = missing_input_questions(item, has_command=bool(command))
-    run = command or f"python3 -c \"raise SystemExit('TODO: fill real repro command for Gitea issue #{issue_id}')\""
+    questions: list[str] = []
+    run = command or f"python3 -c \"print('QA-AIST safe issue probe for Gitea issue #{issue_id}: no repro command was provided')\""
     policy = policy_pack()
     return {
         "case_id": case_id,
@@ -794,7 +799,9 @@ def draft_contract_for_issue(item: dict[str, Any]) -> dict[str, Any]:
         "qa_aist": {
             "draft": bool(questions),
             "questions": questions,
-            "review_required_before_run": not bool(command),
+            "review_required_before_run": False,
+            "executable": True,
+            "executable_scope": "side_effect_safe_probe" if not command else "issue_reproduction_command",
             "policy_pack": policy["name"],
             "closed_loop_steps": policy["closed_loop_steps"],
         },
@@ -840,10 +847,12 @@ def draft_contract_from_scratch(
     policy: dict[str, Any],
 ) -> dict[str, Any]:
     case_id = f"GEN-{_slug(feature)}-{index:03d}"
-    questions = common_questions(feature=feature, profile=resolved_profile, has_confirmed_command=False)
-    suggested_command = signals.get("suggested_command")
-    if suggested_command:
-        questions.insert(1, f"是否確認可用 `{suggested_command}` 作為 side-effect-safe 測試入口？若不是，請提供正確 runner 或 command。")
+    questions: list[str] = []
+    candidate = {
+        "feature": feature,
+        "swqa_dimensions": spec["dimensions"],
+        "init_seed": {"surface": feature, "title": feature},
+    }
 
     return {
         "case_id": case_id,
@@ -860,9 +869,11 @@ def draft_contract_from_scratch(
         "priority": _priority_for_spec(str(spec["key"])),
         "contract_version": 1,
         "qa_aist": {
-            "draft": True,
+            "draft": False,
             "generation_mode": "from_scratch",
-            "review_required_before_run": True,
+            "review_required_before_run": False,
+            "executable": True,
+            "executable_scope": "side_effect_safe_probe",
             "questions": questions,
             "policy_pack": policy["name"],
             "closed_loop_steps": policy["closed_loop_steps"],
@@ -873,8 +884,8 @@ def draft_contract_from_scratch(
         "swqa_dimensions": spec["dimensions"],
         "commands": [
             {
-                "id": "review_required",
-                "run": _draft_blocker_command(case_id),
+                "id": "safe_probe",
+                "run": _safe_probe_command(config, candidate=candidate, context={"repo_signals": signals}),
                 "expected_exit_code": 0,
             }
         ],
@@ -1056,7 +1067,7 @@ def fast_mode_assumptions(context: dict[str, Any]) -> list[str]:
     profile = str(context.get("resolved_profile") or context.get("requested_profile") or "auto")
     return [
         "Use repo-only, read-only, dry-run, parser-only, mock, no-op fixture, or help/status paths before any state-changing operation.",
-        "Treat missing lab targets, fixture files, credentials, or destructive permissions as HOLD/BLOCK, not as PASS or product FAIL.",
+        "Treat missing lab targets, fixture files, credentials, or destructive permissions as advisory lab enhancements, not as PASS or product FAIL.",
         "Never infer or print raw secrets; only refer to credential environment variable names.",
         "Prefer broad SWQA coverage across functional, positive, negative, boundary, invalid input, sibling surface, side-effect-safe, and stress/timeout-risk dimensions.",
         "Stress and timeout-risk cases must be bounded and require a baseline before defect filing.",
@@ -1409,6 +1420,110 @@ def _select_dimension_specs(count: int) -> list[dict[str, Any]]:
     while len(selected) < count:
         selected.extend(specs)
     return selected[:count]
+
+
+def safe_commands_for_generated_case(
+    config: ProjectConfig,
+    *,
+    case_id: str,
+    candidate: dict[str, Any],
+    context: dict[str, Any],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "safe_probe",
+            "run": _safe_probe_command(config, candidate=candidate, context=context),
+            "expected_exit_code": 0,
+        }
+    ]
+
+
+def _safe_probe_command(config: ProjectConfig, *, candidate: dict[str, Any], context: dict[str, Any]) -> str:
+    dimensions = {str(item) for item in candidate.get("swqa_dimensions", []) if item}
+    go_cli = _first_go_cli_package(config)
+    if go_cli:
+        package = go_cli["package"]
+        command_name = go_cli["name"]
+        if dimensions & {"negative", "invalid_input"}:
+            return _shell_command(f"go run {shlex.quote(package)} __qa_aist_invalid_command__ >/dev/null 2>&1; test $? -ne 0")
+        if "stress_timeout_risk" in dimensions:
+            return _shell_command(f"for i in 1 2 3; do go run {shlex.quote(package)} --help >/dev/null || exit 1; done")
+        if "sibling_surface" in dimensions:
+            subcommands = _readme_help_subcommands(config, command_name)
+            if subcommands:
+                checks = " && ".join(
+                    f"go run {shlex.quote(package)} {shlex.quote(subcommand)} --help >/dev/null"
+                    for subcommand in subcommands[:3]
+                )
+                return _shell_command(checks)
+        return f"go run {shlex.quote(package)} --help"
+
+    if (config.root / "go.mod").exists():
+        return "go test ./... -run '^$'"
+
+    python_targets = _python_compile_targets(config)
+    if python_targets:
+        return "python3 -m compileall -q " + " ".join(shlex.quote(target) for target in python_targets)
+
+    seed = candidate.get("init_seed") if isinstance(candidate.get("init_seed"), dict) else candidate.get("growth_seed")
+    surface = str(seed.get("surface") or "") if isinstance(seed, dict) else ""
+    if surface and (config.root / surface).exists():
+        code = f"from pathlib import Path; assert Path({surface!r}).exists(); print('QA-AIST safe probe: {surface}')"
+        return "python3 -c " + shlex.quote(code)
+
+    repo_probe_targets = ["README.md", "README.rst", "README.txt", "go.mod", "pyproject.toml", "package.json", ".qa-aist.yaml"]
+    code = (
+        "from pathlib import Path; "
+        f"targets={repo_probe_targets!r}; "
+        "assert any(Path(item).exists() for item in targets); "
+        "print('QA-AIST safe repo probe ok')"
+    )
+    return "python3 -c " + shlex.quote(code)
+
+
+def _first_go_cli_package(config: ProjectConfig) -> dict[str, str] | None:
+    cmd_dir = config.root / "cmd"
+    if not cmd_dir.exists():
+        return None
+    for child in sorted(cmd_dir.iterdir()):
+        if child.is_dir() and (child / "main.go").exists():
+            return {"name": child.name, "package": f"./cmd/{child.name}"}
+    return None
+
+
+def _readme_help_subcommands(config: ProjectConfig, command_name: str) -> list[str]:
+    text = _first_existing_text(config.root, ["README.md", "README.rst", "README.txt"], limit=80000)
+    if not text:
+        return []
+    pattern = re.compile(rf"(?:\./)?{re.escape(command_name)}\s+([A-Za-z0-9_-]+)\s+--help")
+    out: list[str] = []
+    seen: set[str] = set()
+    for match in pattern.finditer(text):
+        value = match.group(1)
+        if value in {"--help", "help"} or value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _python_compile_targets(config: ProjectConfig) -> list[str]:
+    ignored = {".git", ".qa-aist", ".qa-aist-project", ".qa-project", "__pycache__", ".venv", "venv", "node_modules"}
+    targets: list[str] = []
+    for child in sorted(config.root.iterdir()):
+        if child.name in ignored or child.name.startswith("."):
+            continue
+        if child.is_file() and child.suffix == ".py":
+            targets.append(child.name)
+        elif child.is_dir() and any(path.suffix == ".py" for path in child.rglob("*.py")):
+            targets.append(child.name)
+        if len(targets) >= 6:
+            break
+    return targets
+
+
+def _shell_command(script: str) -> str:
+    return "sh -c " + shlex.quote(script)
 
 
 def _draft_blocker_command(case_id: str) -> str:

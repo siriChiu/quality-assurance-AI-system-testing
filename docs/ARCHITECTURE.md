@@ -64,11 +64,11 @@ The policy pack is intentionally generic. It defines stable dimensions such as e
 
 `cases generate` requires `--init` or `--growing`; a bare command returns `explicit_generation_mode_required`.
 
-`cases generate --init` builds `.qa-aist-project/state/init-context.json` from README presence, code inventory, package metadata, existing cases, runners, and rules. It writes `source.type: init` draft contracts for functional, positive, negative, boundary, side-effect-safe, and stress/timeout-risk coverage.
+`cases generate --init` builds `.qa-aist-project/state/init-context.json` from README presence, code inventory, package metadata, existing cases, runners, and rules. It writes `source.type: init` executable contracts for functional, positive, negative, boundary, side-effect-safe, and stress/timeout-risk coverage. Every generated contract gets a side-effect-safe `commands[].run` probe; lab fixtures are later enhancements, not init blockers.
 
-`cases generate --growing` builds `.qa-aist-project/state/growth-context.json` from repo metadata, issue snapshots, PR references, latest run, publish plan, existing cases, runners, and rules. It then writes `source.type: growth` draft case contracts under `.qa-aist-project/cases/`.
+`cases generate --growing` builds `.qa-aist-project/state/growth-context.json` from repo metadata, issue snapshots, PR references, latest run, publish plan, existing cases, runners, and rules. It then writes `source.type: growth` executable case contracts under `.qa-aist-project/cases/`.
 
-`--generated_count <max>` is the explicit generation limit for users who want a smaller batch. `--fast` switches case generation to autonomous strict-safe defaults: QA-AIST asks no interactive category questions, records its assumptions, and leaves unsafe or unconfirmed execution as HOLD/BLOCK rather than pretending a draft is runnable.
+`--generated_count <max>` is the explicit generation limit for users who want a smaller batch. `--fast` switches case generation to autonomous strict-safe defaults: QA-AIST asks no interactive category questions, records its assumptions, and chooses repo-only/help/parser/build probes before any state-changing operation.
 
 Hermes may use a separate growth session to analyze the context, but that session may only produce candidate JSON. QA-AIST validates candidate schema, dedupe fingerprints, secret leakage, internal prompt leakage, dangerous `.qa` runtime paths, and command fields before writing YAML.
 

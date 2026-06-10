@@ -201,6 +201,8 @@ def render_chat_response(payload: dict[str, Any], *, exit_code: int = 0) -> str:
         lines.append(f"         analyzed_files: {payload.get('analyzed_files_count')}")
     if "missing_input_count" in payload:
         lines.append(f"         missing_inputs: {payload.get('missing_input_count')}")
+    if "advisory_input_count" in payload:
+        lines.append(f"         advisory_inputs: {payload.get('advisory_input_count')}")
     if payload.get("growth_context_path"):
         lines.append(f"         growth_context: {payload.get('growth_context_path')}")
     if payload.get("source"):
@@ -211,6 +213,10 @@ def render_chat_response(payload: dict[str, Any], *, exit_code: int = 0) -> str:
         lines.append(f"         questions: {len(payload.get('questions', []))}")
     if "plan_path" in payload:
         lines.append(f"         plan: {payload.get('plan_path')}")
+    if "mcp_write_request_path" in payload:
+        lines.append(f"         mcp_request: {payload.get('mcp_write_request_path')}")
+    if "mcp_write_result_path" in payload:
+        lines.append(f"         mcp_result: {payload.get('mcp_write_result_path')}")
     if "blocked_by_gate" in payload:
         lines.append(f"         blocked_by_gate: {payload.get('blocked_by_gate')}")
     if payload.get("setup_required"):
@@ -506,7 +512,7 @@ def suggest_next_actions(payload: dict[str, Any], engine_argv: list[str], exit_c
             return [
                 _next("查看 Gitea HTTP 設定", "/qa-aist config show"),
                 {"label": "設定 token env 後再重跑 doctor", "kind": "ask_user"},
-                _next("切換成 MCP read-only sync", "/qa-aist config show"),
+                _next("查看 MCP issue sync / Wiki handoff 設定", "/qa-aist config show"),
             ]
         if "tracker_provider_disabled" in blockers:
             return [
@@ -576,8 +582,8 @@ def suggest_next_actions(payload: dict[str, Any], engine_argv: list[str], exit_c
             ]
         return [
             _next("查看 Wiki draft 狀態", "/qa-aist publish wiki status"),
-            _next("審查產生的 cases", "/qa-aist cases review"),
             _next("驗證 cases", "/qa-aist cases validate"),
+            _next("先 dry-run 所有 safe probes", "/qa-aist qa-test dry-run"),
             _next("列出可跑測試", "/qa-aist qa-test list"),
         ]
     if current in {"cases review", "cases validate"}:
@@ -633,11 +639,25 @@ def suggest_next_actions(payload: dict[str, Any], engine_argv: list[str], exit_c
             _next("執行 doctor 檢查 token/backend/gate", "/qa-aist doctor"),
         ]
     if current3 == "publish wiki apply":
+        if status == "needs_mcp_apply":
+            return [
+                {
+                    "label": "呼叫 Hermes Gitea MCP 更新 Wiki，完成後回填 result JSON",
+                    "kind": "mcp_write",
+                    "requires_confirmation": True,
+                    "request_path": payload.get("mcp_write_request_path"),
+                    "result_path": payload.get("mcp_write_result_path"),
+                    "command": f"/qa-aist publish wiki complete-mcp --result-json {payload.get('mcp_write_result_path') or '<result-json>'}",
+                },
+                _next("查看 Wiki 狀態", "/qa-aist publish wiki status"),
+            ]
         if status == "blocked":
             return [
                 _next("查看 Wiki 狀態", "/qa-aist publish wiki status"),
                 _next("重新產生 Wiki plan", "/qa-aist publish wiki plan", confirm=True),
             ]
+        return [_next("查看 Wiki 狀態", "/qa-aist publish wiki status")]
+    if current3 == "publish wiki complete-mcp":
         return [_next("查看 Wiki 狀態", "/qa-aist publish wiki status")]
     if current3 in {"publish wiki status", "publish wiki render"}:
         return [
@@ -764,6 +784,7 @@ def build_agent_manifest(*, wrapper_path: str | None = None, runner_command: str
             f"{PRIMARY_PREFIX} qa-test help",
             f"{PRIMARY_PREFIX} publish wiki plan",
             f"{PRIMARY_PREFIX} publish wiki apply",
+            f"{PRIMARY_PREFIX} publish wiki complete-mcp --result-json <path>",
             f"{PRIMARY_PREFIX} publish wiki status",
             f"{PRIMARY_PREFIX} publish wiki render",
             f"{PRIMARY_PREFIX} publish plan",
@@ -781,7 +802,7 @@ def build_agent_manifest(*, wrapper_path: str | None = None, runner_command: str
         ],
         "permissions": {
             "filesystem": ["project_root"],
-            "network": ["gitea_http_when_apply_or_submit_pr", "gitea_mcp_read_when_configured"],
+            "network": ["gitea_http_when_apply_or_submit_pr", "gitea_mcp_read_and_gated_wiki_write_when_configured"],
             "tracker_write": "write_gate_apply_only",
         },
         "security": {
@@ -899,14 +920,21 @@ When the user invokes `/qa-aist <arguments>`, you must:
 7. If `chat_response` is missing, summarize `status`, `payload.status`, `payload.error`, `payload.message`, `latest_run_json`, `report_path`, and evidence paths.
 8. Preserve failures. If the dispatcher exits non-zero or emits invalid JSON, tell the user the exit code and useful stderr/stdout details.
 
-Gitea MCP rule: if the product repo config uses `tracker.gitea.backend: mcp`, you may use Hermes' configured Gitea MCP tooling only to read issue data before `/qa-aist issues sync`. Write the raw MCP issue result as JSON to `.qa-aist-project/state/gitea-mcp/issues.json`, unless `.qa-aist.yaml` or `QA_AIST_GITEA_MCP_ISSUES_JSON` specifies another path. Then run the QA-AIST dispatcher normally. Do not treat the MCP read itself as a completed sync.
+Gitea MCP rule: if the product repo config uses `tracker.gitea.backend: mcp`, you may use Hermes' configured Gitea MCP tooling for two narrow operations only: read issue data before `/qa-aist issues sync`, and update the configured Wiki page after `/qa-aist publish wiki apply` returns `status: needs_mcp_apply` with a gated `mcp_write_request`. Do not treat the MCP read itself as a completed sync.
 
 Gitea MCP snapshot workflow (when the user confirms, chooses a suggested sync option, or invokes `/qa-aist issues sync` after `gitea_mcp_snapshot_missing`):
 1. Use Gitea MCP read-only pagination for the configured repo, typically `state=all` and `perPage=50`, until an empty page is returned.
 2. Preserve the MCP payload shape as JSON and write it to the configured `mcp_issues_json` path, creating parent directories if needed.
 3. If the MCP list response includes pull requests mixed with issues, keep only real Gitea issues before writing the QA-AIST `issues` list. A reliable guard is `html_url` containing `/issues/` and excluding `/pulls/`.
 4. Immediately run `/qa-aist issues sync` via the dispatcher command.
-5. Never use Gitea MCP for remote writes; publish/PR writes must remain gated through QA-AIST commands.
+5. Never use Gitea MCP for issue comments, issue creation, PRs, or arbitrary remote writes.
+
+Gitea MCP Wiki write workflow (only after `/qa-aist publish wiki apply` returns `status: needs_mcp_apply`):
+1. Read `payload.mcp_write_request`.
+2. Confirm the request schema is `qa-aist.gitea-mcp-wiki-write-request.v1`, operation is `gitea.wiki.update_page`, and `safety.allowed_targets` is only `wiki`.
+3. Call the configured Hermes Gitea MCP wiki update/write-page tool for the exact `repo`, `page`, `body`, and `message` in that request only.
+4. Write the MCP tool result JSON to `payload.mcp_write_result_path`.
+5. Run `/qa-aist publish wiki complete-mcp --result-json <path>` through the dispatcher and report that result.
 
 Reference: see `references/gitea-mcp-snapshot.md` for the MCP snapshot pitfall and recommended JSON shape.
 
@@ -954,16 +982,17 @@ Recommended interaction by situation:
 - After `/qa-aist doctor` warning: explain the warning and suggest the smallest check that resolves it.
 - After `gitea_mcp_snapshot_missing`: offer to use Hermes Gitea MCP read-only fetch, write the snapshot, then rerun `/qa-aist issues sync`.
 - After `/qa-aist issues sync`: suggest `/qa-aist issues dedupe` and `/qa-aist cases generate --growing`.
-- If the user asks for first-time test ideas or has no cases yet, run `/qa-aist cases generate --init`; it acts as an opinionated SWQA engineer, scans README, code, package metadata, existing runners, existing cases, and project rules, then creates an initial test map across functional, positive, negative, boundary, invalid-input, side-effect-safe, and stress/timeout-risk coverage. It must not ask case-by-case confirmation questions.
+- If the user asks for first-time test ideas or has no cases yet, run `/qa-aist cases generate --init`; it acts as an opinionated SWQA engineer, scans README, code, package metadata, existing runners, existing cases, and project rules, then creates executable safe-probe cases across functional, positive, negative, boundary, invalid-input, side-effect-safe, and stress/timeout-risk coverage. Every INIT case must have `commands[].run`; it must not ask case-by-case confirmation questions.
 - If the user wants a quick autonomous pass, run `/qa-aist cases generate --init --fast`; fast mode uses the strictest side-effect-safe defaults and avoids interactive category questions.
 - If the user wants a smaller first batch, run `/qa-aist cases generate --init --generated_count 5`.
-- If the user asks for follow-up ideas after issues/PRs/runs changed, run `/qa-aist cases generate --growing`; it creates incremental growth draft cases from repo, issues, PR references, latest run, reports, existing cases, and runners.
+- If the user asks for follow-up ideas after issues/PRs/runs changed, run `/qa-aist cases generate --growing`; it creates incremental executable growth cases from repo, issues, PR references, latest run, reports, existing cases, and runners.
 - If the user types bare `/qa-aist cases generate`, run the dispatcher and present its mode-selection error; do not silently choose a mode.
-- After `cases generate --init` or `cases generate --growing` returns `payload.hermes_needs_input`: call `clarify` for the category-level blocking inputs before treating the draft as runnable. Do not discuss each generated case one by one unless the user explicitly asks.
+- After `cases generate --init` or `cases generate --growing`, assume the generated cases are runnable safe probes unless QA-AIST explicitly returns `payload.hermes_needs_input`. If needs-input exists, call `clarify` only for category-level blockers. Do not discuss each generated case one by one unless the user explicitly asks.
 - After `/qa-aist qa-test list`: suggest dry-run or running one selected case, not all cases by default.
 - After `cases generate --init` or `cases generate --growing`: QA-AIST auto-plans the Wiki draft/missing-input status. Suggest `/qa-aist publish wiki status`.
 - After a test run: QA-AIST auto-plans or applies the Wiki test-result status. Suggest `/qa-aist publish wiki status` and `/qa-aist report status`.
-- If the user explicitly wants to update only the Wiki, use `/qa-aist publish wiki plan`, then `/qa-aist publish wiki apply` after confirmation. This path must never create issue comments, new issues, or PRs.
+- If the user explicitly wants to update only the Wiki, use `/qa-aist publish wiki plan`, then `/qa-aist publish wiki apply` after confirmation. With HTTP backend QA-AIST writes directly; with MCP backend QA-AIST returns `status: needs_mcp_apply` and a gated `mcp_write_request`. This path must never create issue comments, new issues, or PRs.
+- If `/qa-aist publish wiki apply` returns `status: needs_mcp_apply`, read `payload.mcp_write_request`. Call the configured Hermes Gitea MCP wiki update/write-page tool for the exact `repo`, `page`, `body`, and `message` in that request only. Write the MCP tool result JSON to `payload.mcp_write_result_path`, then run `/qa-aist publish wiki complete-mcp --result-json <path>`.
 - Before `/qa-aist publish apply` or `/qa-aist fix-issues submit-pr`: ask for explicit confirmation and summarize what will be written remotely.
 
 Use this command shape:
@@ -995,6 +1024,7 @@ Examples:
 {runner_command} --root "$PWD" /qa-aist publish wiki status
 {runner_command} --root "$PWD" /qa-aist publish wiki plan
 {runner_command} --root "$PWD" /qa-aist publish wiki apply
+{runner_command} --root "$PWD" /qa-aist publish wiki complete-mcp --result-json .qa-aist-project/state/gitea-mcp/wiki-write-result.json
 {runner_command} --root "$PWD" /qa-aist publish plan
 {runner_command} --root "$PWD" /qa-aist publish apply
 {runner_command} --root "$PWD" /qa-aist fix-issues plan --issue 123
@@ -1033,6 +1063,7 @@ Examples:
 - `/qa-aist qa-test help`
 - `/qa-aist publish wiki plan`
 - `/qa-aist publish wiki apply`
+- `/qa-aist publish wiki complete-mcp --result-json <path>`
 - `/qa-aist publish wiki status`
 - `/qa-aist publish wiki render`
 - `/qa-aist publish plan`
@@ -1050,15 +1081,15 @@ Examples:
 
 ## Safety Rules
 
-- Do not directly write Gitea comments, issues, wiki pages, or PRs. Wiki remote writes are allowed only by QA-AIST auto-sync or `/qa-aist publish wiki apply` after the Wiki gate passes. Issue/wiki mixed publishing remains behind `/qa-aist publish apply`; PR creation remains behind `/qa-aist fix-issues submit-pr`.
+- Do not directly write Gitea comments, issues, or PRs. Wiki remote writes are allowed only by QA-AIST auto-sync, `/qa-aist publish wiki apply`, or the gated MCP handoff returned by `/qa-aist publish wiki apply` with `status: needs_mcp_apply`. Issue/wiki mixed publishing remains behind `/qa-aist publish apply`; PR creation remains behind `/qa-aist fix-issues submit-pr`.
 - Automatic Wiki sync must only update the configured Wiki page. It must not create issue comments, create issues, or open PRs.
-- Do not use Gitea MCP for remote writes. In QA-AIST V1, `tracker.gitea.backend: mcp` is read-only and only feeds `/qa-aist issues sync` through a local JSON snapshot.
+- Do not use Gitea MCP for issue comments, issue creation, PR creation, or arbitrary writes. In QA-AIST V1, `tracker.gitea.backend: mcp` may write only the configured Wiki page, and only after QA-AIST returns a gated `mcp_write_request` from `/qa-aist publish wiki apply`.
 - Do not reorder the QA-AIST close-loop pipeline.
 - Do not invent evidence paths.
 - Do not print raw secrets.
 - Do not run arbitrary shell commands assembled from chat. The only command you should run for `/qa-aist ...` is the dispatcher command above with the user's QA-AIST arguments.
 - Do not bypass `write_gate`, issue sync, duplicate checks, or case contracts, even if the user asks you to write tracker output directly.
-- If `/qa-aist cases generate --init` or `/qa-aist cases generate --growing` returns `payload.hermes_needs_input`, call `clarify` for category-level blocking inputs in Traditional Chinese, and wait for answers before treating a draft as runnable. Do not force the user to approve test cases one by one.
+- `/qa-aist cases generate --init` and `--growing` should produce executable side-effect-safe probes. If they return `payload.hermes_needs_input`, call `clarify` for category-level blocking inputs in Traditional Chinese. Do not force the user to approve test cases one by one.
 - If you open a separate growth session/agent, it may only write candidate JSON for `/qa-aist cases generate --growing --candidate-json <path>`; it must not directly edit case YAML, tracker, wiki, PRs, or reports.
 - If the user types `/qa-aist qa-test` without a subcommand, show the QA test help instead of guessing.
 
@@ -1145,7 +1176,7 @@ Filtering rule:
 - Exclude `html_url` containing `/pulls/` or entries carrying explicit PR markers.
 - Preserve real issue bodies/comments when available; closed issues may be minimal because QA-AIST only needs them to remove stale mirrors.
 
-Remote write rule: never use Gitea MCP for comments/wiki/PR writes in QA-AIST. Only QA-AIST auto Wiki sync, `/qa-aist publish wiki apply`, legacy `/qa-aist publish apply`, and `/qa-aist fix-issues submit-pr` may perform gated writes.
+Remote write rule: never use Gitea MCP for comments, issues, PRs, or arbitrary writes in QA-AIST. Gitea MCP may update only the configured Wiki page after `/qa-aist publish wiki apply` returns a gated `mcp_write_request`; record the result with `/qa-aist publish wiki complete-mcp --result-json <path>`. HTTP backend may still perform QA-AIST auto Wiki sync, `/qa-aist publish wiki apply`, legacy `/qa-aist publish apply`, and `/qa-aist fix-issues submit-pr` after gates pass.
 """
 
 
@@ -1236,13 +1267,13 @@ def _overview_help_payload() -> dict[str, Any]:
         {"command": "/qa-aist issues status", "purpose": "查看本地 issue snapshot 是否已同步"},
         {"command": "/qa-aist issues show <issue_id>", "purpose": "查看單一 issue mirror"},
         {"command": "/qa-aist issues dedupe", "purpose": "檢查本地 active issues 是否疑似重複"},
-        {"command": "/qa-aist cases generate --init", "purpose": "首次全 repo SWQA 建案，依 README/code/metadata 產生 draft cases"},
+        {"command": "/qa-aist cases generate --init", "purpose": "首次全 repo SWQA 建案，依 README/code/metadata 產生可執行 safe-probe cases"},
         {"command": "/qa-aist cases generate --init --generated_count 5", "purpose": "限制初始建案第一批 draft case 數量"},
-        {"command": "/qa-aist cases generate --init --fast", "purpose": "用最高安全標準自主產生初始 draft cases，減少互動問答"},
-        {"command": "/qa-aist cases generate --growing", "purpose": "依最新 issues/PR/latest-run/reports 狀態擴散 draft cases"},
+        {"command": "/qa-aist cases generate --init --fast", "purpose": "用最高安全標準自主產生初始 executable cases，減少互動問答"},
+        {"command": "/qa-aist cases generate --growing", "purpose": "依最新 issues/PR/latest-run/reports 狀態擴散 executable cases"},
         {"command": "/qa-aist cases generate --init --feature \"CLI help\" --profile cli", "purpose": "指定功能與 profile，引導完整初始建案"},
         {"command": "/qa-aist cases generate --growing --candidate-json <path>", "purpose": "匯入 Hermes growth session 候選 JSON，經 engine 驗證後寫入 draft"},
-        {"command": "/qa-aist cases review", "purpose": "查看 draft cases 與待回答問題"},
+        {"command": "/qa-aist cases review", "purpose": "查看仍需人工補強的 drafts；通常 init/growing 產物可直接 validate/dry-run"},
         {"command": "/qa-aist cases validate", "purpose": "驗證 generated case YAML 是否可被 qa-test 執行"},
         {"command": "/qa-aist qa-test list", "purpose": "列出可以跑的測試 case"},
         {"command": "/qa-aist qa-test validate", "purpose": "檢查 case YAML 格式是否正確"},
@@ -1252,7 +1283,8 @@ def _overview_help_payload() -> dict[str, Any]:
         {"command": "/qa-aist qa-test run", "purpose": "跑全部 case"},
         {"command": "/qa-aist publish wiki status", "purpose": "查看自動 Wiki 狀態同步結果"},
         {"command": "/qa-aist publish wiki plan", "purpose": "手動產生 Wiki-only gated plan"},
-        {"command": "/qa-aist publish wiki apply", "purpose": "gate 通過後只更新 Gitea Wiki，不建立 issue/PR"},
+        {"command": "/qa-aist publish wiki apply", "purpose": "gate 通過後只更新 Gitea Wiki；MCP backend 會產生 Hermes MCP write request"},
+        {"command": "/qa-aist publish wiki complete-mcp --result-json <path>", "purpose": "記錄 Hermes Gitea MCP Wiki 寫入結果"},
         {"command": "/qa-aist publish wiki render", "purpose": "只重新產生本地 Wiki markdown"},
         {"command": "/qa-aist publish plan", "purpose": "相容舊版：把 latest run 轉成 wiki/issue write plan 並跑 gate"},
         {"command": "/qa-aist publish apply", "purpose": "相容舊版：gate 通過後寫 Gitea wiki/issues"},
@@ -1339,11 +1371,13 @@ def _overview_help_text(commands: list[dict[str, str]]) -> str:
             "1. `/qa-aist setup`：初始化目前產品 repo。",
             "2. `/qa-aist doctor`：確認設定和目錄健康。",
             "3. `/qa-aist issues sync`：同步 Gitea issues 到本地 mirror。",
-            "4. `/qa-aist cases generate --init`：首次分析 README、程式碼、metadata 與 rules，建立 SWQA draft cases。",
-            "5. `/qa-aist cases review`：回答缺少的測試輸入問題。",
-            "6. `/qa-aist qa-test run-one <case_id>`：先跑一個 case。",
-            "7. 測試或產生 cases 後，QA-AIST 會自動更新本地 Wiki plan；查看 `/qa-aist publish wiki status`。",
-            "8. 若需要手動更新遠端 Wiki，跑 `/qa-aist publish wiki plan` 再確認 `/qa-aist publish wiki apply`。",
+            "4. `/qa-aist cases generate --init`：首次分析 README、程式碼、metadata 與 rules，建立可執行 SWQA safe-probe cases。",
+            "5. `/qa-aist cases validate`：確認 generated contracts 可被 qa-test 讀取。",
+            "6. `/qa-aist qa-test dry-run`：先預覽全部 safe probes。",
+            "7. `/qa-aist qa-test run-one <case_id>`：先跑一個 case。",
+            "8. 測試或產生 cases 後，QA-AIST 會自動更新本地 Wiki plan；查看 `/qa-aist publish wiki status`。",
+            "9. 若需要手動更新遠端 Wiki，跑 `/qa-aist publish wiki plan` 再確認 `/qa-aist publish wiki apply`。",
+            "   若 backend 是 MCP，`apply` 會產生 gated MCP write request，由 Hermes 呼叫 Gitea MCP 後再跑 `complete-mcp`。",
             "",
             "常用指令：",
             *command_lines,
@@ -1365,15 +1399,16 @@ def _workflow_help_payload(topic: str) -> dict[str, Any]:
             "再用 `/qa-aist issues dedupe` 確認沒有重複 active issue。",
         ],
         "cases": [
-            "cases 用來產生可審查的 growth draft case contract。",
+            "cases 用來產生可執行的 safe-probe case contract。",
             "首次導入先跑 `/qa-aist cases generate --init`，QA-AIST 會讀 README、程式碼、metadata、既有 runners/cases/rules，建立功能、正向、反向、邊界與壓力測試 draft。",
             "後續有新 issues、PR、latest run 或 reports 時跑 `/qa-aist cases generate --growing`，讓 case 從最新狀態繼續擴散。",
             "可用 `--feature`、`--profile auto|cli|api|hardware|repo`、`--generated_count` 控制生成方向；`--fast` 會由 QA-AIST 用最高安全標準自行決策，避免互動問答。",
             "如果輸出 questions，Hermes 必須用繁中問答一次補齊大分類 fixture、輸入檔、成功條件和副作用邊界，不要逐一討論每個 case。",
         ],
         "publish": [
-            "publish wiki 是主要狀態看板，用來把 draft cases、missing input、latest run 與 Gitea write summary 更新到單一 Wiki 頁。",
+            "publish wiki 是主要狀態看板，用來把 generated cases、advisory input、latest run 與 Gitea write summary 更新到單一 Wiki 頁。",
             "`publish wiki plan` 只產生 gated Wiki plan；`publish wiki apply` 只更新 Wiki，不建立 issue comments、issues 或 PR。",
+            "HTTP backend 由 QA-AIST 直接寫 Wiki；MCP backend 會回傳 `needs_mcp_apply` 與 `mcp_write_request`，Hermes 只能依 request 呼叫 Gitea MCP 寫同一個 Wiki page，完成後跑 `publish wiki complete-mcp --result-json <path>`。",
             "`publish plan/apply/status` 保留為相容舊版的 mixed wiki/issues 發布流程。",
             "gate blocked 時，Hermes 不得自己改用 curl、Gitea MCP 或 API 繞過。",
         ],
@@ -1451,6 +1486,7 @@ def _positional_args(argv: list[str]) -> list[str]:
         "--plan",
         "--profile",
         "--result",
+        "--result-json",
         "--root",
         "--runner-command",
         "--skills-dir",
