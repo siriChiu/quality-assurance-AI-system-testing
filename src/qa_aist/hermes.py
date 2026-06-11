@@ -365,7 +365,7 @@ def _collect_needs_input_questions(payload: dict[str, Any]) -> list[dict[str, An
     seen: set[str] = set()
 
     def add(prompt: Any, *, source: str, case_id: Any = None, label: Any = None) -> None:
-        prompt_text = str(prompt or "").strip()
+        prompt_text = _missing_input_prompt(prompt)
         if not prompt_text:
             return
         key = f"{source}:{case_id or ''}:{prompt_text}"
@@ -382,6 +382,10 @@ def _collect_needs_input_questions(payload: dict[str, Any]) -> list[dict[str, An
             item["case_id"] = str(case_id)
         if label:
             item["label"] = str(label)
+        if isinstance(prompt, dict):
+            for key_name in ("answer_key", "expected_format", "input_type", "placeholder", "example"):
+                if prompt.get(key_name):
+                    item[key_name] = str(prompt.get(key_name))
         questions.append(item)
 
     _collect_question_groups(payload.get("questions"), source="payload.questions", add=add)
@@ -399,7 +403,7 @@ def _collect_needs_input_questions(payload: dict[str, Any]) -> list[dict[str, An
 
 def _missing_input_prompt(item: Any) -> str:
     if isinstance(item, dict):
-        prompt = item.get("prompt") or item.get("message") or item.get("id")
+        prompt = item.get("prompt") or item.get("message") or item.get("label") or item.get("id")
         return str(prompt or "").strip()
     text = str(item or "").strip()
     if not text:
