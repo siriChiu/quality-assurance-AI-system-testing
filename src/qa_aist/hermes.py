@@ -460,7 +460,7 @@ def suggest_next_actions(payload: dict[str, Any], engine_argv: list[str], exit_c
         ]
     if "redmine_mcp_snapshot_missing" in message:
         return [
-            _next("用 Hermes Redmine MCP 讀取指定 issues，寫入 snapshot 後重跑 generate", "/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]", confirm=True),
+            _redmine_snapshot_retry_action(current, engine_argv),
             _next("執行健康檢查", "/qa-aist doctor"),
         ]
     if error in {"GiteaError", "IssueSyncError"}:
@@ -635,6 +635,42 @@ def _next(label: str, command: str, *, confirm: bool = False, destructive: bool 
         "requires_confirmation": confirm or destructive,
         "destructive": destructive,
     }
+
+
+def _redmine_snapshot_retry_action(current: str, engine_argv: list[str]) -> dict[str, Any]:
+    ids = _redmine_issue_ids_from_argv(engine_argv)
+    id_text = " ".join(ids) if ids else "<redmine_issue_id> [<redmine_issue_id> ...]"
+    if current == "issues sync":
+        return _next(
+            "用 Hermes Redmine MCP 讀取指定 issues，寫入 snapshot 後重跑 sync",
+            f"/qa-aist issues sync --redmine-issues {id_text}",
+            confirm=True,
+        )
+    return _next(
+        "用 Hermes Redmine MCP 讀取指定 issues，寫入 snapshot 後重跑 generate",
+        f"/qa-aist cases generate --redmine-issues {id_text}",
+        confirm=True,
+    )
+
+
+def _redmine_issue_ids_from_argv(engine_argv: list[str]) -> list[str]:
+    ids: list[str] = []
+    capture = False
+    for item in engine_argv:
+        if item == "--redmine-issues":
+            capture = True
+            continue
+        if item.startswith("--redmine-issues="):
+            raw = item.split("=", 1)[1]
+            ids.extend([part for part in raw.replace(",", " ").split() if part.isdigit()])
+            capture = False
+            continue
+        if capture:
+            if item.startswith("-"):
+                break
+            if item.isdigit():
+                ids.append(item)
+    return ids
 
 
 def _first_case_id(payload: dict[str, Any]) -> str | None:

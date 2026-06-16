@@ -36,6 +36,29 @@ class HermesDispatchTest(unittest.TestCase):
                     self.assertEqual(result["payload"]["error"], "command_removed")
                     self.assertIn("replacement", result["payload"])
 
+    def test_redmine_missing_snapshot_retry_keeps_current_workflow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hermes.dispatch_chat_command("/qa-aist setup", root=root)
+
+            sync = hermes.dispatch_chat_command("/qa-aist issues sync --redmine-issues 144732 144694 144693 144780", root=root)
+            self.assertEqual(sync["exit_code"], 2)
+            self.assertEqual(sync["payload"]["error"], "RedmineError")
+            self.assertEqual(
+                sync["payload"]["next_actions"][0]["command"],
+                "/qa-aist issues sync --redmine-issues 144732 144694 144693 144780",
+            )
+            self.assertIn("重跑 sync", sync["payload"]["next_actions"][0]["label"])
+            self.assertNotIn("cases generate", sync["payload"]["next_actions"][0]["command"])
+
+            generate = hermes.dispatch_chat_command("/qa-aist cases generate --redmine-issues 144732 144694", root=root)
+            self.assertEqual(generate["exit_code"], 2)
+            self.assertEqual(
+                generate["payload"]["next_actions"][0]["command"],
+                "/qa-aist cases generate --redmine-issues 144732 144694",
+            )
+            self.assertIn("重跑 generate", generate["payload"]["next_actions"][0]["label"])
+
     def test_quick_start_chat_commands_dispatch_to_engine(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
