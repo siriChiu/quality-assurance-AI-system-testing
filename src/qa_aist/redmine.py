@@ -224,6 +224,7 @@ def normalize_redmine_issue(raw: dict[str, Any]) -> dict[str, Any]:
         "project": project.get("name") or raw.get("project") or "",
         "updated_at": str(raw.get("updated_on") or raw.get("updated_at") or ""),
         "url": str(raw.get("url") or raw.get("html_url") or ""),
+        "full_message": render_full_redmine_message(raw, issue_id=issue_id, subject=subject, description=description),
         "raw": raw,
     }
 
@@ -239,9 +240,9 @@ def render_redmine_mirror(issue: dict[str, Any]) -> str:
             f"- Updated at: {issue.get('updated_at') or '-'}",
             f"- URL: {issue.get('url') or '-'}",
             "",
-            "## Description",
+            "## Full Redmine Message",
             "",
-            issue.get("description") or "_No description._",
+            issue.get("full_message") or issue.get("description") or "_No Redmine message synced._",
             "",
             "## QA-AIST Notes",
             "",
@@ -250,6 +251,87 @@ def render_redmine_mirror(issue: dict[str, Any]) -> str:
             "",
         ]
     )
+
+
+def render_full_redmine_message(raw: dict[str, Any], *, issue_id: int, subject: str, description: str) -> str:
+    lines = [
+        "### Subject",
+        "",
+        subject or f"Redmine issue {issue_id}",
+        "",
+        "### Description",
+        "",
+        description or "_No description._",
+    ]
+    lines.extend(_render_named_values_section("Custom Fields", raw.get("custom_fields")))
+    lines.extend(_render_journal_section(raw))
+    lines.extend(_render_named_values_section("Attachments", raw.get("attachments")))
+    lines.extend(
+        [
+            "",
+            "### Raw Redmine JSON",
+            "",
+            "```json",
+            json_dumps(raw),
+            "```",
+        ]
+    )
+    return "\n".join(lines).strip()
+
+
+def _render_named_values_section(title: str, value: Any) -> list[str]:
+    if not isinstance(value, list) or not value:
+        return []
+    lines = ["", f"### {title}", ""]
+    for index, item in enumerate(value, start=1):
+        if isinstance(item, dict):
+            name = item.get("name") or item.get("filename") or item.get("id") or f"item {index}"
+            rendered = item.get("value") if "value" in item else item
+            lines.append(f"- {name}: {_render_redmine_value(rendered)}")
+        else:
+            lines.append(f"- {_render_redmine_value(item)}")
+    return lines
+
+
+def _render_journal_section(raw: dict[str, Any]) -> list[str]:
+    journals = raw.get("journals")
+    if not isinstance(journals, list) or not journals:
+        journals = raw.get("comments")
+    if not isinstance(journals, list) or not journals:
+        return []
+    lines = ["", "### Journals / Comments", ""]
+    for index, journal in enumerate(journals, start=1):
+        if not isinstance(journal, dict):
+            lines.extend([f"#### Entry {index}", "", _render_redmine_value(journal), ""])
+            continue
+        user = journal.get("user")
+        if isinstance(user, dict):
+            user_text = user.get("name") or user.get("login") or user.get("id") or "-"
+        else:
+            user_text = user or journal.get("author") or "-"
+        timestamp = journal.get("created_on") or journal.get("created_at") or journal.get("updated_on") or journal.get("updated_at") or "-"
+        notes = journal.get("notes") if "notes" in journal else journal.get("body", "")
+        lines.extend(
+            [
+                f"#### Entry {index}",
+                "",
+                f"- User: {user_text}",
+                f"- Time: {timestamp}",
+                "",
+                str(notes or "_No notes._"),
+            ]
+        )
+        details = journal.get("details")
+        if details:
+            lines.extend(["", "Details:", "", "```json", json_dumps(details), "```"])
+        lines.append("")
+    return lines
+
+
+def _render_redmine_value(value: Any) -> str:
+    if isinstance(value, (dict, list)):
+        return json_dumps(value)
+    return str(value)
 
 
 def build_redmine_gitea_sync_plan(config: ProjectConfig, issues: list[dict[str, Any]]) -> dict[str, Any]:
@@ -450,9 +532,9 @@ def render_gitea_candidate_body(issue: dict[str, Any]) -> str:
         f"- Updated at: {issue.get('updated_at') or '-'}",
         f"- URL: {issue.get('url') or '-'}",
         "",
-        "## Problem",
+        "## Full Redmine Message",
         "",
-        issue.get("description") or "_No description._",
+        issue.get("full_message") or issue.get("description") or "_No Redmine message synced._",
         "",
         "## QA-AIST Traceability",
         "",

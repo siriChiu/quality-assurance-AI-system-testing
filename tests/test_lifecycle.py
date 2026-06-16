@@ -69,6 +69,22 @@ class LifecycleTest(unittest.TestCase):
                 "project": {"name": "IRCTool"},
                 "updated_on": "2026-06-08T12:00:00Z",
                 "url": "https://redmine.example.test/issues/144780",
+                "custom_fields": [
+                    {"id": 7, "name": "BMC Model", "value": "SIRI-LAB-BMC-01"},
+                    {"id": 8, "name": "Reproduction Command", "value": "irctool sensors --login lab.yaml"},
+                ],
+                "journals": [
+                    {
+                        "id": 9001,
+                        "user": {"name": "QA Engineer"},
+                        "created_on": "2026-06-08T12:10:00Z",
+                        "notes": "Full journal note: cold boot reproduces after AC cycle; do not shorten this text.",
+                        "details": [{"property": "attr", "name": "status_id", "old_value": "1", "new_value": "2"}],
+                    }
+                ],
+                "attachments": [
+                    {"id": 501, "filename": "cold-boot-sensors.log", "filesize": 4096, "content_url": "https://redmine.example.test/attachments/501"}
+                ],
             },
             {
                 "id": 144693,
@@ -188,6 +204,14 @@ expected: CLI help path remains callable.
             self.assertEqual(state["issue_candidates"][0]["action"], "create_gitea_issue_candidate")
             self.assertTrue(state["issue_candidates"][0]["write_gate_result"]["allowed"])
             self.assertIn("Redmine #144780", state["issue_candidates"][0]["body"])
+            self.assertIn("Full journal note: cold boot reproduces after AC cycle; do not shorten this text.", state["issue_candidates"][0]["body"])
+            self.assertIn("irctool sensors --login lab.yaml", state["issue_candidates"][0]["body"])
+            self.assertIn("cold-boot-sensors.log", state["issue_candidates"][0]["body"])
+            mirror_text = (root / ".qa-aist-project" / "issues" / "redmine-144780.md").read_text(encoding="utf-8")
+            self.assertIn("## Full Redmine Message", mirror_text)
+            self.assertIn("### Raw Redmine JSON", mirror_text)
+            self.assertIn("Full journal note: cold boot reproduces after AC cycle; do not shorten this text.", mirror_text)
+            self.assertIn("cold-boot-sensors.log", mirror_text)
             request_path = root / payload["mcp_issue_write_request_path"]
             self.assertTrue(request_path.exists())
             request = json.loads(request_path.read_text(encoding="utf-8"))
@@ -196,6 +220,7 @@ expected: CLI help path remains callable.
             self.assertEqual(request["safety"]["allowed_targets"], ["issues"])
             self.assertEqual(request["actions"][0]["operation"], "gitea.issue.create")
             self.assertEqual(request["actions"][0]["redmine_issue_id"], 144780)
+            self.assertIn("Full journal note: cold boot reproduces after AC cycle; do not shorten this text.", request["actions"][0]["body"])
             self.assertFalse((root / ".qa-aist-project" / "cases" / "REDMINE-144780.yaml").exists())
 
     def test_cases_generate_redmine_issues_uses_multiple_ids_directly_without_gitea_plan(self) -> None:
@@ -227,6 +252,10 @@ expected: CLI help path remains callable.
             self.assertTrue((root / ".qa-aist-project" / "cases" / "REDMINE-144693.yaml").exists())
             case_yaml = load_yaml(root / ".qa-aist-project" / "cases" / "REDMINE-144780.yaml")
             self.assertEqual(case_yaml["source"]["redmine_issue_id"], 144780)
+            self.assertIn("Full journal note: cold boot reproduces after AC cycle; do not shorten this text.", case_yaml["source"]["redmine_message"])
+            self.assertIn("irctool sensors --login lab.yaml", case_yaml["source"]["redmine_message"])
+            self.assertIn("cold-boot-sensors.log", case_yaml["source"]["redmine_message"])
+            self.assertIn("### Raw Redmine JSON", case_yaml["source"]["redmine_message"])
             self.assertNotIn("gitea_sync_plan", case_yaml["source"])
             self.assertEqual(case_yaml["commands"][0]["id"], "safe_probe")
 

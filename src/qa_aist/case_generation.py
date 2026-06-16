@@ -899,6 +899,7 @@ def draft_contract_for_redmine_issue(config: ProjectConfig, issue: dict[str, Any
             "provider": "redmine",
             "redmine_issue_id": int(issue["id"]),
             "redmine_url": issue.get("url") or "",
+            "redmine_message": issue.get("full_message") or issue.get("description") or "",
         },
         "profile": "auto",
         "feature": f"Redmine #{issue['id']}",
