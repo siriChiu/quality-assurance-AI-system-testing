@@ -9,6 +9,7 @@ from typing import Any
 
 from .config import ProjectConfig, json_dumps
 from .gitea import GiteaClient, GiteaError, gitea_config_from_project, issue_number
+from .hermes_mcp import hermes_mcp_readiness, mcp_server_is_available
 from .runner import utc_now
 
 ISSUE_SNAPSHOT_NAME = "issues-snapshot.json"
@@ -105,121 +106,65 @@ def issue_status(config: ProjectConfig) -> dict[str, Any]:
 
 def issue_sync_readiness(config: ProjectConfig) -> dict[str, Any]:
     tracker = config.data.get("tracker") if isinstance(config.data.get("tracker"), dict) else {}
-    provider = str(tracker.get("provider") or "none")
+    provider = str(tracker.get("provider") or "none").lower()
     gitea_cfg = gitea_config_from_project(config.data)
     checks: list[dict[str, Any]] = []
     blockers: list[str] = []
 
-    if provider != "gitea":
-        blockers.append("tracker_provider_disabled")
+    provider_ok = provider == "hermes_mcp"
+    if not provider_ok:
+        blockers.append("tracker_provider_not_hermes_mcp")
         checks.append({
             "name": "tracker.provider",
             "status": "WARN",
             "value": provider,
-            "message": "Set tracker.provider: gitea before syncing remote issues.",
+            "message": "QA-AIST V1 only syncs remote issues through Hermes MCP. Set tracker.provider: hermes_mcp.",
         })
     else:
         checks.append({"name": "tracker.provider", "status": "PASS", "value": provider})
 
-    checks.append({"name": "tracker.gitea.backend", "status": "PASS", "value": gitea_cfg.backend})
+    checks.append({"name": "tracker.backend", "status": "PASS", "value": gitea_cfg.backend})
 
-    if gitea_cfg.uses_mcp:
-        path = mcp_issues_snapshot_path(config, gitea_cfg)
-        repo_status = "PASS" if gitea_cfg.repo else "WARN"
-        if not gitea_cfg.repo:
-            blockers.append("gitea_repo_missing")
-        repo_check = {
-            "name": "tracker.gitea.repo",
-            "status": repo_status,
-            "value": gitea_cfg.repo,
-        }
-        if not gitea_cfg.repo:
-            repo_check["message"] = "Set tracker.gitea.repo, for example owner/repo."
-        checks.append(repo_check)
-        if path.exists():
-            checks.append({
-                "name": "tracker.gitea.mcp_issues_json",
-                "status": "PASS",
-                "path": _relative_or_str(path, config.root),
-            })
-        else:
-            blockers.append("gitea_mcp_snapshot_missing")
-            checks.append({
-                "name": "tracker.gitea.mcp_issues_json",
-                "status": "WARN",
-                "path": _relative_or_str(path, config.root),
-                "message": "Use Hermes Gitea MCP read-only fetch to write this JSON before issues sync.",
-            })
-        issue_sync_ready = provider == "gitea" and bool(gitea_cfg.repo) and path.exists()
-        return {
-            "status": "ready" if issue_sync_ready else "blocked",
-            "provider": provider,
-            "backend": gitea_cfg.backend,
-            "issue_sync_ready": issue_sync_ready,
-            "remote_write_ready": False,
-            "remote_write_reason": "mcp_backend_is_read_only",
-            "blockers": sorted(set(blockers)),
-            "checks": checks,
-            "mcp_issues_json": _relative_or_str(path, config.root),
-            "mcp_snapshot_exists": path.exists(),
-            "snapshot_exists": issue_snapshot_path(config).exists(),
-            "snapshot_path": _relative_or_str(issue_snapshot_path(config), config.root),
-        }
-
-    if not gitea_cfg.uses_http:
-        blockers.append("gitea_backend_unknown")
+    if not gitea_cfg.uses_mcp:
+        blockers.append("tracker_backend_not_mcp")
         checks.append({
-            "name": "tracker.gitea.backend",
+            "name": "tracker.backend",
             "status": "FAIL",
             "value": gitea_cfg.backend,
-            "message": "Use backend: http or backend: mcp.",
+            "message": "QA-AIST V1 does not use internal Gitea HTTP credentials. Use Hermes Gitea MCP.",
         })
-        return {
-            "status": "blocked",
-            "provider": provider,
-            "backend": gitea_cfg.backend,
-            "issue_sync_ready": False,
-            "remote_write_ready": False,
-            "blockers": sorted(set(blockers)),
-            "checks": checks,
-            "snapshot_exists": issue_snapshot_path(config).exists(),
-            "snapshot_path": _relative_or_str(issue_snapshot_path(config), config.root),
-        }
 
-    for name, value, blocker, message in [
-        ("tracker.gitea.base_url", gitea_cfg.base_url, "gitea_base_url_missing", "Set tracker.gitea.base_url."),
-        ("tracker.gitea.repo", gitea_cfg.repo, "gitea_repo_missing", "Set tracker.gitea.repo, for example owner/repo."),
-    ]:
-        if value:
-            checks.append({"name": name, "status": "PASS", "value": value})
-        else:
-            blockers.append(blocker)
-            checks.append({"name": name, "status": "WARN", "value": value, "message": message})
-
-    token_present = bool(gitea_cfg.token)
-    if token_present:
-        checks.append({"name": "tracker.gitea.token_env", "status": "PASS", "env": gitea_cfg.token_env, "value_printed": False})
-    else:
-        blockers.append("gitea_http_token_missing")
+    mcp_ready = hermes_mcp_readiness(config)
+    checks.extend([check for check in mcp_ready.get("checks", []) if str(check.get("name")) in {"hermes.mcp.status", "hermes.mcp.gitea"}])
+    path = mcp_issues_snapshot_path(config, gitea_cfg)
+    if path.exists():
         checks.append({
-            "name": "tracker.gitea.token_env",
-            "status": "WARN",
-            "env": gitea_cfg.token_env,
-            "value_printed": False,
-            "message": f"Set environment variable {gitea_cfg.token_env} before HTTP issue sync or remote writes.",
+            "name": "tracker.mcp.gitea_issues_json",
+            "status": "PASS",
+            "path": _relative_or_str(path, config.root),
         })
-
-    issue_sync_ready = provider == "gitea" and bool(gitea_cfg.base_url and gitea_cfg.repo and gitea_cfg.token)
+    else:
+        blockers.append("gitea_mcp_snapshot_missing")
+        checks.append({
+            "name": "tracker.mcp.gitea_issues_json",
+            "status": "WARN",
+            "path": _relative_or_str(path, config.root),
+            "message": "Use Hermes Gitea MCP read-only fetch to write this JSON before issues sync.",
+        })
+    issue_sync_ready = provider_ok and gitea_cfg.uses_mcp and path.exists()
+    gitea_mcp_known = mcp_server_is_available(config, "gitea")
     return {
         "status": "ready" if issue_sync_ready else "blocked",
         "provider": provider,
         "backend": gitea_cfg.backend,
         "issue_sync_ready": issue_sync_ready,
-        "remote_write_ready": issue_sync_ready,
+        "remote_write_ready": bool(provider_ok and gitea_cfg.uses_mcp and gitea_mcp_known),
+        "remote_write_reason": "hermes_gitea_mcp" if gitea_mcp_known else "hermes_gitea_mcp_unknown_or_missing",
         "blockers": sorted(set(blockers)),
         "checks": checks,
-        "token_env": gitea_cfg.token_env,
-        "token_present": token_present,
+        "mcp_issues_json": _relative_or_str(path, config.root),
+        "mcp_snapshot_exists": path.exists(),
+        "hermes_mcp": mcp_ready,
         "snapshot_exists": issue_snapshot_path(config).exists(),
         "snapshot_path": _relative_or_str(issue_snapshot_path(config), config.root),
     }
@@ -441,7 +386,7 @@ def _load_input_issues(config: ProjectConfig, issues_json: str | Path | None) ->
         path = mcp_issues_snapshot_path(config, gitea_cfg)
         if not path.exists():
             raise IssueSyncError(
-                "gitea_mcp_snapshot_missing: tracker.gitea.backend is mcp, but issue snapshot JSON was not found at "
+                "gitea_mcp_snapshot_missing: QA-AIST is configured for Hermes Gitea MCP, but issue snapshot JSON was not found at "
                 f"{_relative_or_str(path, config.root)}. Use Hermes Gitea MCP read-only fetch to write raw issues JSON there, "
                 f"or set {MCP_ISSUES_ENV}."
             )
@@ -452,7 +397,7 @@ def _load_input_issues(config: ProjectConfig, issues_json: str | Path | None) ->
         return _extract_issue_list(loaded), {"source": "mcp", "mcp_issues_json": _relative_or_str(path, config.root)}
 
     if not gitea_cfg.configured:
-        raise GiteaError(f"Gitea is not configured or token env is missing: {gitea_cfg.token_env}")
+        raise GiteaError("Gitea HTTP backend is not configured. New QA-AIST projects should use Hermes MCP snapshots instead.")
     return GiteaClient(gitea_cfg).list_issues(state="all", include_comments=True), {"source": "gitea"}
 
 

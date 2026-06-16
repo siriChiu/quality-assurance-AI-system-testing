@@ -8,6 +8,7 @@ from typing import Any
 from .config import ProjectConfig, json_dumps, load_yaml
 from .contracts import list_contract_paths
 from .gitea import GiteaClient, GiteaError, gitea_config_from_project
+from .hermes_mcp import configured_mcp_json_path, hermes_mcp_readiness, mcp_server_is_available
 from .issues import load_issue_snapshot
 from .runner import utc_now
 from .write_gate import evaluate_write_gate
@@ -123,7 +124,7 @@ def apply_wiki_plan(config: ProjectConfig, *, plan_path: str | Path | None = Non
             "mcp_write_request": request_payload,
             "mcp_write_request_path": _relative_or_str(request_path, config.root),
             "mcp_write_result_path": _relative_or_str(wiki_mcp_result_path(config), config.root),
-            "next_action": "/qa-aist publish wiki complete-mcp",
+            "next_action": "/qa-aist publish wiki status",
             "remote": remote,
         }
         path = _write_wiki_apply_result(config, payload)
@@ -344,29 +345,32 @@ def wiki_remote_readiness(config: ProjectConfig, gate: dict[str, Any]) -> dict[s
     tracker = config.data.get("tracker") if isinstance(config.data.get("tracker"), dict) else {}
     provider = str(tracker.get("provider", "none")).lower()
     gitea = gitea_config_from_project(config.data)
+    provider_ok = provider == "hermes_mcp"
+    mcp_backend = gitea.uses_mcp
     blockers: list[str] = []
-    if provider != "gitea":
-        blockers.append("tracker_disabled")
-    if not gitea.base_url or not gitea.repo:
-        blockers.append("gitea_not_configured")
-    if gitea.uses_http and not gitea.token:
-        blockers.append("gitea_http_token_missing")
+    if not provider_ok:
+        blockers.append("tracker_provider_not_hermes_mcp")
+    if not mcp_backend:
+        blockers.append("tracker_backend_not_mcp")
     if gate and not gate.get("allowed", False):
         blockers.append("write_gate_blocked")
     gate_allowed = bool(gate.get("allowed", True))
-    mcp_ready = provider == "gitea" and gitea.uses_mcp and bool(gitea.base_url and gitea.repo) and gate_allowed
-    http_ready = provider == "gitea" and gitea.uses_http and bool(gitea.base_url and gitea.repo and gitea.token) and gate_allowed
+    hermes_mcp = hermes_mcp_readiness(config)
+    hermes_gitea_ready = mcp_server_is_available(config, "gitea")
+    if mcp_backend and not hermes_gitea_ready:
+        blockers.append("hermes_gitea_mcp_unknown_or_missing")
+    mcp_ready = provider_ok and mcp_backend and hermes_gitea_ready and gate_allowed
     return {
         "provider": provider,
         "backend": gitea.backend,
         "page": gitea.wiki_page,
-        "token_env": gitea.token_env,
-        "token_present": bool(gitea.token),
-        "remote_write_ready": http_ready or mcp_ready,
-        "write_backend": "hermes_gitea_mcp" if gitea.uses_mcp else "gitea_http",
+        "remote_write_ready": mcp_ready,
+        "write_backend": "hermes_gitea_mcp",
         "requires_hermes_mcp_apply": bool(mcp_ready),
-        "mcp_write_request_path": _relative_or_str(wiki_mcp_request_path(config), config.root) if gitea.uses_mcp else None,
-        "mcp_write_result_path": _relative_or_str(wiki_mcp_result_path(config), config.root) if gitea.uses_mcp else None,
+        "mcp_write_request_path": _relative_or_str(wiki_mcp_request_path(config), config.root),
+        "mcp_write_result_path": _relative_or_str(wiki_mcp_result_path(config), config.root),
+        "hermes_gitea_mcp_available": hermes_gitea_ready,
+        "hermes_mcp": hermes_mcp,
         "blockers": sorted(set(blockers)),
     }
 
@@ -506,11 +510,11 @@ def wiki_categories_path(config: ProjectConfig) -> Path:
 
 
 def wiki_mcp_request_path(config: ProjectConfig) -> Path:
-    return config.paths.state / "gitea-mcp" / WIKI_MCP_REQUEST_NAME
+    return configured_mcp_json_path(config, "wiki_write_request_json")
 
 
 def wiki_mcp_result_path(config: ProjectConfig) -> Path:
-    return config.paths.state / "gitea-mcp" / WIKI_MCP_RESULT_NAME
+    return configured_mcp_json_path(config, "wiki_write_result_json")
 
 
 def _load_latest_run(config: ProjectConfig, latest_run: str | Path | dict[str, Any] | None) -> dict[str, Any] | None:
@@ -778,13 +782,15 @@ def _auto_wiki_enabled(config: ProjectConfig) -> bool:
 
 def _build_mcp_wiki_request(config: ProjectConfig, *, plan: dict[str, Any], remote: dict[str, Any]) -> dict[str, Any]:
     gitea = gitea_config_from_project(config.data)
+    repo = gitea.repo or None
     return {
         "schema": WIKI_MCP_REQUEST_SCHEMA,
         "operation": "gitea.wiki.update_page",
         "provider": "gitea",
         "backend": "hermes_gitea_mcp",
-        "base_url": gitea.base_url,
-        "repo": gitea.repo,
+        "base_url": gitea.base_url or None,
+        "repo": repo,
+        "repo_source": "config" if repo else "hermes_session",
         "page": str(plan.get("page") or gitea.wiki_page),
         "message": str(plan.get("message") or "QA-AIST wiki status update"),
         "body": str(plan.get("body") or ""),
@@ -801,9 +807,10 @@ def _build_mcp_wiki_request(config: ProjectConfig, *, plan: dict[str, Any], remo
         },
         "hermes_instructions": [
             "Call the configured Hermes Gitea MCP wiki update/write-page tool for this repo and page only.",
+            "If `repo` is null, use the current Hermes workspace/repository context; do not ask the user for tokens.",
             "Use `body` as the full Wiki page content and `message` as the edit message when the MCP tool supports it.",
             "Do not create issue comments, issues, pull requests, or other Wiki pages for this request.",
-            "Write the MCP tool result JSON to `result_path`, then run `/qa-aist publish wiki complete-mcp --result-json <result_path>`.",
+            "Write the MCP tool result JSON to `result_path`, then report the result as part of the same `/qa-aist publish wiki apply` user flow.",
         ],
         "created_at": utc_now(),
     }

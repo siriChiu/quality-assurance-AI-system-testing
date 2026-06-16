@@ -1,121 +1,195 @@
 # Command Surface
 
-QA-AIST 的主介面是 Hermes 聊天室中的 `/qa-aist ...`。CLI 是 Hermes 背後的 deterministic engine，同一組 command surface 也可給 CI 或本機除錯使用。
+QA-AIST 的公開入口是 Hermes 聊天室中的 `/qa-aist ...`。CLI 只是 Hermes 背後呼叫的 deterministic engine；CI 或本機除錯可以直接用同一組參數。
 
-Hermes 回覆不是純 JSON dump。QA-AIST dispatcher 會在 payload 裡放 `next_actions`，skill 應該把它呈現成繁體中文選單，讓使用者回覆編號後繼續操作。`requires_confirmation: true` 的下一步不可直接執行。
+`/qa-aist help` 是唯一 help 指令。不再支援子分類 help。
 
-需要使用者補資料時，dispatcher 會固定回傳 `payload.input_required: true`、`payload.interaction.type: "needs_input"` 與 `payload.hermes_needs_input.questions[]`。Hermes 應呼叫 `clarify` 補齊大分類阻擋資訊；若 runtime 不支援，才用聊天室詢問。`next_actions` 是選單，不會被當成 needs-input 問卷。
+## Public Commands
 
-## Hermes Workflow
+```text
+/qa-aist help
+/qa-aist setup
+/qa-aist doctor
+
+/qa-aist issues sync
+/qa-aist issues status
+/qa-aist issues show <issue_id>
+/qa-aist issues fix --all
+/qa-aist issues fix --issue <id>
+/qa-aist issues fix --issue <id> --push-pr
+
+/qa-aist cases generate --init
+/qa-aist cases generate --init --count 5
+/qa-aist cases generate --growing
+/qa-aist cases generate --redmine-issues <id> [<id> ...]
+/qa-aist cases review
+/qa-aist cases validate
+/qa-aist cases list
+/qa-aist cases run
+/qa-aist cases run <case_id>
+/qa-aist cases push-pr
+/qa-aist cases push-pr <case_id>
+
+/qa-aist publish wiki status
+/qa-aist publish wiki plan
+/qa-aist publish wiki apply
+
+/qa-aist close-loop status
+/qa-aist close-loop run-once
+
+/qa-aist report status
+/qa-aist report json
+/qa-aist tracker plan-write
+```
+
+## Recommended Flow
 
 ```text
 /qa-aist setup
 /qa-aist doctor
 /qa-aist issues sync
-/qa-aist issues dedupe
 /qa-aist cases generate --init
 /qa-aist cases validate
-/qa-aist qa-test list
-/qa-aist qa-test run-one <case_id>
+/qa-aist cases list
+/qa-aist cases run <case_id>
+/qa-aist cases run
 /qa-aist publish wiki status
-/qa-aist publish wiki plan
 /qa-aist publish wiki apply
-/qa-aist publish wiki complete-mcp --result-json <path>
-/qa-aist fix-issues plan --issue <id>
-/qa-aist fix-issues submit-pr --issue <id>
+```
+
+後續有新 issues、PR、latest run 或 reports 時，用：
+
+```text
+/qa-aist cases generate --growing
+```
+
+Redmine issues 由 Hermes Redmine MCP 讀取 snapshot，再交給 QA-AIST：
+
+```text
+/qa-aist cases generate --redmine-issues 144780 144693
 ```
 
 ## Command Groups
 
 | Group | Commands | Purpose |
 |---|---|---|
-| setup | `setup`, `init-project`, `status`, `doctor` | bootstrap and health checks |
-| config | `show`, `validate` | inspect host-owned `.qa-aist.yaml` |
-| issues | `sync`, `status`, `show`, `dedupe` | sync Gitea issue mirrors and detect duplicates |
-| cases | `generate`, `review`, `validate` | generate executable safe-probe contracts; review only remaining drafts or lab-runner enhancements |
-| qa-test | `list`, `validate`, `dry-run`, `run`, `run-one`, `help` | execute case contracts and collect evidence |
-| publish wiki | `plan`, `apply`, `complete-mcp`, `status`, `render` | maintain the Wiki-only status board |
-| publish | `plan`, `apply`, `status` | legacy mixed wiki/issues publish flow |
-| fix-issues | `plan`, `run`, `submit-pr`, `status` | preflight repair work and create Gitea PRs |
-| close-loop | `status`, `run-once` | run the deterministic local test/report pipeline |
-| report | `status`, `json` | render latest reports |
-| tracker | `plan-write` | legacy single-result write-gate check |
+| root | `help`, `setup`, `doctor` | 看手冊、初始化、檢查 Gitea/Redmine MCP readiness |
+| issues | `sync`, `status`, `show`, `fix` | 同步、去重、prune、修復 handoff、產品修復 PR |
+| cases | `generate`, `review`, `validate`, `list`, `run`, `push-pr` | 產生與執行 test case contracts，依 failing case 建產品修復 PR |
+| publish wiki | `status`, `plan`, `apply` | 狀態看板，只更新 Gitea Wiki，不建立 issue comment/issue/PR |
+| close-loop | `status`, `run-once` | Observe/Normalize/Execute/Triage/Publish/Evolve/Prune health 與單輪流程 |
+| report | `status`, `json` | 查看 Markdown/JSON 報告 |
+| tracker | `plan-write` | 相容保留的單一 write-gate 檢查 |
 
-## Legacy Aliases
+## Cases
 
-| Legacy | Current |
+`cases generate` 必須指定模式。裸指令會回 `explicit_generation_mode_required`，Hermes 應引導使用者選：
+
+```text
+/qa-aist cases generate --init
+/qa-aist cases generate --growing
+/qa-aist cases generate --redmine-issues <id> [<id> ...]
+```
+
+`--init` 是第一次導入產品時的全 repo SWQA 建案。它會掃 README、程式碼、package metadata、既有 cases/runners/rules，產生可執行的 side-effect-safe probes，覆蓋功能、正向、反向、邊界、invalid input、side-effect-safe、stress/timeout-risk。`--init` 預設就是快速且嚴謹的自主模式，不需要另外加 fast 參數。
+
+`--count <n>` 是唯一正式的數量限制：
+
+```text
+/qa-aist cases generate --init --count 5
+```
+
+`--growing` 是後續增量擴散。它會讀 repo signals、Gitea/local issues、Redmine imports、PR refs、latest run、reports、existing cases/runners/rules，產生新的 executable growth cases。
+
+`cases run` 取代舊測試執行群組：
+
+```text
+/qa-aist cases list
+/qa-aist cases run <case_id>
+/qa-aist cases run
+```
+
+## Issues
+
+`issues sync` 內建 sync、dedupe、prune 與遠端 duplicate action plan。closed/resolved issue 以遠端為事實來源：本地 active mirror 會移除，不留言、不 reopen。
+
+```text
+/qa-aist issues sync
+/qa-aist issues status
+/qa-aist issues show <issue_id>
+```
+
+產品修復流程集中在 `issues fix`：
+
+```text
+/qa-aist issues fix --issue 123
+/qa-aist issues fix --issue 123 --push-pr
+/qa-aist issues fix --all
+```
+
+`--push-pr` 只有在 preflight、linked cases/evidence、write gate 通過後才建立產品修復 PR。
+
+## Publish Wiki
+
+Wiki 是 QA-AIST 的預設狀態看板。只保留三個公開指令：
+
+```text
+/qa-aist publish wiki status
+/qa-aist publish wiki plan
+/qa-aist publish wiki apply
+```
+
+`apply` 只同步 Gitea Wiki，不建立 issue comments、不建立新 issue、不建立 PR。
+
+QA-AIST 不保存 Gitea token，也不直接用 HTTP 寫 Wiki。`publish wiki apply` 會在 gate 通過後回 `status: needs_mcp_apply` 與 gated `mcp_write_request`；Hermes 用 Gitea MCP 更新指定 Wiki page 後，把結果寫到 `payload.mcp_write_result_path` 並回覆使用者。不要再暴露第二個 completion command。
+
+## Removed Commands
+
+被移除的指令不應偷偷轉址執行。Hermes 應呼叫 dispatcher，回報 `command_removed` 與 replacement。
+
+| Removed | Replacement |
 |---|---|
-| `sync-gitea pull` | `issues sync` |
-| `sync-gitea status` | `issues status` |
-| `sync-gitea validate` | `issues status` |
-| `find-new-issues run` | `publish plan` |
-| `find-new-issues dry-run` | `publish plan` |
+| `/qa-aist status` | `/qa-aist doctor` |
+| `/qa-aist config ...` | `/qa-aist doctor` |
+| `/qa-aist qa-test list` | `/qa-aist cases list` |
+| `/qa-aist qa-test run-one <case_id>` | `/qa-aist cases run <case_id>` |
+| `/qa-aist qa-test run` | `/qa-aist cases run` |
+| `/qa-aist issues dedupe` | `/qa-aist issues sync` |
+| `/qa-aist fix-issues run --issue <id>` | `/qa-aist issues fix --issue <id>` |
+| `/qa-aist fix-issues submit-pr --issue <id>` | `/qa-aist issues fix --issue <id> --push-pr` |
+| `/qa-aist publish plan` | `/qa-aist publish wiki plan` |
+| `/qa-aist publish apply` | `/qa-aist publish wiki apply` |
+| `/qa-aist publish status` | `/qa-aist publish wiki status` |
+| `/qa-aist sync-gitea ...` | `/qa-aist issues sync` |
+| `/qa-aist find-new-issues ...` | `/qa-aist cases generate --growing` |
+| `/qa-aist help <topic>` | `/qa-aist help` |
+
+Removed case-generation options:
+
+| Removed | Replacement |
+|---|---|
+| `--generated_count` | `--count` |
+| `--fast` | no longer needed; `--init` is autonomous high-standard mode |
+| `--from-issues` | `--growing` |
+| `--candidate-json` | not public; external sessions may analyze, but QA-AIST owns case writing |
 
 ## Direct Engine Examples
 
+From an installed package:
+
 ```bash
-qa-aist init-project --root <target-repo>
-qa-aist init-project --root <target-repo> --tracker-provider gitea --gitea-backend mcp --gitea-base-url https://git.example.com --gitea-repo owner/repo
-qa-aist issues sync --root <target-repo>
-qa-aist cases generate --root <target-repo> --init
-qa-aist cases generate --root <target-repo> --init --feature "CLI help" --profile cli
-qa-aist cases generate --root <target-repo> --growing
-qa-aist cases generate --root <target-repo> --growing --candidate-json growth-candidates.json
-qa-aist qa-test run-one --root <target-repo> ISSUE-1
-qa-aist publish wiki status --root <target-repo>
-qa-aist publish wiki plan --root <target-repo>
-qa-aist publish wiki apply --root <target-repo>
-qa-aist publish wiki complete-mcp --root <target-repo> --result-json .qa-aist-project/state/gitea-mcp/wiki-write-result.json
-qa-aist fix-issues submit-pr --root <target-repo> --issue 1 --dry-run
+qa-aist setup --root /path/to/product
+qa-aist doctor --root /path/to/product
+qa-aist issues sync --root /path/to/product
+qa-aist cases generate --root /path/to/product --init
+qa-aist cases generate --root /path/to/product --init --count 5
+qa-aist cases run --root /path/to/product CASE-001
+qa-aist publish wiki apply --root /path/to/product
 ```
 
 From a source checkout:
 
 ```bash
-PYTHONPATH=src python3 -m qa_aist.cli issues sync --root <target-repo> --issues-json issues.json
+PYTHONPATH=src python3 -m qa_aist.cli doctor --root /path/to/product
+PYTHONPATH=src python3 -m qa_aist.cli cases run --root /path/to/product CASE-001
 ```
-
-`setup` / `init-project` defaults to `--tracker-provider auto`. If the target repo has a parseable `git remote origin`, QA-AIST writes a Gitea MCP-ready config automatically. Use `--tracker-provider none` to keep tracker disabled, or `--gitea-backend http` when CI should call Gitea REST directly with a token env.
-
-If `.qa-aist.yaml` uses `tracker.gitea.backend: mcp`, Hermes must first use its configured Gitea MCP read tool to write raw issue JSON to `.qa-aist-project/state/gitea-mcp/issues.json` or `QA_AIST_GITEA_MCP_ISSUES_JSON`, then run:
-
-```text
-/qa-aist issues sync
-```
-
-## Case Generation
-
-`cases generate` requires an explicit mode. Bare `/qa-aist cases generate` returns `explicit_generation_mode_required` so Hermes can ask the user which path they want:
-
-```text
-/qa-aist cases generate --init
-/qa-aist cases generate --growing
-/qa-aist cases generate --init --feature "CLI help" --profile cli
-/qa-aist cases generate --growing --candidate-json <path>
-```
-
-`--init` is the first-time full-repo SWQA map. It scans README, code inventory, package metadata, existing runners, existing cases, and rules to generate executable functional, positive, negative, boundary, side-effect-safe, and stress/timeout safe-probe contracts. It does not apply an arbitrary default count cap; by default it generates the full init seed x SWQA dimension map. Use `--generated_count <max>` only when you intentionally want a smaller exploratory subset. Use `--fast` when QA-AIST should choose the strictest safe defaults and avoid interactive category questions.
-
-`--growing` is the follow-up mode. It creates executable YAML contracts under `.qa-aist-project/cases/` using repo signals, issue snapshot, PR references, latest run, reports, existing cases/runners, and the built-in SWQA policy pack. Growth cases include `growth_seed`, `six_hats`, and `growth_reason`; QA-AIST binds them to side-effect-safe probes first. Lab fixtures and stronger runners can be added later by category, without forcing one prompt per case.
-
-`--from-issues` has been replaced by growing mode and returns a structured `renamed_to_growing` error.
-
-## Remote Write Rule
-
-QA-AIST can write real Gitea Wiki/issues/PRs only through:
-
-```text
-/qa-aist publish wiki apply
-/qa-aist publish apply
-/qa-aist fix-issues submit-pr --issue <id>
-```
-
-`publish wiki apply` is Wiki-only and never creates issue comments, issues, or PRs. The old `publish apply` is the mixed wiki/issues flow. Every remote write must pass deterministic write gate first. Blocked writes must stay blocked; Hermes must not call Gitea directly to bypass QA-AIST.
-
-With `tracker.gitea.backend: mcp`, `publish wiki apply` returns `status: needs_mcp_apply` plus a gated `mcp_write_request`. Hermes may use Gitea MCP only to update the exact Wiki page in that request, then must run `publish wiki complete-mcp --result-json <path>`. MCP backend still cannot apply mixed publish plans, create issue comments/issues, or submit PRs. Use HTTP backend plus token env for those writes.
-
-## Host Data Boundary
-
-All commands must accept explicit paths. Tool source stays in `.qa-aist` or an installed package; host runtime data stays in `.qa-aist-project`.
-
-`init-project` refuses to use a workspace that is itself a QA-AIST source checkout. This prevents embedded-tool layouts such as `<target-repo>/.qa-aist/` from receiving host-project cases, issue mirrors, evidence, or runtime state.

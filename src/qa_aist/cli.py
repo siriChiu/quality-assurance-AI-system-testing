@@ -4,6 +4,7 @@ import argparse
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 from urllib import parse
@@ -24,6 +25,7 @@ from .config import (
 )
 from .case_generation import (
     CaseGenerationError,
+    generate_cases_from_redmine_issues,
     generate_cases_init,
     generate_cases_growing,
     review_generated_cases,
@@ -32,9 +34,11 @@ from .case_generation import (
 from .contracts import ContractError, list_contract_paths, load_contract, load_contracts, select_contracts
 from .fix_issues import FixIssueError, fix_status, plan_fix_issue, run_fix_issue, submit_fix_pr
 from .gitea import GiteaError
+from .hermes_mcp import hermes_mcp_readiness
 from .issues import IssueSyncError, dedupe_issues, issue_status, issue_sync_readiness, show_issue, sync_issues
 from .pipeline import PIPELINE_ORDER, run_close_loop
 from .publishing import PublishError, apply_publish_plan, plan_publish, publish_status
+from .redmine import RedmineError, redmine_readiness
 from .reports import load_latest_results, render_status_report
 from .runner import RunContext, run_case, utc_now
 from .templates import EXAMPLE_CONTRACT, EXAMPLE_RUNNER, SWQA_TEST_DESIGN_RULE, WIKI_CATEGORIES_RULE
@@ -49,6 +53,38 @@ from .wiki import (
     wiki_readiness,
     wiki_status,
 )
+
+
+REMOVED_COMMAND_REPLACEMENTS: dict[tuple[str, ...], str] = {
+    ("init-project",): "/qa-aist setup",
+    ("status",): "/qa-aist doctor",
+    ("config",): "/qa-aist doctor",
+    ("qa-test",): "/qa-aist cases run",
+    ("qa-test", "help"): "/qa-aist help",
+    ("qa-test", "list"): "/qa-aist cases list",
+    ("qa-test", "validate"): "/qa-aist cases validate",
+    ("qa-test", "dry-run"): "/qa-aist cases run",
+    ("qa-test", "run"): "/qa-aist cases run",
+    ("qa-test", "run-one"): "/qa-aist cases run <case_id>",
+    ("issues", "dedupe"): "/qa-aist issues sync",
+    ("fix-issues",): "/qa-aist issues fix --issue <id>",
+    ("fix-issues", "plan"): "/qa-aist issues fix --issue <id>",
+    ("fix-issues", "run"): "/qa-aist issues fix --issue <id>",
+    ("fix-issues", "submit-pr"): "/qa-aist issues fix --issue <id> --push-pr",
+    ("fix-issues", "status"): "/qa-aist issues status",
+    ("publish", "plan"): "/qa-aist publish wiki plan",
+    ("publish", "apply"): "/qa-aist publish wiki apply",
+    ("publish", "status"): "/qa-aist publish wiki status",
+    ("publish", "wiki", "render"): "/qa-aist publish wiki plan",
+    ("publish", "wiki", "complete-mcp"): "/qa-aist publish wiki apply",
+    ("sync-gitea",): "/qa-aist issues sync",
+    ("sync-gitea", "pull"): "/qa-aist issues sync",
+    ("sync-gitea", "status"): "/qa-aist issues status",
+    ("sync-gitea", "validate"): "/qa-aist issues status",
+    ("find-new-issues",): "/qa-aist cases generate --growing",
+    ("find-new-issues", "run"): "/qa-aist cases generate --growing",
+    ("find-new-issues", "dry-run"): "/qa-aist cases generate --growing",
+}
 
 
 def print_json(payload: dict[str, Any], *, exit_code: int = 0) -> int:
@@ -116,21 +152,16 @@ def cmd_setup(args: argparse.Namespace) -> int:
 def resolve_setup_tracker(root: Path, args: argparse.Namespace) -> dict[str, Any]:
     detected = detect_gitea_remote(root)
     provider = str(getattr(args, "tracker_provider", "auto") or "auto")
-    if provider == "auto":
-        provider = "gitea" if detected else "none"
-
-    backend_arg = getattr(args, "gitea_backend", None)
-    backend = str(backend_arg or ("mcp" if provider == "gitea" else "http"))
+    if provider in {"auto", "gitea"}:
+        provider = "hermes_mcp"
+    backend = "mcp"
     base_url = str(getattr(args, "gitea_base_url", "") or (detected or {}).get("base_url", ""))
     repo = str(getattr(args, "gitea_repo", "") or (detected or {}).get("repo", ""))
-    token_env = str(getattr(args, "gitea_token_env", "") or "QA_AIST_GITEA_TOKEN")
     project_name = repo.rsplit("/", 1)[-1] if repo else root.name
     default_branch = detect_default_branch(root) or "main"
 
-    if provider != "gitea":
-        backend = "http"
-        base_url = ""
-        repo = ""
+    if provider == "none":
+        project_name = root.name
 
     return {
         "config_kwargs": {
@@ -138,19 +169,22 @@ def resolve_setup_tracker(root: Path, args: argparse.Namespace) -> dict[str, Any
             "default_branch": default_branch,
             "tracker_provider": provider,
             "gitea_backend": backend,
-            "gitea_base_url": base_url,
-            "gitea_repo": repo,
-            "gitea_token_env": token_env,
+            "gitea_base_url": "",
+            "gitea_repo": "",
+            "gitea_token_env": "",
         },
         "payload": {
             "provider": provider,
-            "gitea_backend": backend,
-            "gitea_base_url": base_url,
-            "gitea_repo": repo,
-            "gitea_token_env": token_env,
+            "backend": backend,
+            "mcp_required_servers": ["gitea", "redmine"] if provider == "hermes_mcp" else [],
+            "mcp_status_json": f"{DEFAULT_PROJECT_WORKSPACE}/state/hermes-mcp/status.json",
+            "gitea_mcp_required": provider == "hermes_mcp",
+            "redmine_mcp_required": provider == "hermes_mcp",
             "git_remote_detected": bool(detected),
             "git_remote_url": (detected or {}).get("remote_url"),
-            "auto_configured_mcp": provider == "gitea" and backend == "mcp" and bool(detected),
+            "git_remote_base_url_detected": base_url or None,
+            "git_remote_repo_detected": repo or None,
+            "auto_configured_mcp": provider == "hermes_mcp",
         },
     }
 
@@ -265,12 +299,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             if name in {"root", "config"}:
                 continue
             checks.append({"name": f"path.{name}", "status": "PASS" if path.exists() else "WARN", "path": str(path)})
-        tracker = config.data.get("tracker", {})
-        token_env = tracker.get("api_token_env") if isinstance(tracker, dict) else None
-        if token_env:
-            checks.append({"name": "tracker.api_token_env", "status": "PASS", "env": token_env, "value_printed": False})
+        hermes_ready = hermes_mcp_readiness(config)
+        checks.extend(hermes_ready.get("checks", []))
         readiness = issue_sync_readiness(config)
         checks.extend(readiness.get("checks", []))
+        redmine_ready = redmine_readiness(config)
+        checks.extend(redmine_ready.get("checks", []))
         wiki_ready = wiki_readiness(config)
         if wiki_ready.get("remote_write_ready"):
             checks.append({"name": "wiki.remote_write", "status": "PASS", "page": wiki_ready.get("page")})
@@ -281,9 +315,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 "page": wiki_ready.get("page"),
                 "message": ", ".join(wiki_ready.get("blockers", [])) or "Wiki remote write is not ready.",
             })
+        checks = _dedupe_checks(checks)
         statuses = {str(check.get("status")) for check in checks}
         status = "FAIL" if "FAIL" in statuses else ("WARN" if "WARN" in statuses else "PASS")
-        return print_json({"status": status, "checks": checks, "issue_sync": readiness, "wiki_sync": wiki_ready})
+        return print_json({"status": status, "tool": "qa-aist", "checks": checks, "hermes_mcp": hermes_ready, "issue_sync": readiness, "redmine_sync": redmine_ready, "wiki_sync": wiki_ready})
     except QAConfigError as exc:
         return print_json({"status": "FAIL", "error": exc.error, "message": exc.message, **exc.details}, exit_code=2)
 
@@ -342,6 +377,10 @@ def cmd_issues_sync(args: argparse.Namespace) -> int:
     try:
         config = load_project_config(Path(args.root), args.config)
         payload = sync_issues(config, issues_json=args.issues_json, dry_run=args.dry_run)
+        duplicates = dedupe_issues(config)
+        payload["duplicates"] = duplicates.get("duplicates", [])
+        payload["duplicate_count"] = duplicates.get("duplicate_count", 0)
+        payload["remote_duplicate_actions"] = _remote_duplicate_actions(duplicates)
     except (QAConfigError, IssueSyncError, GiteaError) as exc:
         return _error_payload(exc)
     return print_json(payload)
@@ -351,6 +390,10 @@ def cmd_issues_status(args: argparse.Namespace) -> int:
     try:
         config = load_project_config(Path(args.root), args.config)
         payload = issue_status(config)
+        duplicates = dedupe_issues(config)
+        payload["duplicate_count"] = duplicates.get("duplicate_count", 0)
+        payload["duplicates"] = duplicates.get("duplicates", [])
+        payload["fix"] = fix_status(config)
     except (QAConfigError, IssueSyncError) as exc:
         return _error_payload(exc)
     return print_json(payload)
@@ -374,43 +417,54 @@ def cmd_issues_dedupe(args: argparse.Namespace) -> int:
     return print_json(payload)
 
 
+def cmd_issues_fix(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        if args.all:
+            snapshot = issue_status(config)
+            issue_ids = [int(item) for item in snapshot.get("open_active_issue_ids", []) if item is not None]
+            results = []
+            for issue_id in issue_ids:
+                result = run_fix_issue(config, issue_id=issue_id)
+                results.append(result)
+                if result.get("status") == "blocked":
+                    return print_json({"status": "blocked", "mode": "all", "processed": results, "blocked_issue_id": issue_id}, exit_code=4)
+            return print_json({"status": "ok", "mode": "all", "processed_count": len(results), "processed": results})
+        if args.issue is None:
+            return print_json(
+                {
+                    "status": "error",
+                    "error": "issue_required",
+                    "message": "Use /qa-aist issues fix --issue <id> or /qa-aist issues fix --all.",
+                },
+                exit_code=2,
+            )
+        if args.push_pr:
+            payload = submit_fix_pr(config, issue_id=args.issue, dry_run=False)
+            if payload.get("status") == "ok":
+                payload = _with_auto_wiki(config, payload, event="gitea_write_summary")
+            return print_json(payload, exit_code=0 if payload.get("status") == "ok" else 4)
+        payload = run_fix_issue(config, issue_id=args.issue)
+    except (QAConfigError, FixIssueError, GiteaError, IssueSyncError) as exc:
+        return _error_payload(exc)
+    return print_json(payload, exit_code=0 if payload.get("status") != "blocked" else 4)
+
+
 def cmd_cases_generate(args: argparse.Namespace) -> int:
     try:
         config = load_project_config(Path(args.root), args.config)
-        generated_count = args.generated_count if args.generated_count is not None else args.count
-        if args.generated_count is not None and args.count is not None and args.generated_count != args.count:
-            return print_json(
-                {
-                    "status": "error",
-                    "error": "conflicting_generated_count",
-                    "message": "Use only one generation limit. Prefer --generated_count; legacy --count is kept only for compatibility.",
-                    "choices": [
-                        "/qa-aist cases generate --init --generated_count 5",
-                        "/qa-aist cases generate --init --fast",
-                    ],
-                },
-                exit_code=2,
-            )
-        if args.from_issues:
-            return print_json(
-                {
-                    "status": "error",
-                    "error": "renamed_to_growing",
-                    "message": "cases generate --from-issues has been replaced by the growing generator. Use /qa-aist cases generate --growing.",
-                    "replacement": "/qa-aist cases generate --growing",
-                },
-                exit_code=2,
-            )
-        modes = [name for name in ["init", "growing"] if getattr(args, name)]
+        generated_count = args.count
+        modes = [name for name in ["init", "growing", "redmine_issues"] if getattr(args, name)]
         if not modes:
             return print_json(
                 {
                     "status": "error",
                     "error": "explicit_generation_mode_required",
-                    "message": "cases generate requires an explicit mode. Use /qa-aist cases generate --init for first-time full-repo SWQA generation, or /qa-aist cases generate --growing for incremental growth from latest repo/issues/PR/run state.",
+                    "message": "cases generate requires an explicit mode. Use --init, --growing, or --redmine-issues.",
                     "choices": [
                         "/qa-aist cases generate --init",
                         "/qa-aist cases generate --growing",
+                        "/qa-aist cases generate --redmine-issues <id> [<id> ...]",
                     ],
                 },
                 exit_code=2,
@@ -420,31 +474,24 @@ def cmd_cases_generate(args: argparse.Namespace) -> int:
                 {
                     "status": "error",
                     "error": "ambiguous_generation_mode",
-                    "message": "Choose exactly one generation mode: --init or --growing.",
+                    "message": "Choose exactly one generation mode: --init, --growing, or --redmine-issues.",
                     "choices": [
                         "/qa-aist cases generate --init",
                         "/qa-aist cases generate --growing",
+                        "/qa-aist cases generate --redmine-issues <id> [<id> ...]",
                     ],
                 },
                 exit_code=2,
             )
-        if args.candidate_json and not args.growing:
-            return print_json(
-                {
-                    "status": "error",
-                    "error": "candidate_json_requires_growing",
-                    "message": "--candidate-json is only for advanced growing sessions. Use /qa-aist cases generate --growing --candidate-json <path>.",
-                    "replacement": "/qa-aist cases generate --growing --candidate-json <path>",
-                },
-                exit_code=2,
-            )
-        if args.init:
+        if args.redmine_issues:
+            payload = generate_cases_from_redmine_issues(config, issue_ids=args.redmine_issues, force=args.force)
+        elif args.init:
             payload = generate_cases_init(
                 config,
                 feature=args.feature,
                 profile=args.profile,
                 count=generated_count,
-                fast=args.fast,
+                fast=True,
                 force=args.force,
             )
         else:
@@ -453,13 +500,11 @@ def cmd_cases_generate(args: argparse.Namespace) -> int:
                 feature=args.feature,
                 profile=args.profile,
                 count=generated_count,
-                fast=args.fast,
+                fast=True,
                 force=args.force,
-                candidate_json=args.candidate_json,
-                issue_id=args.issue,
             )
         payload = _with_auto_wiki(config, payload, event="case_generation")
-    except (QAConfigError, CaseGenerationError, IssueSyncError) as exc:
+    except (QAConfigError, CaseGenerationError, IssueSyncError, RedmineError) as exc:
         return _error_payload(exc)
     return print_json(payload, exit_code=0 if payload.get("status") != "error" else 2)
 
@@ -480,6 +525,36 @@ def cmd_cases_validate(args: argparse.Namespace) -> int:
     except (QAConfigError, CaseGenerationError) as exc:
         return _error_payload(exc)
     return print_json(payload, exit_code=0 if payload.get("status") == "ok" else 3)
+
+
+def cmd_cases_list(args: argparse.Namespace) -> int:
+    return cmd_qa_test_list(args)
+
+
+def cmd_cases_run(args: argparse.Namespace) -> int:
+    return _run_cases(args, dry_run=False, one=bool(args.case_id))
+
+
+def cmd_cases_push_pr(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        issue_id = _issue_id_for_case_push(config, args.case_id)
+        if issue_id is None:
+            return print_json(
+                {
+                    "status": "blocked",
+                    "error": "linked_issue_required",
+                    "message": "cases push-pr needs a case linked to an open issue. Use /qa-aist issues fix --issue <id> --push-pr when the issue is known.",
+                    "case_id": args.case_id,
+                },
+                exit_code=4,
+            )
+        payload = submit_fix_pr(config, issue_id=issue_id, dry_run=False)
+        if payload.get("status") == "ok":
+            payload = _with_auto_wiki(config, payload, event="gitea_write_summary")
+    except (QAConfigError, ContractError, FixIssueError, GiteaError, IssueSyncError) as exc:
+        return _error_payload(exc)
+    return print_json(payload, exit_code=0 if payload.get("status") == "ok" else 4)
 
 
 def cmd_publish_plan(args: argparse.Namespace) -> int:
@@ -637,11 +712,26 @@ def _run_cases(args: argparse.Namespace, *, dry_run: bool, one: bool) -> int:
 def cmd_close_loop_status(args: argparse.Namespace) -> int:
     try:
         config = load_project_config(Path(args.root), args.config)
+        issue_sync = issue_status(config)
+        duplicates = dedupe_issues(config)
+        cases = load_contracts(config.paths.cases)
+        latest = config.paths.state / "latest-run.json"
+        latest_payload = json.loads(latest.read_text(encoding="utf-8")) if latest.exists() else None
+        wiki_sync = wiki_status(config)
+        components = _close_loop_components(
+            issue_sync=issue_sync,
+            duplicates=duplicates,
+            case_count=len(cases),
+            latest_run=latest_payload,
+            wiki_sync=wiki_sync,
+            config=config,
+        )
     except QAConfigError as exc:
         return _error_payload(exc)
-    latest = config.paths.state / "latest-run.json"
-    payload = json.loads(latest.read_text(encoding="utf-8")) if latest.exists() else None
-    return print_json({"status": "ok", "pipeline_order": PIPELINE_ORDER, "latest_run": payload})
+    except (IssueSyncError, ContractError, WikiPublishError) as exc:
+        return _error_payload(exc)
+    status = "FAIL" if any(item["status"] == "FAIL" for item in components) else ("WARN" if any(item["status"] == "WARN" for item in components) else "PASS")
+    return print_json({"status": status, "closed_loop_components": components, "pipeline_order": PIPELINE_ORDER, "latest_run": latest_payload})
 
 
 def cmd_close_loop_run_once(args: argparse.Namespace) -> int:
@@ -715,7 +805,7 @@ def _persist_qa_test_run(config: Any, *, status: str, results: list[dict[str, An
         "latest_run_json": _relative_or_str(latest_run_json, config.root),
         "report_path": _relative_or_str(report_path, config.root),
         "tracker_writes": {"created": 0, "updated": 0, "blocked_by_gate": 0},
-        "source": "qa-test",
+        "source": "cases",
     }
     latest_run_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     return payload
@@ -750,7 +840,7 @@ def _error_payload(exc: Exception) -> int:
         if exc.path:
             payload["path"] = exc.path
         return print_json(payload, exit_code=3)
-    if isinstance(exc, (IssueSyncError, GiteaError, CaseGenerationError, PublishError, FixIssueError, WikiPublishError)):
+    if isinstance(exc, (IssueSyncError, GiteaError, CaseGenerationError, PublishError, FixIssueError, WikiPublishError, RedmineError)):
         return print_json({"status": "error", "error": type(exc).__name__, "message": str(exc)}, exit_code=2)
     return print_json({"status": "error", "error": type(exc).__name__, "message": str(exc)}, exit_code=1)
 
@@ -762,55 +852,86 @@ def _relative_or_str(path: Path, root: Path) -> str:
         return str(path)
 
 
+PUBLIC_COMMANDS = [
+    "/qa-aist help",
+    "/qa-aist setup",
+    "/qa-aist doctor",
+    "/qa-aist issues sync",
+    "/qa-aist issues status",
+    "/qa-aist issues show <issue_id>",
+    "/qa-aist issues fix --all",
+    "/qa-aist issues fix --issue <id>",
+    "/qa-aist issues fix --issue <id> --push-pr",
+    "/qa-aist cases generate --init",
+    "/qa-aist cases generate --init --count 5",
+    "/qa-aist cases generate --growing",
+    "/qa-aist cases generate --redmine-issues <id> [<id> ...]",
+    "/qa-aist cases review",
+    "/qa-aist cases validate",
+    "/qa-aist cases list",
+    "/qa-aist cases run",
+    "/qa-aist cases run <case_id>",
+    "/qa-aist cases push-pr",
+    "/qa-aist cases push-pr <case_id>",
+    "/qa-aist publish wiki status",
+    "/qa-aist publish wiki plan",
+    "/qa-aist publish wiki apply",
+    "/qa-aist close-loop status",
+    "/qa-aist close-loop run-once",
+    "/qa-aist report status",
+    "/qa-aist report json",
+    "/qa-aist tracker plan-write",
+]
+
+
+def cmd_help(args: argparse.Namespace) -> int:
+    return print_json(
+        {
+            "status": "ok",
+            "tool": "qa-aist",
+            "command_group": "help",
+            "language": "zh-Hant",
+            "commands": [{"command": command} for command in PUBLIC_COMMANDS],
+            "help_text": "\n".join(
+                [
+                    "qa-aist> HELP",
+                    "QA-AIST 指令總覽",
+                    "",
+                    "第一次使用建議流程：",
+                    "1. /qa-aist setup",
+                    "2. /qa-aist doctor",
+                    "3. /qa-aist issues sync",
+                    "4. /qa-aist cases generate --init",
+                    "5. /qa-aist cases validate",
+                    "6. /qa-aist cases run",
+                    "7. /qa-aist publish wiki apply",
+                    "",
+                    "正式指令：",
+                    *[f"- {command}" for command in PUBLIC_COMMANDS],
+                ]
+            ),
+        }
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="qa-aist", description="Reusable deterministic-first QA toolkit")
     parser.add_argument("--json", action="store_true", help="Emit JSON output; accepted for stable Hermes scripts")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    init_project = sub.add_parser("init-project", help="Create a generic QA-AIST project overlay in a target repo")
-    _add_root_workspace_force(init_project)
-    init_project.set_defaults(func=cmd_init_project)
+    help_cmd = sub.add_parser("help", help="Show all QA-AIST commands")
+    help_cmd.add_argument("--json", action="store_true", help="Emit JSON output")
+    help_cmd.set_defaults(func=cmd_help)
 
-    setup = sub.add_parser("setup", help="Alias for init-project; safe for Hermes bootstrap flows")
+    setup = sub.add_parser("setup", help="Initialize QA-AIST project files for the current product repository")
     _add_root_workspace_force(setup)
     setup.set_defaults(func=cmd_setup)
-
-    status = sub.add_parser("status", help="Show QA-AIST project overlay status")
-    _add_root_workspace(status)
-    status.set_defaults(func=cmd_status)
 
     doctor = sub.add_parser("doctor", help="Check install, config, paths, and secret references")
     _add_root_config(doctor)
     doctor.set_defaults(func=cmd_doctor)
 
-    config = sub.add_parser("config", help="Config commands")
-    config_sub = config.add_subparsers(dest="config_command", required=True)
-    validate = config_sub.add_parser("validate", help="Validate the project config shape")
-    validate.add_argument("--config", default=CONFIG_FILE)
-    validate.add_argument("--json", action="store_true", help="Emit JSON output")
-    validate.set_defaults(func=cmd_config_validate)
-    show = config_sub.add_parser("show", help="Show parsed project config")
-    _add_root_config(show)
-    show.set_defaults(func=cmd_config_show)
-
-    qa_test = sub.add_parser("qa-test", help="Case contract commands")
-    qa_sub = qa_test.add_subparsers(dest="qa_command", required=True)
-    for name, func, help_text in [
-        ("list", cmd_qa_test_list, "List case contracts"),
-        ("validate", cmd_qa_test_validate, "Validate case contracts"),
-        ("dry-run", cmd_qa_test_dry_run, "Render the commands that would run"),
-        ("run", cmd_qa_test_run, "Run selected or all case contracts"),
-    ]:
-        command = qa_sub.add_parser(name, help=help_text)
-        _add_root_config(command)
-        command.add_argument("--case-id", default=None)
-        command.set_defaults(func=func)
-    run_one = qa_sub.add_parser("run-one", help="Run one case contract")
-    _add_root_config(run_one)
-    run_one.add_argument("case_id")
-    run_one.set_defaults(func=cmd_qa_test_run_one)
-
-    issues = sub.add_parser("issues", help="Gitea issue mirror and dedupe commands")
+    issues = sub.add_parser("issues", help="Issue sync, status, show, and fix commands")
     issues_sub = issues.add_subparsers(dest="issues_command", required=True)
     issues_sync = issues_sub.add_parser("sync", help="Sync local issue mirrors from Gitea or an issues JSON file")
     _add_root_config(issues_sync)
@@ -824,25 +945,24 @@ def build_parser() -> argparse.ArgumentParser:
     _add_root_config(issues_show)
     issues_show.add_argument("issue_id", type=int)
     issues_show.set_defaults(func=cmd_issues_show)
-    issues_dedupe = issues_sub.add_parser("dedupe", help="Detect duplicate active issue mirrors")
-    _add_root_config(issues_dedupe)
-    issues_dedupe.set_defaults(func=cmd_issues_dedupe)
+    issues_fix = issues_sub.add_parser("fix", help="Fix synced issues and optionally push a PR")
+    _add_root_config(issues_fix)
+    scope = issues_fix.add_mutually_exclusive_group(required=True)
+    scope.add_argument("--all", action="store_true", help="Fix all synced open issues until blocked")
+    scope.add_argument("--issue", type=int, help="Fix one synced open issue")
+    issues_fix.add_argument("--push-pr", action="store_true", help="Push branch and create a PR after issue fix checks pass")
+    issues_fix.set_defaults(func=cmd_issues_fix)
 
     cases = sub.add_parser("cases", help="Generate, review, and validate case contracts")
     cases_sub = cases.add_subparsers(dest="cases_command", required=True)
-    cases_generate = cases_sub.add_parser("generate", help="Generate draft case contracts; requires --init or --growing")
+    cases_generate = cases_sub.add_parser("generate", help="Generate case contracts; requires --init, --growing, or --redmine-issues")
     _add_root_config(cases_generate)
     cases_generate.add_argument("--init", action="store_true", help="First-time full-repo SWQA generation from README, code, metadata, runners, and rules")
     cases_generate.add_argument("--growing", action="store_true", help="Incremental growth-mode generation from latest repo/issues/PR/run/report state")
-    cases_generate.add_argument("--from-issues", action="store_true", help=argparse.SUPPRESS)
-    cases_generate.add_argument("--from-scratch", action="store_true", help=argparse.SUPPRESS)
-    cases_generate.add_argument("--candidate-json", default=None, help="Import Hermes growth-session candidates from JSON after QA-AIST validation")
+    cases_generate.add_argument("--redmine-issues", nargs="+", type=int, default=[], help="Read Redmine MCP snapshot issue ids and generate linked cases")
     cases_generate.add_argument("--feature", default=None, help="Feature or user-visible surface to bias growth generation")
     cases_generate.add_argument("--profile", default="auto", choices=["auto", "cli", "api", "hardware", "repo"], help="Generation profile; auto inspects repo signals")
-    cases_generate.add_argument("--generated_count", "--generated-count", dest="generated_count", type=int, default=None, help="Optional maximum number of draft cases to generate, for example --generated_count 5")
-    cases_generate.add_argument("--count", type=int, default=None, help="Legacy alias for --generated_count")
-    cases_generate.add_argument("--fast", action="store_true", help="Use strict autonomous SWQA defaults and avoid interactive category questions")
-    cases_generate.add_argument("--issue", type=int, default=None, help=argparse.SUPPRESS)
+    cases_generate.add_argument("--count", type=int, default=None, help="Optional maximum number of cases to generate, for example --count 5")
     cases_generate.add_argument("--force", action="store_true", help="Overwrite existing generated case YAML")
     cases_generate.set_defaults(func=cmd_cases_generate)
     cases_review = cases_sub.add_parser("review", help="List generated drafts and Q&A prompts")
@@ -851,6 +971,17 @@ def build_parser() -> argparse.ArgumentParser:
     cases_validate = cases_sub.add_parser("validate", help="Validate generated case contracts")
     _add_root_config(cases_validate)
     cases_validate.set_defaults(func=cmd_cases_validate)
+    cases_list = cases_sub.add_parser("list", help="List case contracts")
+    _add_root_config(cases_list)
+    cases_list.set_defaults(func=cmd_cases_list)
+    cases_run = cases_sub.add_parser("run", help="Run all case contracts or one case_id")
+    _add_root_config(cases_run)
+    cases_run.add_argument("case_id", nargs="?")
+    cases_run.set_defaults(func=cmd_cases_run)
+    cases_push_pr = cases_sub.add_parser("push-pr", help="Create a product fix PR for linked failing case(s)")
+    _add_root_config(cases_push_pr)
+    cases_push_pr.add_argument("case_id", nargs="?")
+    cases_push_pr.set_defaults(func=cmd_cases_push_pr)
 
     close_loop = sub.add_parser("close-loop", help="Fixed QA close-loop pipeline")
     close_sub = close_loop.add_subparsers(dest="close_command", required=True)
@@ -883,18 +1014,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     publish = sub.add_parser("publish", help="Plan or apply gated Gitea wiki/issues writes")
     publish_sub = publish.add_subparsers(dest="publish_command", required=True)
-    publish_plan = publish_sub.add_parser("plan", help="Create a gated publish plan from latest run")
-    _add_root_config(publish_plan)
-    publish_plan.add_argument("--latest-run", default=None)
-    publish_plan.set_defaults(func=cmd_publish_plan)
-    publish_apply = publish_sub.add_parser("apply", help="Apply a publish plan to Gitea after write gate passes")
-    _add_root_config(publish_apply)
-    publish_apply.add_argument("--plan", default=None)
-    publish_apply.set_defaults(func=cmd_publish_apply)
-    publish_status_cmd = publish_sub.add_parser("status", help="Show publish plan/apply status")
-    _add_root_config(publish_status_cmd)
-    publish_status_cmd.set_defaults(func=cmd_publish_status)
-    publish_wiki = publish_sub.add_parser("wiki", help="Plan, apply, status, or render the Gitea Wiki status page")
+    publish_wiki = publish_sub.add_parser("wiki", help="Plan, apply, or status the Gitea Wiki status page")
     wiki_sub = publish_wiki.add_subparsers(dest="publish_wiki_command", required=True)
     wiki_plan = wiki_sub.add_parser("plan", help="Create a gated Wiki-only status plan")
     _add_root_config(wiki_plan)
@@ -905,57 +1025,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_root_config(wiki_apply)
     wiki_apply.add_argument("--plan", default=None)
     wiki_apply.set_defaults(func=cmd_publish_wiki_apply)
-    wiki_complete_mcp = wiki_sub.add_parser("complete-mcp", help="Record a Hermes Gitea MCP Wiki write result")
-    _add_root_config(wiki_complete_mcp)
-    wiki_complete_mcp.add_argument("--result-json", default=None, help="Path to the Hermes Gitea MCP write result JSON")
-    wiki_complete_mcp.set_defaults(func=cmd_publish_wiki_complete_mcp)
     wiki_status_cmd = wiki_sub.add_parser("status", help="Show latest Wiki plan/apply status")
     _add_root_config(wiki_status_cmd)
     wiki_status_cmd.set_defaults(func=cmd_publish_wiki_status)
-    wiki_render = wiki_sub.add_parser("render", help="Render local Wiki status markdown without remote write")
-    _add_root_config(wiki_render)
-    wiki_render.add_argument("--event", default="manual", choices=["manual", "case_generation", "test_result", "gitea_write_summary"])
-    wiki_render.add_argument("--latest-run", default=None)
-    wiki_render.set_defaults(func=cmd_publish_wiki_render)
-
-    fix_issues = sub.add_parser("fix-issues", help="Plan, hand off, and submit PRs for synced Gitea issues")
-    fix_sub = fix_issues.add_subparsers(dest="fix_command", required=True)
-    fix_plan = fix_sub.add_parser("plan", help="Preflight one issue before repair")
-    _add_root_config(fix_plan)
-    fix_plan.add_argument("--issue", type=int, required=True)
-    fix_plan.set_defaults(func=cmd_fix_issues_plan)
-    fix_run = fix_sub.add_parser("run", help="Create a Hermes handoff for minimal repair")
-    _add_root_config(fix_run)
-    fix_run.add_argument("--issue", type=int, required=True)
-    fix_run.set_defaults(func=cmd_fix_issues_run)
-    fix_pr = fix_sub.add_parser("submit-pr", help="Push planned branch and create a Gitea pull request")
-    _add_root_config(fix_pr)
-    fix_pr.add_argument("--issue", type=int, required=True)
-    fix_pr.add_argument("--dry-run", action="store_true", help="Render PR payload without pushing or calling Gitea")
-    fix_pr.set_defaults(func=cmd_fix_issues_submit_pr)
-    fix_status_cmd = fix_sub.add_parser("status", help="Show latest fix plan/handoff/PR result")
-    _add_root_config(fix_status_cmd)
-    fix_status_cmd.set_defaults(func=cmd_fix_issues_status)
-
-    sync_gitea = sub.add_parser("sync-gitea", help="Legacy alias for issues sync/status")
-    sync_sub = sync_gitea.add_subparsers(dest="sync_gitea_command", required=True)
-    sync_pull = sync_sub.add_parser("pull", help="Alias for issues sync")
-    _add_root_config(sync_pull)
-    sync_pull.add_argument("--issues-json", default=None)
-    sync_pull.add_argument("--dry-run", action="store_true")
-    sync_pull.set_defaults(func=cmd_sync_gitea_pull)
-    for name, func in [("status", cmd_sync_gitea_status), ("validate", cmd_sync_gitea_validate)]:
-        command = sync_sub.add_parser(name, help=f"Alias for issues {name}")
-        _add_root_config(command)
-        command.set_defaults(func=func)
-
-    find_new = sub.add_parser("find-new-issues", help="Legacy alias for publish plan")
-    find_sub = find_new.add_subparsers(dest="find_command", required=True)
-    for name in ["run", "dry-run"]:
-        command = find_sub.add_parser(name, help="Alias for publish plan")
-        _add_root_config(command)
-        command.add_argument("--latest-run", default=None)
-        command.set_defaults(func=cmd_find_new_issues_run)
 
     return parser
 
@@ -969,11 +1041,11 @@ def _add_root_workspace(parser: argparse.ArgumentParser) -> None:
 def _add_root_workspace_force(parser: argparse.ArgumentParser) -> None:
     _add_root_workspace(parser)
     parser.add_argument("--force", action="store_true", help="Overwrite generated starter files")
-    parser.add_argument("--tracker-provider", default="auto", choices=["auto", "none", "gitea"], help="Tracker provider for generated config; auto uses git remote when available")
-    parser.add_argument("--gitea-backend", default=None, choices=["mcp", "http"], help="Gitea backend for generated config; defaults to mcp when a git remote is detected")
-    parser.add_argument("--gitea-base-url", default="", help="Gitea base URL override for generated config")
-    parser.add_argument("--gitea-repo", default="", help="Gitea owner/repo override for generated config")
-    parser.add_argument("--gitea-token-env", default="QA_AIST_GITEA_TOKEN", help="Environment variable name for HTTP Gitea token")
+    parser.add_argument("--tracker-provider", default="auto", choices=["auto", "none", "hermes_mcp", "gitea"], help="Tracker provider for generated config; auto/gitea both use Hermes MCP")
+    parser.add_argument("--gitea-backend", default=None, choices=["mcp", "http"], help=argparse.SUPPRESS)
+    parser.add_argument("--gitea-base-url", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--gitea-repo", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--gitea-token-env", default="", help=argparse.SUPPRESS)
 
 
 def _add_root_config(parser: argparse.ArgumentParser) -> None:
@@ -982,7 +1054,216 @@ def _add_root_config(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json", action="store_true", help="Emit JSON output")
 
 
+def removed_command_payload(argv: list[str]) -> dict[str, Any] | None:
+    args = _positional_args(argv)
+    if not args:
+        return None
+    if args[0] == "help" and len(args) > 1:
+        return _command_removed(" ".join(args[:2]), "/qa-aist help", "Subtopic help was removed; /qa-aist help now lists every command.")
+    if args[:2] == ["cases", "generate"]:
+        removed_options = {
+            "--generated_count": "/qa-aist cases generate --init --count 5",
+            "--generated-count": "/qa-aist cases generate --init --count 5",
+            "--fast": "/qa-aist cases generate --init",
+            "--candidate-json": "/qa-aist cases generate --growing",
+            "--from-issues": "/qa-aist cases generate --growing",
+            "--from-scratch": "/qa-aist cases generate --init",
+            "--issue": "/qa-aist cases generate --growing",
+        }
+        for option, replacement in removed_options.items():
+            if option in argv:
+                return _command_removed(f"cases generate {option}", replacement, f"{option} is no longer part of the public command surface.")
+    for length in range(min(3, len(args)), 0, -1):
+        key = tuple(args[:length])
+        replacement = REMOVED_COMMAND_REPLACEMENTS.get(key)
+        if replacement:
+            return _command_removed(" ".join(key), replacement)
+    return None
+
+
+def _command_removed(command: str, replacement: str, message: str | None = None) -> dict[str, Any]:
+    return {
+        "status": "error",
+        "error": "command_removed",
+        "removed_command": command,
+        "replacement": replacement,
+        "message": message or f"`{command}` was removed from QA-AIST public commands. Use `{replacement}`.",
+    }
+
+
+def _dedupe_checks(checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[str, str, str, str]] = set()
+    deduped: list[dict[str, Any]] = []
+    for check in checks:
+        key = (
+            str(check.get("name") or ""),
+            str(check.get("status") or ""),
+            str(check.get("path") or check.get("server") or check.get("value") or ""),
+            str(check.get("message") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(check)
+    return deduped
+
+
+def _positional_args(argv: list[str]) -> list[str]:
+    out: list[str] = []
+    skip_next = False
+    options_with_values = {
+        "--root",
+        "--workspace",
+        "--config",
+        "--issues-json",
+        "--plan",
+        "--latest-run",
+        "--result",
+        "--target-state",
+        "--expected-contract-hash",
+        "--tracker-provider",
+        "--gitea-backend",
+        "--gitea-base-url",
+        "--gitea-repo",
+        "--gitea-token-env",
+        "--feature",
+        "--profile",
+        "--count",
+        "--generated_count",
+        "--generated-count",
+        "--candidate-json",
+        "--issue",
+        "--result-json",
+    }
+    for arg in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == "--json":
+            continue
+        if arg in options_with_values:
+            skip_next = True
+            continue
+        if arg.startswith("--"):
+            continue
+        out.append(arg)
+    return out
+
+
+def _remote_duplicate_actions(duplicates: dict[str, Any]) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    for group in duplicates.get("duplicates", []):
+        ids = [int(item) for item in group.get("issue_ids", []) if item is not None]
+        if len(ids) < 2:
+            continue
+        canonical = min(ids)
+        for issue_id in sorted(item for item in ids if item != canonical):
+            actions.append(
+                {
+                    "type": "mark_remote_duplicate",
+                    "status": "planned",
+                    "issue_id": issue_id,
+                    "canonical_issue_id": canonical,
+                    "write_gate_required": True,
+                    "operation": "close_or_mark_duplicate",
+                    "message": f"Mark issue #{issue_id} as duplicate of #{canonical}; do not hard-delete remote issue.",
+                }
+            )
+    return actions
+
+
+def _issue_id_for_case_push(config: Any, case_id: str | None) -> int | None:
+    if case_id:
+        contract = load_contract(config.paths.cases / f"{case_id}.yaml")
+        return _source_issue_id(contract.raw)
+    latest_path = config.paths.state / "latest-run.json"
+    if latest_path.exists():
+        latest = json.loads(latest_path.read_text(encoding="utf-8"))
+        for result in latest.get("results", []):
+            if result.get("status") == "FAIL" and result.get("case_id"):
+                try:
+                    contract = load_contract(config.paths.cases / f"{result['case_id']}.yaml")
+                except ContractError:
+                    continue
+                issue_id = _source_issue_id(contract.raw)
+                if issue_id is not None:
+                    return issue_id
+    return None
+
+
+def _source_issue_id(raw: dict[str, Any]) -> int | None:
+    source = raw.get("source") if isinstance(raw.get("source"), dict) else {}
+    for key in ("issue_id", "gitea_issue_id"):
+        if source.get(key) is not None:
+            try:
+                return int(source[key])
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _close_loop_components(
+    *,
+    issue_sync: dict[str, Any],
+    duplicates: dict[str, Any],
+    case_count: int,
+    latest_run: dict[str, Any] | None,
+    wiki_sync: dict[str, Any],
+    config: Any,
+) -> list[dict[str, Any]]:
+    latest_results = latest_run.get("results", []) if isinstance(latest_run, dict) else []
+    report_exists = (config.paths.reports / "status.md").exists()
+    return [
+        {
+            "name": "Observe",
+            "status": "PASS" if issue_sync.get("snapshot_exists") else "WARN",
+            "checks": ["issue snapshot", "latest run", "wiki status"],
+            "details": {"snapshot_path": issue_sync.get("snapshot_path"), "synced_at": issue_sync.get("synced_at")},
+        },
+        {
+            "name": "Normalize",
+            "status": "PASS" if duplicates.get("duplicate_count", 0) == 0 else "WARN",
+            "checks": ["duplicate issues", "active mirror pruning"],
+            "details": {"duplicate_count": duplicates.get("duplicate_count", 0)},
+        },
+        {
+            "name": "Execute",
+            "status": "PASS" if case_count > 0 else "WARN",
+            "checks": ["case contracts", "runners", "evidence"],
+            "details": {"case_count": case_count, "latest_result_count": len(latest_results)},
+        },
+        {
+            "name": "Triage",
+            "status": "PASS" if latest_run else "WARN",
+            "checks": ["PASS/FAIL/BLOCK counts", "write gate inputs"],
+            "details": {"case_counts": (latest_run or {}).get("case_counts")},
+        },
+        {
+            "name": "Publish",
+            "status": "PASS" if wiki_sync.get("status") == "ok" else "WARN",
+            "checks": ["wiki plan", "wiki apply", "status report"],
+            "details": {"wiki": wiki_sync.get("page"), "report_exists": report_exists},
+        },
+        {
+            "name": "Evolve",
+            "status": "PASS" if case_count > 0 else "WARN",
+            "checks": ["init/growing/redmine case generation", "case review"],
+            "details": {"cases_dir": _relative_or_str(config.paths.cases, config.root)},
+        },
+        {
+            "name": "Prune",
+            "status": "PASS" if issue_sync.get("snapshot_exists") else "WARN",
+            "checks": ["closed issue removal", "stale active references"],
+            "details": {"open_count": issue_sync.get("open_count"), "mirror_count": issue_sync.get("mirror_count")},
+        },
+    ]
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = list(argv if argv is not None else sys.argv[1:])
+    removed = removed_command_payload(argv)
+    if removed:
+        return print_json(removed, exit_code=2)
     parser = build_parser()
     args = parser.parse_args(argv)
     return args.func(args)

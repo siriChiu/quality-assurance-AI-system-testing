@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import json
-import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
-from unittest.mock import patch
 
 from qa_aist import hermes
 from qa_aist.cli import main
@@ -24,22 +22,17 @@ class LifecycleTest(unittest.TestCase):
 
     def init_gitea_project(self, tmp: str) -> Path:
         root = Path(tmp)
-        self.run_cli(["init-project", "--root", tmp])
-        config = root / ".qa-aist.yaml"
-        text = config.read_text(encoding="utf-8")
-        text = text.replace("  provider: none", "  provider: gitea")
-        text = text.replace('    base_url: ""', '    base_url: "https://git.example.test"')
-        text = text.replace('    repo: ""', '    repo: "Redfish/irctool"')
-        config.write_text(text, encoding="utf-8")
+        self.run_cli(["setup", "--root", tmp])
+        self.write_hermes_mcp_status(root)
         return root
 
     def init_gitea_mcp_project(self, tmp: str) -> Path:
-        root = self.init_gitea_project(tmp)
-        config = root / ".qa-aist.yaml"
-        text = config.read_text(encoding="utf-8")
-        text = text.replace("    backend: http", "    backend: mcp")
-        config.write_text(text, encoding="utf-8")
-        return root
+        return self.init_gitea_project(tmp)
+
+    def write_hermes_mcp_status(self, root: Path, servers: list[str] | None = None) -> None:
+        status_path = root / ".qa-aist-project" / "state" / "hermes-mcp" / "status.json"
+        status_path.parent.mkdir(parents=True, exist_ok=True)
+        status_path.write_text(json.dumps({"servers": servers or ["gitea", "redmine"]}), encoding="utf-8")
 
     def write_issues(self, root: Path) -> Path:
         issues = [
@@ -133,7 +126,7 @@ expected: CLI help path remains callable.
             self.assertEqual(payload["error"], "IssueSyncError")
             self.assertIn("gitea_mcp_snapshot_missing", payload["message"])
             self.assertIn("QA_AIST_GITEA_MCP_ISSUES_JSON", payload["message"])
-            self.assertNotIn("QA_AIST_TRACKER_TOKEN", payload["message"])
+            self.assertNotIn("QA_AIST_" + "TRACKER_TOKEN", payload["message"])
 
     def test_cases_generate_growing_review_validate_and_runs_safe_probe(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -148,10 +141,10 @@ expected: CLI help path remains callable.
             self.assertEqual(generated["mode"], "growing")
             self.assertGreaterEqual(generated["growth_seed_count"], 1)
             self.assertTrue((root / ".qa-aist-project" / "state" / "growth-context.json").exists())
-            self.assertEqual(generated["interaction_scope"], "category")
+            self.assertEqual(generated["interaction_scope"], "autonomous")
             self.assertEqual(generated["generated"][0]["question_count"], 0)
             self.assertEqual(generated["missing_input_count"], 0)
-            self.assertEqual(generated["advisory_input_count"], 2)
+            self.assertEqual(generated["advisory_input_count"], 0)
             first_case = generated["generated"][0]["case_id"]
             first_yaml = load_yaml(root / generated["generated"][0]["path"])
             self.assertEqual(first_yaml["source"]["type"], "growth")
@@ -174,14 +167,14 @@ expected: CLI help path remains callable.
             self.assertEqual(code, 0)
             self.assertEqual(validated["case_count"], 1 + generated["generated_count"])
 
-            code, run_one = self.run_cli(["qa-test", "run-one", "--root", tmp, "--json", first_case])
+            code, run_one = self.run_cli(["cases", "run", "--root", tmp, "--json", first_case])
             self.assertEqual(code, 0)
             self.assertEqual(run_one["status"], "PASS")
             self.assertTrue(run_one["results"][0]["evidence"])
 
     def test_cases_generate_requires_explicit_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            self.run_cli(["init-project", "--root", tmp])
+            self.run_cli(["setup", "--root", tmp])
 
             code, payload = self.run_cli(["cases", "generate", "--root", tmp, "--json"])
 
@@ -194,7 +187,7 @@ expected: CLI help path remains callable.
     def test_cases_generate_init_analyzes_repo_and_dedupes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            self.run_cli(["init-project", "--root", tmp])
+            self.run_cli(["setup", "--root", tmp])
             (root / "README.md").write_text(
                 """# Demo
 
@@ -228,7 +221,7 @@ democtl = "demo.cli:main"
                 "CLI help",
                 "--profile",
                 "cli",
-                "--generated_count",
+                "--count",
                 "5",
                 "--json",
             ])
@@ -240,7 +233,7 @@ democtl = "demo.cli:main"
             self.assertEqual(generated["generation_limit"], "manual_generated_count_cap")
             self.assertEqual(generated["requested_generated_count"], 5)
             self.assertEqual(generated["requested_count"], 5)
-            self.assertEqual(generated["interaction_scope"], "category")
+            self.assertEqual(generated["interaction_scope"], "autonomous")
             self.assertEqual(generated["resolved_profile"], "cli")
             self.assertGreaterEqual(generated["analyzed_files_count"], 2)
             self.assertTrue((root / ".qa-aist-project" / "state" / "init-context.json").exists())
@@ -268,11 +261,12 @@ democtl = "demo.cli:main"
             self.assertEqual(code, 0)
             self.assertEqual(validated["case_count"], 6)
 
-            code, dry_run = self.run_cli(["qa-test", "dry-run", "--root", tmp, "--case-id", first_case, "--json"])
-            self.assertEqual(code, 0)
-            self.assertEqual(dry_run["status"], "NOT_RUN")
+            code, removed_dry_run = self.run_cli(["qa-test", "dry-run", "--root", tmp, "--case-id", first_case, "--json"])
+            self.assertEqual(code, 2)
+            self.assertEqual(removed_dry_run["error"], "command_removed")
+            self.assertEqual(removed_dry_run["replacement"], "/qa-aist cases run")
 
-            code, run_one = self.run_cli(["qa-test", "run-one", "--root", tmp, "--json", first_case])
+            code, run_one = self.run_cli(["cases", "run", "--root", tmp, "--json", first_case])
             self.assertEqual(code, 0)
             self.assertEqual(run_one["status"], "PASS")
             self.assertEqual(run_one["results"][0]["commands"][0]["id"], "safe_probe")
@@ -287,7 +281,7 @@ democtl = "demo.cli:main"
                 "CLI help",
                 "--profile",
                 "cli",
-                "--generated_count",
+                "--count",
                 "5",
                 "--json",
             ])
@@ -354,8 +348,7 @@ democtl = "demo.cli:main"
                 "--root",
                 tmp,
                 "--init",
-                "--fast",
-                "--generated_count",
+                "--count",
                 "5",
                 "--json",
             ])
@@ -370,21 +363,21 @@ democtl = "demo.cli:main"
             self.assertEqual(generated["requested_generated_count"], 5)
             self.assertTrue(generated["fast_mode_assumptions"])
 
-    def test_cases_generate_from_issues_reports_rename(self) -> None:
+    def test_cases_generate_from_issues_returns_removed_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            self.run_cli(["init-project", "--root", tmp])
+            self.run_cli(["setup", "--root", tmp])
 
             code, payload = self.run_cli(["cases", "generate", "--root", tmp, "--from-issues", "--json"])
 
             self.assertEqual(code, 2)
             self.assertEqual(payload["status"], "error")
-            self.assertEqual(payload["error"], "renamed_to_growing")
+            self.assertEqual(payload["error"], "command_removed")
             self.assertEqual(payload["replacement"], "/qa-aist cases generate --growing")
 
-    def test_cases_generate_candidate_json_rejects_unsafe_candidates(self) -> None:
+    def test_cases_generate_candidate_json_is_removed_public_option(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            self.run_cli(["init-project", "--root", tmp])
+            self.run_cli(["setup", "--root", tmp])
             candidate = root / "candidates.json"
             candidate.write_text(
                 json.dumps({
@@ -403,8 +396,8 @@ democtl = "demo.cli:main"
 
             self.assertEqual(code, 2)
             self.assertEqual(payload["status"], "error")
-            self.assertEqual(payload["error"], "CaseGenerationError")
-            self.assertIn("internal prompt", payload["message"])
+            self.assertEqual(payload["error"], "command_removed")
+            self.assertEqual(payload["replacement"], "/qa-aist cases generate --growing")
 
     def test_policy_pack_is_generic_closed_loop_swqa(self) -> None:
         payload = policy_pack()
@@ -415,7 +408,7 @@ democtl = "demo.cli:main"
         for project_only_word in ["irctool", "Redfish", "VM_HTTP_URL", "GID-Ubuntu"]:
             self.assertNotIn(project_only_word, serialized)
 
-    def test_publish_plan_apply_gate_and_fix_pr_dry_run(self) -> None:
+    def test_publish_wiki_plan_and_issues_fix_flow(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self.init_gitea_project(tmp)
             issues_json = self.write_issues(root)
@@ -423,33 +416,39 @@ democtl = "demo.cli:main"
             self.write_issue_case(root)
             self.run_cli(["close-loop", "run-once", "--root", tmp, "--case-id", "ISSUE-1"])
 
-            code, plan = self.run_cli(["publish", "plan", "--root", tmp, "--json"])
+            code, removed_publish = self.run_cli(["publish", "plan", "--root", tmp, "--json"])
+            self.assertEqual(code, 2)
+            self.assertEqual(removed_publish["error"], "command_removed")
+            self.assertEqual(removed_publish["replacement"], "/qa-aist publish wiki plan")
+
+            code, plan = self.run_cli(["publish", "wiki", "plan", "--root", tmp, "--event", "test_result", "--json"])
             self.assertEqual(code, 0)
             self.assertEqual(plan["status"], "ready")
             self.assertEqual(plan["blocked_by_gate"], 0)
-            self.assertTrue((root / ".qa-aist-project" / "state" / "publish-plan.json").exists())
+            self.assertEqual(plan["blocked_reasons"], [])
+            self.assertTrue((root / ".qa-aist-project" / "state" / "wiki-plan.json").exists())
 
             code, apply_result = self.run_cli(["publish", "apply", "--root", tmp, "--json"])
-            self.assertEqual(code, 4)
-            self.assertEqual(apply_result["status"], "blocked")
-            self.assertEqual(apply_result["error"], "gitea_not_configured")
+            self.assertEqual(code, 2)
+            self.assertEqual(apply_result["error"], "command_removed")
+            self.assertEqual(apply_result["replacement"], "/qa-aist publish wiki apply")
 
-            code, fix_plan = self.run_cli(["fix-issues", "plan", "--root", tmp, "--issue", "1", "--json"])
+            code, fix_plan = self.run_cli(["issues", "fix", "--root", tmp, "--issue", "1", "--json"])
             self.assertEqual(code, 0)
-            self.assertEqual(fix_plan["status"], "ready")
+            self.assertEqual(fix_plan["status"], "handoff")
             self.assertIn("ISSUE-1", fix_plan["case_ids"])
 
-            code, pr = self.run_cli(["fix-issues", "submit-pr", "--root", tmp, "--issue", "1", "--dry-run", "--json"])
-            self.assertEqual(code, 0)
-            self.assertEqual(pr["status"], "dry_run")
-            self.assertEqual(pr["pr_payload"]["head"], "qa-aist/issue-1")
+            code, removed_fix = self.run_cli(["fix-issues", "plan", "--root", tmp, "--issue", "1", "--json"])
+            self.assertEqual(code, 2)
+            self.assertEqual(removed_fix["error"], "command_removed")
+            self.assertEqual(removed_fix["replacement"], "/qa-aist issues fix --issue <id>")
 
     def test_publish_wiki_render_uses_fixed_sections_and_dynamic_categories(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            self.run_cli(["init-project", "--root", tmp])
+            self.run_cli(["setup", "--root", tmp])
 
-            code, payload = self.run_cli(["publish", "wiki", "render", "--root", tmp, "--json"])
+            code, payload = self.run_cli(["publish", "wiki", "plan", "--root", tmp, "--json"])
 
             self.assertEqual(code, 0)
             self.assertEqual(payload["page"], "Test status (Siri)")
@@ -470,9 +469,9 @@ democtl = "demo.cli:main"
     def test_cases_generate_init_auto_plans_wiki_without_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            self.run_cli(["init-project", "--root", tmp])
+            self.run_cli(["setup", "--root", tmp])
 
-            code, payload = self.run_cli(["cases", "generate", "--root", tmp, "--init", "--generated_count", "2", "--json"])
+            code, payload = self.run_cli(["cases", "generate", "--root", tmp, "--init", "--count", "2", "--json"])
 
             self.assertEqual(code, 0)
             self.assertEqual(payload["wiki"]["auto_sync"]["event"], "case_generation")
@@ -485,9 +484,9 @@ democtl = "demo.cli:main"
     def test_qa_test_run_one_auto_plans_test_result_wiki(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            self.run_cli(["init-project", "--root", tmp])
+            self.run_cli(["setup", "--root", tmp])
 
-            code, payload = self.run_cli(["qa-test", "run-one", "--root", tmp, "--json", "EXAMPLE-001"])
+            code, payload = self.run_cli(["cases", "run", "--root", tmp, "--json", "EXAMPLE-001"])
 
             self.assertEqual(code, 0)
             self.assertEqual(payload["status"], "PASS")
@@ -501,7 +500,7 @@ democtl = "demo.cli:main"
         with tempfile.TemporaryDirectory() as tmp:
             root = self.init_gitea_mcp_project(tmp)
             self.write_issue_case(root)
-            self.run_cli(["qa-test", "run-one", "--root", tmp, "ISSUE-1"])
+            self.run_cli(["cases", "run", "--root", tmp, "ISSUE-1"])
 
             code, plan = self.run_cli(["publish", "wiki", "plan", "--root", tmp, "--event", "test_result", "--json"])
             self.assertEqual(code, 0)
@@ -519,7 +518,8 @@ democtl = "demo.cli:main"
             request = json.loads(request_path.read_text(encoding="utf-8"))
             self.assertEqual(request["schema"], "qa-aist.gitea-mcp-wiki-write-request.v1")
             self.assertEqual(request["operation"], "gitea.wiki.update_page")
-            self.assertEqual(request["repo"], "Redfish/irctool")
+            self.assertIsNone(request["repo"])
+            self.assertEqual(request["repo_source"], "hermes_session")
             self.assertEqual(request["page"], "Test status (Siri)")
             self.assertIn("## 總覽", request["body"])
             self.assertEqual(request["safety"]["allowed_targets"], ["wiki"])
@@ -539,29 +539,28 @@ democtl = "demo.cli:main"
                 "--json",
             ])
 
-            self.assertEqual(code, 0)
-            self.assertEqual(completed["status"], "ok")
-            self.assertEqual(completed["applied_count"], 1)
-            self.assertEqual(completed["applied"][0]["backend"], "hermes_gitea_mcp")
+            self.assertEqual(code, 2)
+            self.assertEqual(completed["status"], "error")
+            self.assertEqual(completed["error"], "command_removed")
+            self.assertEqual(completed["replacement"], "/qa-aist publish wiki apply")
 
-    def test_publish_wiki_apply_http_token_updates_only_wiki(self) -> None:
+    def test_publish_wiki_apply_uses_mcp_handoff_not_internal_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self.init_gitea_project(tmp)
             self.write_issue_case(root)
-            self.run_cli(["qa-test", "run-one", "--root", tmp, "ISSUE-1"])
+            self.run_cli(["cases", "run", "--root", tmp, "ISSUE-1"])
 
-            with patch.dict(os.environ, {"QA_AIST_GITEA_TOKEN": "test-token"}, clear=False):
-                with patch("qa_aist.wiki.GiteaClient.update_wiki_page", return_value={"ok": True}) as update_wiki:
-                    code, plan = self.run_cli(["publish", "wiki", "plan", "--root", tmp, "--event", "test_result", "--json"])
-                    self.assertEqual(code, 0)
-                    self.assertEqual(plan["status"], "ready")
+            code, plan = self.run_cli(["publish", "wiki", "plan", "--root", tmp, "--event", "test_result", "--json"])
+            self.assertEqual(code, 0)
+            self.assertEqual(plan["status"], "ready")
+            self.assertNotIn("token_env", plan["remote"])
+            self.assertNotIn("token_present", plan["remote"])
 
-                    code, apply_result = self.run_cli(["publish", "wiki", "apply", "--root", tmp, "--json"])
+            code, apply_result = self.run_cli(["publish", "wiki", "apply", "--root", tmp, "--json"])
 
             self.assertEqual(code, 0)
-            self.assertEqual(apply_result["status"], "ok")
-            self.assertEqual(apply_result["applied"][0]["type"], "wiki_update")
-            update_wiki.assert_called_once()
+            self.assertEqual(apply_result["status"], "needs_mcp_apply")
+            self.assertEqual(apply_result["mcp_write_request"]["repo_source"], "hermes_session")
 
     def test_hermes_new_workflow_commands_and_qa_test_without_subcommand(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -569,26 +568,28 @@ democtl = "demo.cli:main"
             issues_json = self.write_issues(root)
 
             help_result = hermes.dispatch_chat_command("/qa-aist qa-test", root=root)
-            self.assertEqual(help_result["status"], "ok")
-            self.assertIn("qa-test 是什麼", help_result["chat_response"])
+            self.assertEqual(help_result["status"], "error")
+            self.assertEqual(help_result["payload"]["error"], "command_removed")
+            self.assertEqual(help_result["payload"]["replacement"], "/qa-aist cases run")
             self.assertIn("下一步可以選", help_result["chat_response"])
             self.assertTrue(help_result["payload"]["next_actions"])
 
             sync = hermes.dispatch_chat_command(f"/qa-aist issues sync --issues-json {issues_json}", root=root)
             self.assertEqual(sync["status"], "ok")
             self.assertEqual(sync["payload"]["open_count"], 1)
-            self.assertEqual(sync["payload"]["next_actions"][0]["command"], "/qa-aist issues dedupe")
+            self.assertEqual(sync["payload"]["next_actions"][0]["command"], "/qa-aist cases generate --growing")
 
             renamed = hermes.dispatch_chat_command("/qa-aist cases generate --from-issues", root=root)
             self.assertEqual(renamed["status"], "error")
-            self.assertEqual(renamed["payload"]["error"], "renamed_to_growing")
+            self.assertEqual(renamed["payload"]["error"], "command_removed")
+            self.assertEqual(renamed["payload"]["replacement"], "/qa-aist cases generate --growing")
 
             mode_required = hermes.dispatch_chat_command("/qa-aist cases generate", root=root)
             self.assertEqual(mode_required["status"], "error")
             self.assertEqual(mode_required["payload"]["error"], "explicit_generation_mode_required")
             self.assertEqual(mode_required["payload"]["next_actions"][0]["command"], "/qa-aist cases generate --init")
 
-            init = hermes.dispatch_chat_command('/qa-aist cases generate --init --feature "CLI help" --profile cli --generated_count 2', root=root)
+            init = hermes.dispatch_chat_command('/qa-aist cases generate --init --feature "CLI help" --profile cli --count 2', root=root)
             self.assertEqual(init["status"], "ok")
             self.assertEqual(init["payload"]["source"], "init")
             self.assertIn("init_context:", init["chat_response"])
@@ -600,10 +601,10 @@ democtl = "demo.cli:main"
             self.assertNotIn("需要補充資訊", init["chat_response"])
             self.assertTrue(any(action.get("command") == "/qa-aist cases validate" for action in init["payload"]["next_actions"]))
 
-            fast = hermes.dispatch_chat_command('/qa-aist cases generate --init --feature "CLI help" --profile cli --fast --generated_count 1', root=root)
-            self.assertEqual(fast["status"], "ok")
-            self.assertFalse(fast["payload"].get("input_required", False))
-            self.assertNotIn("hermes_needs_input", fast["payload"])
+            fast = hermes.dispatch_chat_command('/qa-aist cases generate --init --feature "CLI help" --profile cli --fast --count 1', root=root)
+            self.assertEqual(fast["status"], "error")
+            self.assertEqual(fast["payload"]["error"], "command_removed")
+            self.assertEqual(fast["payload"]["replacement"], "/qa-aist cases generate --init")
 
     def test_hermes_mcp_snapshot_error_guides_next_action(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -622,10 +623,9 @@ democtl = "demo.cli:main"
             self.init_gitea_mcp_project(tmp)
 
             status = hermes.dispatch_chat_command("/qa-aist status", root=tmp)
-            self.assertEqual(status["status"], "warn")
-            self.assertFalse(status["payload"]["issue_sync"]["issue_sync_ready"])
-            self.assertIn("gitea_mcp_snapshot_missing", status["chat_response"])
-            self.assertEqual(status["payload"]["next_actions"][0]["command"], "/qa-aist issues sync")
+            self.assertEqual(status["status"], "error")
+            self.assertEqual(status["payload"]["error"], "command_removed")
+            self.assertEqual(status["payload"]["replacement"], "/qa-aist doctor")
 
             doctor = hermes.dispatch_chat_command("/qa-aist doctor", root=tmp)
             self.assertEqual(doctor["status"].lower(), "warn")

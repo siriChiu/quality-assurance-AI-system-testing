@@ -3,7 +3,7 @@
 ## Secrets
 
 - Do not commit raw tokens, passwords, private keys, cookies, or local login files.
-- Config files may reference environment variable names such as `QA_AIST_TRACKER_TOKEN`.
+- Config files should not reference tracker token environment variables. QA-AIST relies on Hermes MCP handoff paths for Gitea/Redmine access.
 - Evidence renderers must redact values that look like secrets before tracker writes.
 
 ## Tracker writes

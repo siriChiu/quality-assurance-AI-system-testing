@@ -70,12 +70,13 @@ def default_config(
     *,
     project_name: str = "example-project",
     default_branch: str = "main",
-    tracker_provider: str = "none",
+    tracker_provider: str = "hermes_mcp",
     gitea_backend: str = "http",
     gitea_base_url: str = "",
     gitea_repo: str = "",
-    gitea_token_env: str = "QA_AIST_GITEA_TOKEN",
+    gitea_token_env: str = "",
 ) -> str:
+    _ = (gitea_backend, gitea_base_url, gitea_repo, gitea_token_env)
     return f"""# QA-AIST project configuration
 # This file belongs to the host project, not to the QA-AIST tool repository.
 project:
@@ -94,16 +95,16 @@ paths:
 
 tracker:
   provider: {tracker_provider}
-  project: {_yaml_string(gitea_repo)}
-  api_token_env: QA_AIST_TRACKER_TOKEN
-  gitea:
-    backend: {gitea_backend}
-    base_url: {_yaml_string(gitea_base_url)}
-    repo: {_yaml_string(gitea_repo)}
-    token_env: {gitea_token_env}
-    mcp_issues_json: {workspace}/state/gitea-mcp/issues.json
-    wiki_page: "Test status (Siri)"
-    branch_prefix: "qa-aist/issue-"
+  wiki_page: "Test status (Siri)"
+  mcp:
+    required_servers:
+      - gitea
+      - redmine
+    status_json: {workspace}/state/hermes-mcp/status.json
+    gitea_issues_json: {workspace}/state/gitea-mcp/issues.json
+    redmine_issues_json: {workspace}/state/redmine-mcp/issues.json
+    wiki_write_request_json: {workspace}/state/gitea-mcp/wiki-write-request.json
+    wiki_write_result_json: {workspace}/state/gitea-mcp/wiki-write-result.json
 
 policy:
   deterministic_first: true

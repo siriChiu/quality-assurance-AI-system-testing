@@ -40,18 +40,20 @@ class GiteaConfig:
 def gitea_config_from_project(config_data: dict[str, Any]) -> GiteaConfig:
     tracker = config_data.get("tracker") if isinstance(config_data.get("tracker"), dict) else {}
     gitea = tracker.get("gitea") if isinstance(tracker.get("gitea"), dict) else {}
-    backend = str(gitea.get("backend") or tracker.get("backend") or "http").strip().lower()
+    mcp = tracker.get("mcp") if isinstance(tracker.get("mcp"), dict) else {}
+    provider = str(tracker.get("provider") or "").strip().lower()
+    backend = str(gitea.get("backend") or tracker.get("backend") or ("mcp" if provider == "hermes_mcp" or mcp else "http")).strip().lower()
     base_url = str(gitea.get("base_url") or tracker.get("base_url") or "").rstrip("/")
-    repo = str(gitea.get("repo") or tracker.get("project") or tracker.get("repo") or "").strip("/")
-    token_env = str(gitea.get("token_env") or tracker.get("api_token_env") or "QA_AIST_GITEA_TOKEN")
+    repo = str(gitea.get("repo") or mcp.get("gitea_repo") or tracker.get("project") or tracker.get("repo") or "").strip("/")
+    token_env = str(gitea.get("token_env") or tracker.get("api_token_env") or "")
     return GiteaConfig(
         backend=backend,
         base_url=base_url,
         repo=repo,
         token_env=token_env,
-        token=os.getenv(token_env) or None,
-        mcp_issues_json=str(gitea.get("mcp_issues_json") or tracker.get("mcp_issues_json") or ".qa-aist-project/state/gitea-mcp/issues.json"),
-        wiki_page=str(gitea.get("wiki_page") or "Test status (Siri)"),
+        token=(os.getenv(token_env) if token_env else None) or None,
+        mcp_issues_json=str(gitea.get("mcp_issues_json") or mcp.get("gitea_issues_json") or tracker.get("mcp_issues_json") or ".qa-aist-project/state/gitea-mcp/issues.json"),
+        wiki_page=str(gitea.get("wiki_page") or tracker.get("wiki_page") or mcp.get("wiki_page") or "Test status (Siri)"),
         branch_prefix=str(gitea.get("branch_prefix") or "qa-aist/issue-"),
     )
 

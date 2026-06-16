@@ -49,7 +49,7 @@ commands:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with redirect_stdout(StringIO()):
-                main(["init-project", "--root", tmp])
+                main(["setup", "--root", tmp])
             config = load_project_config(root)
             result = run_close_loop(config)
             self.assertEqual([step["name"] for step in result.payload["steps"]], PIPELINE_ORDER)

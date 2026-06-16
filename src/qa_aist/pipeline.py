@@ -14,13 +14,13 @@ from .write_gate import evaluate_write_gate
 PIPELINE_ORDER = [
     "config_validate",
     "health_checks",
-    "tracker_pull_open_items",
+    "issues_sync_readiness",
     "select_scope",
     "run_cases",
     "normalize_results",
-    "deduplicate_tracker_actions",
+    "deduplicate_issues",
     "write_gate",
-    "tracker_write_when_allowed",
+    "publish_wiki_status",
     "render_reports",
     "persist_state",
 ]
@@ -47,7 +47,7 @@ def run_close_loop(config: ProjectConfig, *, case_id: str | None = None, dry_run
     try:
         _mark(steps, "config_validate", "PASS")
         _mark(steps, "health_checks", "PASS")
-        _mark(steps, "tracker_pull_open_items", "PASS", {"mode": "disabled_in_v1"})
+        _mark(steps, "issues_sync_readiness", "PASS", {"mode": "checked_by_doctor_or_issues_sync"})
         contracts = select_contracts(config.paths.cases, case_id)
         _mark(steps, "select_scope", "PASS", {"case_count": len(contracts)})
         context = RunContext(root=config.root, evidence_dir=run_evidence_dir)
@@ -63,9 +63,9 @@ def run_close_loop(config: ProjectConfig, *, case_id: str | None = None, dry_run
         for result in results:
             gate_results.append(evaluate_write_gate(config_data=config.data, result=result).as_dict())
         blocked_by_gate = len([gate for gate in gate_results if not gate["allowed"]])
-        _mark(steps, "deduplicate_tracker_actions", "PASS", {"planned_writes": 0})
+        _mark(steps, "deduplicate_issues", "PASS", {"planned_writes": 0})
         _mark(steps, "write_gate", "PASS", {"blocked_by_gate": blocked_by_gate})
-        _mark(steps, "tracker_write_when_allowed", "PASS", {"mode": "dry_run_only", "created": 0, "updated": 0})
+        _mark(steps, "publish_wiki_status", "PASS", {"mode": "wiki_status_board"})
         report_path = render_status_report(results, config.paths.reports / "status.md")
         _mark(steps, "render_reports", "PASS", {"report_path": str(report_path)})
         payload = _summary_payload(run_id, status, steps, results, report_path, blocked_by_gate, gate_results)

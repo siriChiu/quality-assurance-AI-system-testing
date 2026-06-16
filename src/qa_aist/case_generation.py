@@ -11,6 +11,7 @@ from .config import ProjectConfig, find_raw_secret_paths, json_dumps
 from .contracts import ContractError, load_contracts
 from .issues import case_id_for_issue, load_issue_snapshot
 from .policy_pack import common_questions, dimension_specs, policy_pack
+from .redmine import RedmineError, import_redmine_issues
 from .runner import utc_now
 
 try:
@@ -214,7 +215,7 @@ def generate_cases_init(
         )
 
     advisory_inputs = [] if fast else init_missing_inputs(context)
-    missing_inputs = runtime_missing_inputs(config, context=context, mode="init")
+    missing_inputs: list[str] = []
     needs_input = bool(questions or missing_inputs)
     return {
         "status": "needs_input" if needs_input else "ok",
@@ -340,7 +341,7 @@ def generate_cases_growing(
         )
 
     advisory_inputs = [] if fast else growth_missing_inputs(context)
-    missing_inputs = runtime_missing_inputs(config, context=context, mode="growth")
+    missing_inputs: list[str] = []
     needs_input = bool(questions or missing_inputs)
     return {
         "status": "needs_input" if needs_input else "ok",
@@ -384,6 +385,52 @@ def generate_cases_growing(
             if fast else
             "Growth executable cases generated with side-effect-safe probes; lab inputs remain advisory until you add lab runners."
         ),
+    }
+
+
+def generate_cases_from_redmine_issues(
+    config: ProjectConfig,
+    *,
+    issue_ids: list[int],
+    force: bool = False,
+) -> dict[str, Any]:
+    if not issue_ids:
+        raise CaseGenerationError("--redmine-issues requires at least one issue id")
+    imported = import_redmine_issues(config, issue_ids=issue_ids)
+    config.paths.cases.mkdir(parents=True, exist_ok=True)
+    generated: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for issue in imported["issues"]:
+        contract = draft_contract_for_redmine_issue(config, issue)
+        path = config.paths.cases / f"{contract['case_id']}.yaml"
+        if path.exists() and not force:
+            skipped.append({"case_id": contract["case_id"], "path": _relative_or_str(path, config.root), "reason": "exists"})
+            continue
+        path.write_text(_dump_yaml(contract), encoding="utf-8")
+        generated.append(
+            {
+                "case_id": contract["case_id"],
+                "redmine_issue_id": issue["id"],
+                "path": _relative_or_str(path, config.root),
+                "draft": False,
+                "question_count": 0,
+                "swqa_dimensions": contract.get("swqa_dimensions", []),
+            }
+        )
+    return {
+        "status": "ok",
+        "source": "redmine",
+        "mode": "redmine_issues",
+        "requested_issue_ids": issue_ids,
+        "imported_issue_ids": imported["imported_issue_ids"],
+        "redmine_import_path": imported["import_path"],
+        "gitea_sync_plan_path": imported["gitea_sync_plan_path"],
+        "gitea_issue_candidates": imported["gitea_issue_candidates"],
+        "generated": generated,
+        "skipped": skipped,
+        "generated_count": len(generated),
+        "skipped_count": len(skipped),
+        "message": "Redmine MCP issues imported, Gitea issue candidates planned, and executable cases generated.",
     }
 
 
@@ -835,6 +882,59 @@ def draft_contract_for_issue(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def draft_contract_for_redmine_issue(config: ProjectConfig, issue: dict[str, Any]) -> dict[str, Any]:
+    policy = policy_pack()
+    case_id = f"REDMINE-{int(issue['id'])}"
+    candidate = {
+        "feature": f"Redmine #{issue['id']}",
+        "title": issue["subject"],
+        "swqa_dimensions": ["exact_reproduction", "functional", "negative", "boundary", "side_effect_safe"],
+        "init_seed": {"surface": f"Redmine #{issue['id']}", "title": issue["subject"]},
+    }
+    return {
+        "case_id": case_id,
+        "title": f"Redmine #{issue['id']}: {issue['subject']}",
+        "source": {
+            "type": "redmine",
+            "provider": "redmine",
+            "redmine_issue_id": int(issue["id"]),
+            "redmine_url": issue.get("url") or "",
+            "gitea_sync_plan": _relative_or_str(config.paths.state / "redmine-gitea-sync-plan.json", config.root),
+        },
+        "profile": "auto",
+        "feature": f"Redmine #{issue['id']}",
+        "priority": "P1",
+        "contract_version": 1,
+        "qa_aist": {
+            "draft": False,
+            "generation_mode": "redmine_issues",
+            "review_required_before_run": False,
+            "executable": True,
+            "executable_scope": "side_effect_safe_probe",
+            "questions": [],
+            "policy_pack": policy["name"],
+            "closed_loop_steps": policy["closed_loop_steps"],
+            "gates": policy["gates"],
+            "triage_categories": policy["triage_categories"],
+        },
+        "swqa_dimensions": candidate["swqa_dimensions"],
+        "commands": [
+            {
+                "id": "safe_probe",
+                "run": _safe_probe_command(config, candidate=candidate, context={"repo_signals": inspect_repo_signals(config)}),
+                "expected_exit_code": 0,
+            }
+        ],
+        "expected": "The Redmine-reported behavior is covered first by a side-effect-safe probe, then can be strengthened with a lab runner after review.",
+        "risk_controls": [
+            "redmine_mcp_snapshot_must_be_valid",
+            "gitea_issue_candidate_requires_write_gate",
+            "side_effect_safe_probe_first",
+            "do_not_publish_until_write_gate_passes",
+        ],
+    }
+
+
 def draft_contract_from_scratch(
     config: ProjectConfig,
     *,
@@ -1063,70 +1163,11 @@ def growth_missing_inputs(context: dict[str, Any]) -> list[str]:
     ]
 
 
-def runtime_missing_inputs(config: ProjectConfig, *, context: dict[str, Any], mode: str) -> list[dict[str, Any]]:
-    text = _first_existing_text(config.root, ["README.md", "README.rst", "README.txt"], limit=120000).lower()
-    profile = str(context.get("resolved_profile") or context.get("requested_profile") or "")
-    missing: list[dict[str, Any]] = []
-    if profile == "hardware" or any(token in text for token in ["--login", "--host", "--user", "--passwd"]):
-        missing.append(
-            _missing_input_item(
-                "runtime_connection_mode",
-                "偵測到實機連線需求；請提供測試連線方式（`--login <yaml>` 或 `--host/--user`）與對應 env 變數名稱。不要貼密碼值。",
-                answer_key="connection_mode",
-                expected_format="例如：`--login ${QA_LOGIN_YAML}` 或 `--host ${QA_HOST} --user ${QA_USER}`",
-            )
-        )
-        missing.append(
-            _missing_input_item(
-                "runtime_target_scope",
-                "請提供可用實機 target 範圍（IP/機型/數量）與不可碰目標；若可全測，回覆「可全測」。",
-                answer_key="target_scope",
-                expected_format="例如：`10.0.0.11-10.0.0.15, SKU=X, 禁止碰 production`",
-            )
-        )
-    if any(phrase in text for phrase in ["bios update", "bios passwd", "vmedia insert", "vmedia eject", "logs clear", "--confirm"]):
-        missing.append(
-            _missing_input_item(
-                "runtime_write_scope",
-                "README 含可能改動狀態的命令；請確認允許的寫入型命令範圍、變更時段、以及回滾方式。",
-                answer_key="allowed_write_scope",
-                expected_format="例如：`僅允許 bios update 與 logs clear，時段 21:00-23:00 UTC，回滾腳本 /opt/rollback.sh`",
-            )
-        )
-    if mode == "growth" and missing:
-        missing.append(
-            _missing_input_item(
-                "growth_sibling_expansion",
-                "growth 模式會沿用你提供的實機設定擴展案例；請確認是否允許自動擴展到 sibling commands。",
-                answer_key="allow_sibling_expansion",
-                expected_format="請回覆 `yes` 或 `no`，必要時附限制條件",
-            )
-        )
-    return missing
-
-
-def _missing_input_item(
-    item_id: str,
-    prompt: str,
-    *,
-    answer_key: str,
-    expected_format: str,
-) -> dict[str, Any]:
-    return {
-        "id": item_id,
-        "prompt": prompt,
-        "answer_key": answer_key,
-        "required": True,
-        "expected_format": expected_format,
-        "source": "runtime",
-    }
-
-
 def fast_mode_assumptions(context: dict[str, Any]) -> list[str]:
     profile = str(context.get("resolved_profile") or context.get("requested_profile") or "auto")
     return [
         "Use repo-only, read-only, dry-run, parser-only, mock, no-op fixture, or help/status paths before any state-changing operation.",
-        "When lab targets or credentials are required, request category-level runtime inputs before executing real target commands.",
+        "Treat missing lab targets, fixture files, credentials, or destructive permissions as advisory lab enhancements, not as PASS or product FAIL.",
         "Never infer or print raw secrets; only refer to credential environment variable names.",
         "Prefer broad SWQA coverage across functional, positive, negative, boundary, invalid input, sibling surface, side-effect-safe, and stress/timeout-risk dimensions.",
         "Stress and timeout-risk cases must be bounded and require a baseline before defect filing.",
@@ -1503,34 +1544,12 @@ def _safe_probe_command(config: ProjectConfig, *, candidate: dict[str, Any], con
     if go_cli:
         package = go_cli["package"]
         command_name = go_cli["name"]
-        readme_safe_invocations = _readme_safe_cli_invocations(config, command_name)
-        subcommands = _readme_help_subcommands(config, command_name)
-        if "boundary" in dimensions and _readme_mentions_flag(config, "--concurrency"):
-            return _shell_command(f"go run {shlex.quote(package)} --concurrency 0 >/dev/null 2>&1; test $? -ne 0")
         if dimensions & {"negative", "invalid_input"}:
-            if subcommands:
-                target = subcommands[0]
-                return _shell_command(
-                    f"go run {shlex.quote(package)} {shlex.quote(target)} --unknown-flag >/dev/null 2>&1; test $? -ne 0"
-                )
-            return _shell_command(f"go run {shlex.quote(package)} --unknown-flag >/dev/null 2>&1; test $? -ne 0")
-        if "positive" in dimensions or "functional" in dimensions:
-            version_invocation = next(
-                (item for item in readme_safe_invocations if "--version" in item or " -v" in item),
-                None,
-            )
-            if version_invocation:
-                return f"go run {shlex.quote(package)} {version_invocation}".strip()
-            if _readme_mentions_flag(config, "--version"):
-                return f"go run {shlex.quote(package)} --version"
+            return _shell_command(f"go run {shlex.quote(package)} __qa_aist_invalid_command__ >/dev/null 2>&1; test $? -ne 0")
         if "stress_timeout_risk" in dimensions:
-            stress_probe = (
-                f"go run {shlex.quote(package)} --version"
-                if _readme_mentions_flag(config, "--version")
-                else f"go run {shlex.quote(package)} --help"
-            )
-            return _shell_command(f"for i in 1 2 3; do {stress_probe} >/dev/null || exit 1; done")
+            return _shell_command(f"for i in 1 2 3; do go run {shlex.quote(package)} --help >/dev/null || exit 1; done")
         if "sibling_surface" in dimensions:
+            subcommands = _readme_help_subcommands(config, command_name)
             if subcommands:
                 checks = " && ".join(
                     f"go run {shlex.quote(package)} {shlex.quote(subcommand)} --help >/dev/null"
@@ -1586,31 +1605,6 @@ def _readme_help_subcommands(config: ProjectConfig, command_name: str) -> list[s
         seen.add(value)
         out.append(value)
     return out
-
-
-def _readme_safe_cli_invocations(config: ProjectConfig, command_name: str) -> list[str]:
-    text = _first_existing_text(config.root, ["README.md", "README.rst", "README.txt"], limit=120000)
-    if not text:
-        return []
-    pattern = re.compile(rf"(?im)^\s*(?:\$ )?(?:\./)?{re.escape(command_name)}\s+(.+?)\s*$")
-    out: list[str] = []
-    seen: set[str] = set()
-    for match in pattern.finditer(text):
-        invocation = " ".join(match.group(1).strip().split())
-        if invocation in seen:
-            continue
-        seen.add(invocation)
-        out.append(invocation)
-        if len(out) >= 12:
-            break
-    return out
-
-
-def _readme_mentions_flag(config: ProjectConfig, flag: str) -> bool:
-    text = _first_existing_text(config.root, ["README.md", "README.rst", "README.txt"], limit=120000)
-    if not text:
-        return False
-    return flag in text
 
 
 def _python_compile_targets(config: ProjectConfig) -> list[str]:

@@ -6,24 +6,26 @@ paths:
   cases: .qa-aist-project/cases
   runners: .qa-aist-project/runners
   rules: .qa-aist-project/rules
+  issues: .qa-aist-project/issues
   state: .qa-aist-project/state
   evidence: .qa-aist-project/evidence
   reports: .qa-aist-project/reports
 tracker:
-  provider: none
-  project: ""
-  api_token_env: QA_AIST_TRACKER_TOKEN
-  gitea:
-    backend: http
-    base_url: ""
-    repo: ""
-    token_env: QA_AIST_GITEA_TOKEN
-    mcp_issues_json: .qa-aist-project/state/gitea-mcp/issues.json
-    wiki_page: "Test status"
-    branch_prefix: "qa-aist/issue-"
+  provider: hermes_mcp
+  wiki_page: "Test status (Siri)"
+  mcp:
+    required_servers:
+      - gitea
+      - redmine
+    status_json: .qa-aist-project/state/hermes-mcp/status.json
+    gitea_issues_json: .qa-aist-project/state/gitea-mcp/issues.json
+    redmine_issues_json: .qa-aist-project/state/redmine-mcp/issues.json
+    wiki_write_request_json: .qa-aist-project/state/gitea-mcp/wiki-write-request.json
+    wiki_write_result_json: .qa-aist-project/state/gitea-mcp/wiki-write-result.json
 policy:
   deterministic_first: true
   require_write_gate: true
+  auto_publish_wiki: true
   prohibit_closed_issue_comments: true
   prohibit_raw_secrets_in_repo: true
   require_swqa_pattern_expansion: true
