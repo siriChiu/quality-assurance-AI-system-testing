@@ -38,7 +38,7 @@ from .hermes_mcp import hermes_mcp_readiness
 from .issues import IssueSyncError, dedupe_issues, issue_status, issue_sync_readiness, show_issue, sync_issues
 from .pipeline import PIPELINE_ORDER, run_close_loop
 from .publishing import PublishError, apply_publish_plan, plan_publish, publish_status
-from .redmine import RedmineError, redmine_readiness
+from .redmine import RedmineError, redmine_readiness, sync_redmine_issues
 from .reports import load_latest_results, render_status_report
 from .runner import RunContext, run_case, utc_now
 from .templates import EXAMPLE_CONTRACT, EXAMPLE_RUNNER, SWQA_TEST_DESIGN_RULE, WIKI_CATEGORIES_RULE
@@ -376,12 +376,19 @@ def cmd_qa_test_run_one(args: argparse.Namespace) -> int:
 def cmd_issues_sync(args: argparse.Namespace) -> int:
     try:
         config = load_project_config(Path(args.root), args.config)
-        payload = sync_issues(config, issues_json=args.issues_json, dry_run=args.dry_run)
-        duplicates = dedupe_issues(config)
-        payload["duplicates"] = duplicates.get("duplicates", [])
-        payload["duplicate_count"] = duplicates.get("duplicate_count", 0)
-        payload["remote_duplicate_actions"] = _remote_duplicate_actions(duplicates)
-    except (QAConfigError, IssueSyncError, GiteaError) as exc:
+        if args.redmine_issues:
+            payload = sync_redmine_issues(config, issue_ids=args.redmine_issues, dry_run=args.dry_run)
+            duplicates = dedupe_issues(config)
+            payload["duplicates"] = duplicates.get("duplicates", [])
+            payload["duplicate_count"] = duplicates.get("duplicate_count", 0)
+            payload["remote_duplicate_actions"] = _remote_duplicate_actions(duplicates)
+        else:
+            payload = sync_issues(config, issues_json=args.issues_json, dry_run=args.dry_run)
+            duplicates = dedupe_issues(config)
+            payload["duplicates"] = duplicates.get("duplicates", [])
+            payload["duplicate_count"] = duplicates.get("duplicate_count", 0)
+            payload["remote_duplicate_actions"] = _remote_duplicate_actions(duplicates)
+    except (QAConfigError, IssueSyncError, GiteaError, RedmineError) as exc:
         return _error_payload(exc)
     return print_json(payload)
 
@@ -464,7 +471,7 @@ def cmd_cases_generate(args: argparse.Namespace) -> int:
                     "choices": [
                         "/qa-aist cases generate --init",
                         "/qa-aist cases generate --growing",
-                        "/qa-aist cases generate --redmine-issues <id> [<id> ...]",
+                        "/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]",
                     ],
                 },
                 exit_code=2,
@@ -478,7 +485,7 @@ def cmd_cases_generate(args: argparse.Namespace) -> int:
                     "choices": [
                         "/qa-aist cases generate --init",
                         "/qa-aist cases generate --growing",
-                        "/qa-aist cases generate --redmine-issues <id> [<id> ...]",
+                        "/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]",
                     ],
                 },
                 exit_code=2,
@@ -857,6 +864,7 @@ PUBLIC_COMMANDS = [
     "/qa-aist setup",
     "/qa-aist doctor",
     "/qa-aist issues sync",
+    "/qa-aist issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]",
     "/qa-aist issues status",
     "/qa-aist issues show <issue_id>",
     "/qa-aist issues fix --all",
@@ -865,7 +873,7 @@ PUBLIC_COMMANDS = [
     "/qa-aist cases generate --init",
     "/qa-aist cases generate --init --count 5",
     "/qa-aist cases generate --growing",
-    "/qa-aist cases generate --redmine-issues <id> [<id> ...]",
+    "/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]",
     "/qa-aist cases review",
     "/qa-aist cases validate",
     "/qa-aist cases list",
@@ -933,9 +941,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     issues = sub.add_parser("issues", help="Issue sync, status, show, and fix commands")
     issues_sub = issues.add_subparsers(dest="issues_command", required=True)
-    issues_sync = issues_sub.add_parser("sync", help="Sync local issue mirrors from Gitea or an issues JSON file")
+    issues_sync = issues_sub.add_parser("sync", help="Sync local issue mirrors from Gitea, Redmine MCP, or an issues JSON file")
     _add_root_config(issues_sync)
     issues_sync.add_argument("--issues-json", default=None, help="Offline JSON input for tests or manual sync")
+    issues_sync.add_argument("--redmine-issues", nargs="+", type=int, default=[], help="Read one or more Redmine MCP issue IDs, sync mirrors, and create gated Gitea issues through Hermes MCP")
     issues_sync.add_argument("--dry-run", action="store_true", help="Preview mirror/snapshot changes without writing")
     issues_sync.set_defaults(func=cmd_issues_sync)
     issues_status = issues_sub.add_parser("status", help="Show local issue sync state")
@@ -959,7 +968,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_root_config(cases_generate)
     cases_generate.add_argument("--init", action="store_true", help="First-time full-repo SWQA generation from README, code, metadata, runners, and rules")
     cases_generate.add_argument("--growing", action="store_true", help="Incremental growth-mode generation from latest repo/issues/PR/run/report state")
-    cases_generate.add_argument("--redmine-issues", nargs="+", type=int, default=[], help="Read Redmine MCP snapshot issue ids and generate linked cases")
+    cases_generate.add_argument("--redmine-issues", nargs="+", type=int, default=[], help="Read one or more Redmine MCP issue IDs directly and generate linked cases")
     cases_generate.add_argument("--feature", default=None, help="Feature or user-visible surface to bias growth generation")
     cases_generate.add_argument("--profile", default="auto", choices=["auto", "cli", "api", "hardware", "repo"], help="Generation profile; auto inspects repo signals")
     cases_generate.add_argument("--count", type=int, default=None, help="Optional maximum number of cases to generate, for example --count 5")

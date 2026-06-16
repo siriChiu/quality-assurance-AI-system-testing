@@ -106,8 +106,11 @@ For follow-up expansion after issues, PRs, latest runs, or reports changed:
 For Redmine issue IDs:
 
 ```text
+/qa-aist issues sync --redmine-issues 144780 144693
 /qa-aist cases generate --redmine-issues 144780 144693
 ```
+
+`144780 144693` are examples only. Replace them with any Redmine issue IDs; multiple IDs are supported.
 
 ## Public Commands
 
@@ -117,6 +120,7 @@ For Redmine issue IDs:
 /qa-aist doctor
 
 /qa-aist issues sync
+/qa-aist issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]
 /qa-aist issues status
 /qa-aist issues show <issue_id>
 /qa-aist issues fix --all
@@ -126,7 +130,7 @@ For Redmine issue IDs:
 /qa-aist cases generate --init
 /qa-aist cases generate --init --count 5
 /qa-aist cases generate --growing
-/qa-aist cases generate --redmine-issues <id> [<id> ...]
+/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]
 /qa-aist cases review
 /qa-aist cases validate
 /qa-aist cases list
@@ -156,11 +160,12 @@ For Redmine issue IDs:
 | 初始化產品 repo | `/qa-aist setup` |
 | 檢查 config、Gitea/Redmine MCP、Wiki readiness | `/qa-aist doctor` |
 | 同步 issues，內建 dedupe/prune | `/qa-aist issues sync` |
+| 從 Redmine IDs 同步本地 mirrors 並經 gate 建立 Gitea issues | `/qa-aist issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]` |
 | 看 issue sync、duplicate、fix queue、PR handoff | `/qa-aist issues status` |
 | 首次產生全 repo SWQA cases | `/qa-aist cases generate --init` |
 | 限制初始 case 數量 | `/qa-aist cases generate --init --count 5` |
 | 依最新狀態擴散 cases | `/qa-aist cases generate --growing` |
-| 從 Redmine IDs 產生 linked cases | `/qa-aist cases generate --redmine-issues <id> [<id> ...]` |
+| 從 Redmine IDs 直接產生 linked cases | `/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]` |
 | 驗證 case contracts | `/qa-aist cases validate` |
 | 列出 cases | `/qa-aist cases list` |
 | 跑單一 case | `/qa-aist cases run <case_id>` |
@@ -297,9 +302,10 @@ Hermes must expose its available MCP servers to QA-AIST before `doctor` can call
 Hermes MCP usage is narrow:
 
 - Gitea MCP may read issues before `/qa-aist issues sync`.
+- Gitea MCP may create new Gitea issues only after `/qa-aist issues sync --redmine-issues ...` returns a gated `mcp_issue_write_request`.
 - Gitea MCP may update only the configured Wiki page after `/qa-aist publish wiki apply` returns a gated request.
-- Redmine MCP may read requested issues before `/qa-aist cases generate --redmine-issues ...`.
-- MCP must not create comments, issues, PRs, arbitrary Wiki pages, or bypass QA-AIST write gate.
+- Redmine MCP may read requested issues before `/qa-aist issues sync --redmine-issues ...` or `/qa-aist cases generate --redmine-issues ...`.
+- MCP must not create comments, edit/close/reopen issues, create PRs, write arbitrary Wiki pages, or bypass QA-AIST write gate. New issue creation is allowed only through `/qa-aist issues sync --redmine-issues ...` gated requests.
 
 ## Removed Commands
 
@@ -370,8 +376,8 @@ No. `--init` and `--growing` should generate executable side-effect-safe probes.
 
 ### Can Gitea MCP write Wiki?
 
-Yes, but only the configured Wiki page and only after `/qa-aist publish wiki apply` returns a gated MCP write request. MCP must not write issues, comments, PRs, or arbitrary pages.
+Yes, but only the configured Wiki page and only after `/qa-aist publish wiki apply` returns a gated MCP write request. For issues, Gitea MCP may create new issues only from the gated request returned by `/qa-aist issues sync --redmine-issues ...`; it must not comment, edit, close/reopen issues, create PRs, or write arbitrary pages.
 
 ### Where do Redmine issues enter?
 
-Hermes Redmine MCP reads requested IDs, writes snapshot JSON, then QA-AIST validates it through `/qa-aist cases generate --redmine-issues <id> [<id> ...]`.
+Hermes Redmine MCP reads requested IDs and writes snapshot JSON. Use `/qa-aist issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]` when you want QA-AIST to mirror those tickets and create gated Gitea issues. Use `/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]` when you want linked testcase contracts directly; this command does not create a Gitea plan.

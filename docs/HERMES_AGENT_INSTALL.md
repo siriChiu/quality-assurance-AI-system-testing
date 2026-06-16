@@ -75,6 +75,7 @@ PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes skill-status
 /qa-aist doctor
 
 /qa-aist issues sync
+/qa-aist issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]
 /qa-aist issues status
 /qa-aist issues show <issue_id>
 /qa-aist issues fix --all
@@ -84,7 +85,7 @@ PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes skill-status
 /qa-aist cases generate --init
 /qa-aist cases generate --init --count 5
 /qa-aist cases generate --growing
-/qa-aist cases generate --redmine-issues <id> [<id> ...]
+/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]
 /qa-aist cases review
 /qa-aist cases validate
 /qa-aist cases list
@@ -154,10 +155,11 @@ QA_AIST_HERMES_MCP_SERVERS=gitea,redmine
 
 ## Gitea MCP Workflow
 
-MCP backend 在 V1 只允許兩件事：
+MCP backend 在 V1 只允許三件事：
 
 1. 讀 Gitea issues snapshot，供 `/qa-aist issues sync` 使用。
-2. 在 `/qa-aist publish wiki apply` gate 通過後，只更新設定中的 Wiki page。
+2. 在 `/qa-aist issues sync --redmine-issues ...` gate 通過後，依 gated `mcp_issue_write_request` 建立新 Gitea issues。
+3. 在 `/qa-aist publish wiki apply` gate 通過後，只更新設定中的 Wiki page。
 
 ### Issue Sync
 
@@ -200,7 +202,7 @@ Hermes 接著在同一個 `/qa-aist publish wiki apply` 使用者流程裡：
 3. 將 MCP 結果 JSON 寫入 `mcp_write_result_path`。
 4. 回覆使用者結果，建議 `/qa-aist publish wiki status`。
 
-不要暴露第二個 completion 指令。MCP backend 不可以建立 issue comment、建立 issue、建立 PR 或修改任意 Wiki page。
+不要暴露第二個 completion 指令。Wiki apply 不可以建立 issue comment、建立 issue、建立 PR 或修改任意 Wiki page。唯一例外是 `/qa-aist issues sync --redmine-issues ...` 回傳 gated `mcp_issue_write_request` 時，Hermes 可以在同一流程用 Gitea MCP 建立新 issue；仍禁止 comment、edit、close/reopen issue 或建立 PR。
 
 ## Redmine MCP Workflow
 
@@ -209,10 +211,16 @@ Redmine V1 只走 Hermes Redmine MCP 讀取，不做 QA-AIST 內建遠端 adapte
 當使用者輸入：
 
 ```text
+/qa-aist issues sync --redmine-issues 144780 144693
 /qa-aist cases generate --redmine-issues 144780 144693
 ```
 
-Hermes 應先用 Redmine MCP 讀取這些 ID，寫到 `.qa-aist-project/state/redmine-mcp/issues.json` 或 `QA_AIST_REDMINE_MCP_ISSUES_JSON` 指定路徑，再呼叫 dispatcher。QA-AIST 會驗證 snapshot、同步 local issue mirrors、產生 gated Gitea mirror plan，並建立 linked case contracts。
+`144780 144693` 只是 Redmine issue ID 範例；可替換成任意多個 Redmine issue ID。
+
+Hermes 應先用 Redmine MCP 讀取這些 ID，寫到 `.qa-aist-project/state/redmine-mcp/issues.json` 或 `QA_AIST_REDMINE_MCP_ISSUES_JSON` 指定路徑，再呼叫 dispatcher。
+
+- `/qa-aist issues sync --redmine-issues ...` 會驗證 snapshot、同步 local Redmine mirrors、建立 gated `mcp_issue_write_request`，Hermes 在同一流程用 Gitea MCP 建立 Gitea issues。
+- `/qa-aist cases generate --redmine-issues ...` 會直接用這些 Redmine IDs 產生 linked testcase contracts，不產生 Gitea plan。
 
 `/qa-aist doctor` 會檢查 Redmine MCP snapshot path、最近讀取狀態與 issue id coverage。
 
@@ -248,6 +256,6 @@ Dispatcher command shape:
 | `/qa-aist` 不出現在 Hermes | Hermes 沒掃到 skill | 檢查 `~/.hermes/skills/qa-aist/SKILL.md` 並執行 `/reload-skills`。 |
 | `config_not_found` | root 指到錯 repo 或尚未 setup | 回產品 repo root 執行 `/qa-aist setup`。 |
 | `gitea_mcp_snapshot_missing` | MCP backend 尚未寫 issue snapshot | 用 Gitea MCP 讀 issues，寫入設定的 snapshot path，再跑 `/qa-aist issues sync`。 |
-| `redmine_mcp_snapshot_missing` | Redmine MCP snapshot 尚未準備 | 用 Redmine MCP 讀指定 IDs，寫入 snapshot，再跑 `cases generate --redmine-issues`。 |
+| `redmine_mcp_snapshot_missing` | Redmine MCP snapshot 尚未準備 | 用 Redmine MCP 讀指定 IDs，寫入 snapshot；要建立 Gitea issues 跑 `issues sync --redmine-issues`，要產 testcases 跑 `cases generate --redmine-issues`。 |
 | `needs_mcp_apply` | Wiki gate 通過，等待 Hermes 用 Gitea MCP 寫 Wiki | 在同一個 apply 流程中更新指定 Wiki page，寫 result JSON，回報狀態。 |
 | `command_removed` | 使用者輸入舊命令 | 顯示 replacement，不要偷偷轉址執行。 |

@@ -424,13 +424,13 @@ def generate_cases_from_redmine_issues(
         "requested_issue_ids": issue_ids,
         "imported_issue_ids": imported["imported_issue_ids"],
         "redmine_import_path": imported["import_path"],
-        "gitea_sync_plan_path": imported["gitea_sync_plan_path"],
-        "gitea_issue_candidates": imported["gitea_issue_candidates"],
+        "mirror_paths": imported.get("mirror_paths", []),
+        "remote_write": "not_applicable",
         "generated": generated,
         "skipped": skipped,
         "generated_count": len(generated),
         "skipped_count": len(skipped),
-        "message": "Redmine MCP issues imported, Gitea issue candidates planned, and executable cases generated.",
+        "message": "Redmine MCP issues were read directly and executable linked cases were generated.",
     }
 
 
@@ -899,7 +899,6 @@ def draft_contract_for_redmine_issue(config: ProjectConfig, issue: dict[str, Any
             "provider": "redmine",
             "redmine_issue_id": int(issue["id"]),
             "redmine_url": issue.get("url") or "",
-            "gitea_sync_plan": _relative_or_str(config.paths.state / "redmine-gitea-sync-plan.json", config.root),
         },
         "profile": "auto",
         "feature": f"Redmine #{issue['id']}",

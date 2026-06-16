@@ -12,6 +12,7 @@ QA-AIST 的公開入口是 Hermes 聊天室中的 `/qa-aist ...`。CLI 只是 He
 /qa-aist doctor
 
 /qa-aist issues sync
+/qa-aist issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]
 /qa-aist issues status
 /qa-aist issues show <issue_id>
 /qa-aist issues fix --all
@@ -21,7 +22,7 @@ QA-AIST 的公開入口是 Hermes 聊天室中的 `/qa-aist ...`。CLI 只是 He
 /qa-aist cases generate --init
 /qa-aist cases generate --init --count 5
 /qa-aist cases generate --growing
-/qa-aist cases generate --redmine-issues <id> [<id> ...]
+/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]
 /qa-aist cases review
 /qa-aist cases validate
 /qa-aist cases list
@@ -63,9 +64,10 @@ QA-AIST 的公開入口是 Hermes 聊天室中的 `/qa-aist ...`。CLI 只是 He
 /qa-aist cases generate --growing
 ```
 
-Redmine issues 由 Hermes Redmine MCP 讀取 snapshot，再交給 QA-AIST：
+Redmine issues 由 Hermes Redmine MCP 讀取 snapshot，再交給 QA-AIST。`144780 144693` 只是 Redmine issue ID 範例；實際使用時可放任意多個 Redmine issue ID。
 
 ```text
+/qa-aist issues sync --redmine-issues 144780 144693
 /qa-aist cases generate --redmine-issues 144780 144693
 ```
 
@@ -88,7 +90,7 @@ Redmine issues 由 Hermes Redmine MCP 讀取 snapshot，再交給 QA-AIST：
 ```text
 /qa-aist cases generate --init
 /qa-aist cases generate --growing
-/qa-aist cases generate --redmine-issues <id> [<id> ...]
+/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]
 ```
 
 `--init` 是第一次導入產品時的全 repo SWQA 建案。它會掃 README、程式碼、package metadata、既有 cases/runners/rules，產生可執行的 side-effect-safe probes，覆蓋功能、正向、反向、邊界、invalid input、side-effect-safe、stress/timeout-risk。`--init` 預設就是快速且嚴謹的自主模式，不需要另外加 fast 參數。
@@ -100,6 +102,8 @@ Redmine issues 由 Hermes Redmine MCP 讀取 snapshot，再交給 QA-AIST：
 ```
 
 `--growing` 是後續增量擴散。它會讀 repo signals、Gitea/local issues、Redmine imports、PR refs、latest run、reports、existing cases/runners/rules，產生新的 executable growth cases。
+
+`--redmine-issues` 支援多個 Redmine issue ID，會直接用 Hermes Redmine MCP snapshot 產生 linked testcase contracts。它不負責建立 Gitea issue，也不產生 Gitea sync plan；如果要先把 Redmine ticket 記錄到 Gitea repo issues，請使用 `issues sync --redmine-issues`。
 
 `cases run` 取代舊測試執行群組：
 
@@ -115,9 +119,12 @@ Redmine issues 由 Hermes Redmine MCP 讀取 snapshot，再交給 QA-AIST：
 
 ```text
 /qa-aist issues sync
+/qa-aist issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]
 /qa-aist issues status
 /qa-aist issues show <issue_id>
 ```
+
+`issues sync --redmine-issues ...` 會透過 Hermes Redmine MCP snapshot 解析多個 Redmine issue ID，同步本地 Redmine mirror，產生 gated `mcp_issue_write_request`，並由 Hermes Gitea MCP 在同一流程建立 Gitea issues。CLI engine 本身不保存 token，也不直接打 Gitea HTTP。
 
 產品修復流程集中在 `issues fix`：
 

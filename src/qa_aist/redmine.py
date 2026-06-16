@@ -2,17 +2,22 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from pathlib import Path
 from typing import Any
 
 from .config import ProjectConfig, json_dumps
 from .hermes_mcp import hermes_mcp_readiness, mcp_server_is_available
+from .issues import issue_fingerprint, load_issue_snapshot
 from .runner import utc_now
+from .write_gate import evaluate_write_gate
 
 REDMINE_MCP_ENV = "QA_AIST_REDMINE_MCP_ISSUES_JSON"
 REDMINE_IMPORT_NAME = "redmine-import.json"
-REDMINE_GITEA_PLAN_NAME = "redmine-gitea-sync-plan.json"
+REDMINE_GITEA_SYNC_STATE_NAME = "redmine-gitea-sync-state.json"
+REDMINE_GITEA_CANDIDATES_DIR = "gitea-candidates"
+GITEA_ISSUE_WRITE_REQUEST_NAME = "issue-write-request.json"
+GITEA_ISSUE_WRITE_RESULT_NAME = "issue-write-result.json"
+GITEA_ISSUE_WRITE_REQUEST_SCHEMA = "qa-aist.gitea-mcp-issue-write-request.v1"
 
 
 class RedmineError(RuntimeError):
@@ -90,7 +95,70 @@ def redmine_readiness(config: ProjectConfig, *, requested_issue_ids: list[int] |
     }
 
 
+def sync_redmine_issues(
+    config: ProjectConfig,
+    *,
+    issue_ids: list[int],
+    dry_run: bool = False,
+    create_gitea_issues: bool = True,
+) -> dict[str, Any]:
+    if not issue_ids:
+        raise RedmineError("--redmine-issues requires at least one issue id")
+    issues = load_redmine_issues(config, issue_ids=issue_ids)
+    if not dry_run:
+        config.paths.issues.mkdir(parents=True, exist_ok=True)
+        config.paths.state.mkdir(parents=True, exist_ok=True)
+    mirrors: list[str] = []
+    for issue in issues:
+        path = config.paths.issues / f"redmine-{issue['id']}.md"
+        mirrors.append(_relative_or_str(path, config.root))
+        if not dry_run:
+            path.write_text(render_redmine_mirror(issue), encoding="utf-8")
+
+    plan = build_redmine_gitea_sync_plan(config, issues)
+    plan = attach_gitea_issue_write_gate(config, plan)
+    candidate_mirrors = _write_gitea_candidate_mirrors(config, plan, dry_run=dry_run)
+    write_request = build_gitea_issue_write_request(config, plan) if create_gitea_issues else _empty_gitea_issue_write_request(config, status="not_requested")
+    request_path = gitea_issue_write_request_path(config)
+    result_path = gitea_issue_write_result_path(config)
+    payload = {
+        "schema": "qa-aist.redmine-import.v1",
+        "status": _redmine_sync_status(write_request, dry_run=dry_run),
+        "synced_at": utc_now(),
+        "source": "redmine_mcp",
+        "mode": "redmine_issues",
+        "requested_issue_ids": issue_ids,
+        "imported_issue_ids": [issue["id"] for issue in issues],
+        "mirror_paths": mirrors,
+        "gitea_issue_candidate_mirror_paths": candidate_mirrors,
+        "issues": issues,
+    }
+    import_path = config.paths.state / REDMINE_IMPORT_NAME
+    sync_state_path = config.paths.state / REDMINE_GITEA_SYNC_STATE_NAME
+    if not dry_run:
+        import_path.write_text(json_dumps(payload) + "\n", encoding="utf-8")
+        sync_state_path.write_text(json_dumps(plan) + "\n", encoding="utf-8")
+        if create_gitea_issues and write_request["actions"]:
+            request_path.parent.mkdir(parents=True, exist_ok=True)
+            request_path.write_text(json_dumps(write_request) + "\n", encoding="utf-8")
+    return {
+        **payload,
+        "import_path": _relative_or_str(import_path, config.root),
+        "gitea_sync_state_path": _relative_or_str(sync_state_path, config.root),
+        "gitea_issue_candidates": plan["issue_candidates"],
+        "gitea_issue_candidate_count": len(plan["issue_candidates"]),
+        "remote_write": write_request["status"],
+        "blocked_by_gate": write_request["blocked_by_gate"],
+        "mcp_issue_write_request": write_request if write_request["actions"] else None,
+        "mcp_issue_write_request_path": _relative_or_str(request_path, config.root),
+        "mcp_issue_write_result_path": _relative_or_str(result_path, config.root),
+        "message": _redmine_sync_message(write_request, dry_run=dry_run),
+    }
+
+
 def import_redmine_issues(config: ProjectConfig, *, issue_ids: list[int]) -> dict[str, Any]:
+    if not issue_ids:
+        raise RedmineError("--redmine-issues requires at least one issue id")
     issues = load_redmine_issues(config, issue_ids=issue_ids)
     config.paths.issues.mkdir(parents=True, exist_ok=True)
     config.paths.state.mkdir(parents=True, exist_ok=True)
@@ -104,6 +172,7 @@ def import_redmine_issues(config: ProjectConfig, *, issue_ids: list[int]) -> dic
         "status": "ok",
         "synced_at": utc_now(),
         "source": "redmine_mcp",
+        "mode": "redmine_case_generation",
         "requested_issue_ids": issue_ids,
         "imported_issue_ids": [issue["id"] for issue in issues],
         "mirror_paths": mirrors,
@@ -111,15 +180,7 @@ def import_redmine_issues(config: ProjectConfig, *, issue_ids: list[int]) -> dic
     }
     import_path = config.paths.state / REDMINE_IMPORT_NAME
     import_path.write_text(json_dumps(payload) + "\n", encoding="utf-8")
-    plan = build_redmine_gitea_sync_plan(config, issues)
-    plan_path = config.paths.state / REDMINE_GITEA_PLAN_NAME
-    plan_path.write_text(json_dumps(plan) + "\n", encoding="utf-8")
-    return {
-        **payload,
-        "import_path": _relative_or_str(import_path, config.root),
-        "gitea_sync_plan_path": _relative_or_str(plan_path, config.root),
-        "gitea_issue_candidates": plan["issue_candidates"],
-    }
+    return {**payload, "import_path": _relative_or_str(import_path, config.root)}
 
 
 def load_redmine_issues(config: ProjectConfig, *, issue_ids: list[int]) -> list[dict[str, Any]]:
@@ -192,33 +253,272 @@ def render_redmine_mirror(issue: dict[str, Any]) -> str:
 
 
 def build_redmine_gitea_sync_plan(config: ProjectConfig, issues: list[dict[str, Any]]) -> dict[str, Any]:
-    candidates = [
-        {
-            "source": "redmine",
-            "redmine_issue_id": issue["id"],
-            "title": f"[Redmine #{issue['id']}] {issue['subject']}",
-            "body": "\n".join(
-                [
-                    f"Imported from Redmine #{issue['id']}.",
-                    "",
-                    issue.get("description") or "_No description._",
-                    "",
-                    "QA-AIST generated this as a gated Gitea issue candidate; write gate must pass before remote creation/update.",
-                ]
-            ),
-            "labels": ["redmine", "qa-aist"],
-            "dedupe_fingerprint": _fingerprint(issue["subject"], issue.get("description", "")),
-        }
-        for issue in issues
-    ]
+    snapshot_items = [item for item in load_issue_snapshot(config).get("items", []) if isinstance(item, dict)]
+    candidates = []
+    for issue in issues:
+        title = f"[Redmine #{issue['id']}] {issue['subject']}"
+        body = render_gitea_candidate_body(issue)
+        fingerprint = issue_fingerprint(issue["subject"], issue.get("description", ""))
+        existing = _find_existing_gitea_issue(issue, fingerprint, snapshot_items)
+        candidates.append(
+            {
+                "id": f"redmine-{issue['id']}",
+                "source": "redmine",
+                "redmine_issue_id": issue["id"],
+                "title": title,
+                "body": body,
+                "labels": ["redmine", "qa-aist", "needs-triage"],
+                "dedupe_fingerprint": fingerprint,
+                "action": "link_existing_gitea_issue" if existing else "create_gitea_issue_candidate",
+                "existing_gitea_issue_id": existing.get("issue_id") if existing else None,
+                "existing_gitea_issue_url": existing.get("url") if existing else None,
+                "write_gate_required": True,
+                "write_gate_result": None,
+            }
+        )
     return {
-        "schema": "qa-aist.redmine-gitea-sync-plan.v1",
-        "status": "planned",
+        "schema": "qa-aist.redmine-gitea-sync-state.v1",
+        "status": "ready_for_gated_mcp_apply",
         "provider": "gitea",
         "created_at": utc_now(),
         "issue_candidates": candidates,
         "write_gate_required": True,
+        "remote_write": "pending_gate",
+        "notes": [
+            "This state records Redmine tickets and the gated Gitea issue creation request.",
+            "Remote Gitea issue creation/update is done through a gated Hermes Gitea MCP issue write request.",
+        ],
     }
+
+
+def attach_gitea_issue_write_gate(config: ProjectConfig, plan: dict[str, Any]) -> dict[str, Any]:
+    for candidate in plan.get("issue_candidates", []):
+        if not isinstance(candidate, dict):
+            continue
+        if candidate.get("action") != "create_gitea_issue_candidate":
+            candidate["write_gate_result"] = {
+                "allowed": True,
+                "reason": "existing_gitea_issue_linked",
+                "reason_codes": [],
+            }
+            continue
+        text = "\n\n".join([str(candidate.get("title") or ""), str(candidate.get("body") or "")])
+        gate = evaluate_write_gate(
+            config_data=config.data,
+            result={
+                "status": "PASS",
+                "evidence": ["redmine_mcp_snapshot"],
+                "contract_hash": f"redmine-{candidate.get('redmine_issue_id')}",
+            },
+            target_state="open",
+            duplicate_candidate=False,
+            sync_current=True,
+            write_text=text,
+        ).as_dict()
+        candidate["write_gate_result"] = gate
+    blocked = [item for item in plan.get("issue_candidates", []) if isinstance(item, dict) and not item.get("write_gate_result", {}).get("allowed")]
+    plan["blocked_by_gate"] = len(blocked)
+    plan["remote_write"] = "gate_blocked" if blocked else "gated_mcp_request_ready"
+    return plan
+
+
+def build_gitea_issue_write_request(config: ProjectConfig, plan: dict[str, Any]) -> dict[str, Any]:
+    actions: list[dict[str, Any]] = []
+    blocked: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for candidate in plan.get("issue_candidates", []):
+        if not isinstance(candidate, dict):
+            continue
+        gate = candidate.get("write_gate_result") if isinstance(candidate.get("write_gate_result"), dict) else {}
+        if candidate.get("action") != "create_gitea_issue_candidate":
+            skipped.append(
+                {
+                    "id": candidate.get("id"),
+                    "redmine_issue_id": candidate.get("redmine_issue_id"),
+                    "reason": "existing_gitea_issue_linked",
+                    "existing_gitea_issue_id": candidate.get("existing_gitea_issue_id"),
+                }
+            )
+            continue
+        if not gate.get("allowed"):
+            blocked.append(
+                {
+                    "id": candidate.get("id"),
+                    "redmine_issue_id": candidate.get("redmine_issue_id"),
+                    "reason_codes": gate.get("reason_codes", []),
+                }
+            )
+            continue
+        actions.append(
+            {
+                "id": candidate.get("id"),
+                "operation": "gitea.issue.create",
+                "redmine_issue_id": candidate.get("redmine_issue_id"),
+                "title": candidate.get("title"),
+                "body": candidate.get("body"),
+                "labels": candidate.get("labels", []),
+                "dedupe_fingerprint": candidate.get("dedupe_fingerprint"),
+                "write_gate_result": gate,
+            }
+        )
+    if blocked:
+        status = "blocked"
+    elif actions:
+        status = "needs_mcp_apply"
+    else:
+        status = "no_remote_write_needed"
+    return {
+        "schema": GITEA_ISSUE_WRITE_REQUEST_SCHEMA,
+        "status": status,
+        "operation": "gitea.issue.sync_from_redmine",
+        "created_at": utc_now(),
+        "repo_source": "hermes_session",
+        "actions": actions,
+        "blocked": blocked,
+        "skipped": skipped,
+        "blocked_by_gate": len(blocked),
+        "safety": {
+            "allowed_targets": ["issues"],
+            "allowed_operations": ["gitea.issue.create"],
+            "source": "redmine_mcp_snapshot",
+            "write_gate_required": True,
+            "do_not_comment_or_close_existing_issues": True,
+        },
+        "result_path": _relative_or_str(gitea_issue_write_result_path(config), config.root),
+    }
+
+
+def _empty_gitea_issue_write_request(config: ProjectConfig, *, status: str) -> dict[str, Any]:
+    return {
+        "schema": GITEA_ISSUE_WRITE_REQUEST_SCHEMA,
+        "status": status,
+        "operation": "gitea.issue.sync_from_redmine",
+        "created_at": utc_now(),
+        "repo_source": "hermes_session",
+        "actions": [],
+        "blocked": [],
+        "skipped": [],
+        "blocked_by_gate": 0,
+        "safety": {
+            "allowed_targets": ["issues"],
+            "allowed_operations": ["gitea.issue.create"],
+            "source": "redmine_mcp_snapshot",
+            "write_gate_required": True,
+            "do_not_comment_or_close_existing_issues": True,
+        },
+        "result_path": _relative_or_str(gitea_issue_write_result_path(config), config.root),
+    }
+
+
+def gitea_issue_write_request_path(config: ProjectConfig) -> Path:
+    return config.paths.state / "gitea-mcp" / GITEA_ISSUE_WRITE_REQUEST_NAME
+
+
+def gitea_issue_write_result_path(config: ProjectConfig) -> Path:
+    return config.paths.state / "gitea-mcp" / GITEA_ISSUE_WRITE_RESULT_NAME
+
+
+def _redmine_sync_status(write_request: dict[str, Any], *, dry_run: bool) -> str:
+    if dry_run:
+        return "dry_run"
+    return str(write_request.get("status") or "ok")
+
+
+def _redmine_sync_message(write_request: dict[str, Any], *, dry_run: bool) -> str:
+    if dry_run:
+        return "Redmine issues parsed in dry-run mode; no local files or Gitea MCP request were written."
+    status = write_request.get("status")
+    if status == "needs_mcp_apply":
+        return "Redmine issues synced locally; gated Hermes Gitea MCP issue creation is required now."
+    if status == "blocked":
+        return "Redmine issues synced locally, but Gitea issue creation was blocked by the write gate."
+    if status == "not_requested":
+        return "Redmine issues synced locally for testcase generation; Gitea issue creation was not requested."
+    return "Redmine issues synced locally; no new Gitea issue creation was required."
+
+
+def render_gitea_candidate_body(issue: dict[str, Any]) -> str:
+    lines = [
+        f"Imported from Redmine #{issue['id']}.",
+        "",
+        "## Redmine Ticket",
+        "",
+        f"- Redmine issue: #{issue['id']}",
+        f"- Status: {issue.get('status') or '-'}",
+        f"- Tracker: {issue.get('tracker') or '-'}",
+        f"- Project: {issue.get('project') or '-'}",
+        f"- Updated at: {issue.get('updated_at') or '-'}",
+        f"- URL: {issue.get('url') or '-'}",
+        "",
+        "## Problem",
+        "",
+        issue.get("description") or "_No description._",
+        "",
+        "## QA-AIST Traceability",
+        "",
+        "- Local source mirror: `.qa-aist-project/issues/redmine-{id}.md`".format(id=issue["id"]),
+        "- Generated by `/qa-aist issues sync --redmine-issues` from Hermes Redmine MCP snapshot.",
+        "- Gitea write gate must pass before this candidate is created or linked remotely.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def render_gitea_candidate_mirror(candidate: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            f"# Gitea issue candidate for Redmine #{candidate.get('redmine_issue_id')}",
+            "",
+            f"- Action: {candidate.get('action')}",
+            f"- MCP write status: {candidate.get('write_gate_result', {}).get('reason') if isinstance(candidate.get('write_gate_result'), dict) else '-'}",
+            f"- Existing Gitea issue: {candidate.get('existing_gitea_issue_id') or '-'}",
+            f"- Existing Gitea URL: {candidate.get('existing_gitea_issue_url') or '-'}",
+            f"- Dedupe fingerprint: {candidate.get('dedupe_fingerprint') or '-'}",
+            "- Remote write: planned only",
+            "- Write gate required: true",
+            "",
+            "## Title",
+            "",
+            str(candidate.get("title") or ""),
+            "",
+            "## Body",
+            "",
+            str(candidate.get("body") or "").strip(),
+            "",
+            "## Labels",
+            "",
+            ", ".join(str(label) for label in candidate.get("labels", [])) or "-",
+            "",
+        ]
+    )
+
+
+def _write_gitea_candidate_mirrors(config: ProjectConfig, plan: dict[str, Any], *, dry_run: bool) -> list[str]:
+    directory = config.paths.issues / REDMINE_GITEA_CANDIDATES_DIR
+    paths: list[str] = []
+    if not dry_run:
+        directory.mkdir(parents=True, exist_ok=True)
+    for candidate in plan.get("issue_candidates", []):
+        if not isinstance(candidate, dict):
+            continue
+        path = directory / f"redmine-{candidate.get('redmine_issue_id')}.md"
+        candidate["mirror"] = _relative_or_str(path, config.root)
+        paths.append(_relative_or_str(path, config.root))
+        if not dry_run:
+            path.write_text(render_gitea_candidate_mirror(candidate), encoding="utf-8")
+    return paths
+
+
+def _find_existing_gitea_issue(issue: dict[str, Any], fingerprint: str, snapshot_items: list[dict[str, Any]]) -> dict[str, Any] | None:
+    redmine_marker = f"redmine #{issue['id']}".lower()
+    for item in snapshot_items:
+        title = str(item.get("title") or "")
+        body = str(item.get("body") or "")
+        if redmine_marker in f"{title}\n{body}".lower():
+            return item
+    for item in snapshot_items:
+        if fingerprint and str(item.get("fingerprint") or "") == fingerprint:
+            return item
+    return None
 
 
 def _extract_issue_list(loaded: Any) -> list[dict[str, Any]]:
@@ -264,12 +564,6 @@ def _maybe_extract_issue_list(loaded: Any) -> list[Any] | None:
                 if nested is not None:
                     return nested
     return None
-
-
-def _fingerprint(title: str, body: str) -> str:
-    text = re.sub(r"https?://\S+", "", f"{title}\n{body}".lower())
-    words = re.findall(r"[a-z0-9_/-]+", text)
-    return " ".join(words[:24])
 
 
 def _relative_or_str(path: Path, root: Path) -> str:

@@ -58,6 +58,34 @@ class LifecycleTest(unittest.TestCase):
         path.write_text(json.dumps(issues), encoding="utf-8")
         return path
 
+    def write_redmine_issues(self, root: Path) -> Path:
+        issues = [
+            {
+                "id": 144780,
+                "subject": "Sensor list fails after cold boot",
+                "description": "After cold boot, sensor collection returns an empty list for one BMC.",
+                "status": {"name": "New"},
+                "tracker": {"name": "Bug"},
+                "project": {"name": "IRCTool"},
+                "updated_on": "2026-06-08T12:00:00Z",
+                "url": "https://redmine.example.test/issues/144780",
+            },
+            {
+                "id": 144693,
+                "subject": "CLI help omits virtual media options",
+                "description": "The help output should include SMB virtual media flags.",
+                "status": {"name": "Assigned"},
+                "tracker": {"name": "Bug"},
+                "project": {"name": "IRCTool"},
+                "updated_on": "2026-06-08T13:00:00Z",
+                "url": "https://redmine.example.test/issues/144693",
+            },
+        ]
+        path = root / ".qa-aist-project" / "state" / "redmine-mcp" / "issues.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"content": [{"type": "text", "text": json.dumps({"issues": issues})}]}), encoding="utf-8")
+        return path
+
     def write_issue_case(self, root: Path) -> None:
         case = root / ".qa-aist-project" / "cases" / "ISSUE-1.yaml"
         case.write_text(
@@ -127,6 +155,80 @@ expected: CLI help path remains callable.
             self.assertIn("gitea_mcp_snapshot_missing", payload["message"])
             self.assertIn("QA_AIST_GITEA_MCP_ISSUES_JSON", payload["message"])
             self.assertNotIn("QA_AIST_" + "TRACKER_TOKEN", payload["message"])
+
+    def test_issues_sync_redmine_issues_writes_local_mirrors_and_gitea_create_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.init_gitea_project(tmp)
+            self.write_redmine_issues(root)
+
+            code, payload = self.run_cli([
+                "issues",
+                "sync",
+                "--root",
+                tmp,
+                "--redmine-issues",
+                "144780",
+                "144693",
+                "--json",
+            ])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["status"], "needs_mcp_apply")
+            self.assertEqual(payload["source"], "redmine_mcp")
+            self.assertEqual(payload["mode"], "redmine_issues")
+            self.assertEqual(payload["imported_issue_ids"], [144780, 144693])
+            self.assertEqual(payload["gitea_issue_candidate_count"], 2)
+            self.assertEqual(payload["remote_write"], "needs_mcp_apply")
+            self.assertEqual(payload["blocked_by_gate"], 0)
+            self.assertTrue((root / ".qa-aist-project" / "issues" / "redmine-144780.md").exists())
+            self.assertTrue((root / ".qa-aist-project" / "issues" / "gitea-candidates" / "redmine-144780.md").exists())
+            self.assertTrue((root / ".qa-aist-project" / "state" / "redmine-import.json").exists())
+            state = json.loads((root / ".qa-aist-project" / "state" / "redmine-gitea-sync-state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["schema"], "qa-aist.redmine-gitea-sync-state.v1")
+            self.assertEqual(state["issue_candidates"][0]["action"], "create_gitea_issue_candidate")
+            self.assertTrue(state["issue_candidates"][0]["write_gate_result"]["allowed"])
+            self.assertIn("Redmine #144780", state["issue_candidates"][0]["body"])
+            request_path = root / payload["mcp_issue_write_request_path"]
+            self.assertTrue(request_path.exists())
+            request = json.loads(request_path.read_text(encoding="utf-8"))
+            self.assertEqual(request["schema"], "qa-aist.gitea-mcp-issue-write-request.v1")
+            self.assertEqual(request["operation"], "gitea.issue.sync_from_redmine")
+            self.assertEqual(request["safety"]["allowed_targets"], ["issues"])
+            self.assertEqual(request["actions"][0]["operation"], "gitea.issue.create")
+            self.assertEqual(request["actions"][0]["redmine_issue_id"], 144780)
+            self.assertFalse((root / ".qa-aist-project" / "cases" / "REDMINE-144780.yaml").exists())
+
+    def test_cases_generate_redmine_issues_uses_multiple_ids_directly_without_gitea_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.init_gitea_project(tmp)
+            self.write_redmine_issues(root)
+
+            code, payload = self.run_cli([
+                "cases",
+                "generate",
+                "--root",
+                tmp,
+                "--redmine-issues",
+                "144780",
+                "144693",
+                "--json",
+            ])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["source"], "redmine")
+            self.assertEqual(payload["imported_issue_ids"], [144780, 144693])
+            self.assertEqual(payload["generated_count"], 2)
+            self.assertEqual(payload["remote_write"], "not_applicable")
+            self.assertNotIn("gitea_sync_plan_path", payload)
+            self.assertNotIn("gitea_sync_state_path", payload)
+            self.assertNotIn("gitea_issue_candidates", payload)
+            self.assertTrue((root / ".qa-aist-project" / "cases" / "REDMINE-144780.yaml").exists())
+            self.assertTrue((root / ".qa-aist-project" / "cases" / "REDMINE-144693.yaml").exists())
+            case_yaml = load_yaml(root / ".qa-aist-project" / "cases" / "REDMINE-144780.yaml")
+            self.assertEqual(case_yaml["source"]["redmine_issue_id"], 144780)
+            self.assertNotIn("gitea_sync_plan", case_yaml["source"])
+            self.assertEqual(case_yaml["commands"][0]["id"], "safe_probe")
 
     def test_cases_generate_growing_review_validate_and_runs_safe_probe(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

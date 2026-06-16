@@ -460,7 +460,7 @@ def suggest_next_actions(payload: dict[str, Any], engine_argv: list[str], exit_c
         ]
     if "redmine_mcp_snapshot_missing" in message:
         return [
-            _next("用 Hermes Redmine MCP 讀取指定 issues，寫入 snapshot 後重跑 generate", "/qa-aist cases generate --redmine-issues <id> [<id> ...]", confirm=True),
+            _next("用 Hermes Redmine MCP 讀取指定 issues，寫入 snapshot 後重跑 generate", "/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]", confirm=True),
             _next("執行健康檢查", "/qa-aist doctor"),
         ]
     if error in {"GiteaError", "IssueSyncError"}:
@@ -505,6 +505,21 @@ def suggest_next_actions(payload: dict[str, Any], engine_argv: list[str], exit_c
             _next("列出測試 cases", "/qa-aist cases list"),
         ]
     if current == "issues sync":
+        if exit_code == 0 and (payload.get("source") == "redmine_mcp" or payload.get("mode") == "redmine_issues"):
+            issue_ids = " ".join(str(item) for item in payload.get("imported_issue_ids", []) or payload.get("requested_issue_ids", []))
+            if status == "needs_mcp_apply":
+                return [
+                    _next("用 Hermes Gitea MCP 建立這批 Gitea issues", "/qa-aist issues sync --redmine-issues " + issue_ids, confirm=True, destructive=True),
+                    _next("建立完成後產生 linked testcases", f"/qa-aist cases generate --redmine-issues {issue_ids}".strip(), confirm=True),
+                    _next("查看 issue sync 狀態", "/qa-aist issues status"),
+                ]
+            if status in {"ok", "dry_run", "no_remote_write_needed"}:
+                command = f"/qa-aist cases generate --redmine-issues {issue_ids}".strip()
+                return [
+                    _next("針對這批 Redmine tickets 產生 linked testcases", command, confirm=True),
+                    _next("查看 issue sync 狀態", "/qa-aist issues status"),
+                    _next("查看 Gitea issue 建立狀態", "/qa-aist issues status"),
+                ]
         if exit_code == 0 and status in {"ok", "dry_run"}:
             return [
                 _next("用最新狀態長出測試 cases", "/qa-aist cases generate --growing", confirm=True),
@@ -530,7 +545,7 @@ def suggest_next_actions(payload: dict[str, Any], engine_argv: list[str], exit_c
             return [
                 _next("首次全 repo SWQA 建案", "/qa-aist cases generate --init", confirm=True),
                 _next("依最新狀態擴散 cases", "/qa-aist cases generate --growing", confirm=True),
-                _next("從 Redmine issues 產生 cases", "/qa-aist cases generate --redmine-issues <id> [<id> ...]", confirm=True),
+                _next("從 Redmine issues 產生 cases", "/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]", confirm=True),
             ]
         if status == "needs_input":
             return [
@@ -668,6 +683,7 @@ def build_agent_manifest(*, wrapper_path: str | None = None, runner_command: str
             f"{PRIMARY_PREFIX} setup",
             f"{PRIMARY_PREFIX} doctor",
             f"{PRIMARY_PREFIX} issues sync",
+            f"{PRIMARY_PREFIX} issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]",
             f"{PRIMARY_PREFIX} issues status",
             f"{PRIMARY_PREFIX} issues show <issue_id>",
             f"{PRIMARY_PREFIX} issues fix --all",
@@ -676,7 +692,7 @@ def build_agent_manifest(*, wrapper_path: str | None = None, runner_command: str
             f"{PRIMARY_PREFIX} cases generate --init",
             f"{PRIMARY_PREFIX} cases generate --init --count 5",
             f"{PRIMARY_PREFIX} cases generate --growing",
-            f"{PRIMARY_PREFIX} cases generate --redmine-issues <id> [<id> ...]",
+            f"{PRIMARY_PREFIX} cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]",
             f"{PRIMARY_PREFIX} cases review",
             f"{PRIMARY_PREFIX} cases validate",
             f"{PRIMARY_PREFIX} cases list",
@@ -695,7 +711,11 @@ def build_agent_manifest(*, wrapper_path: str | None = None, runner_command: str
         ],
         "permissions": {
             "filesystem": ["project_root"],
-            "network": ["gitea_http_when_apply_or_submit_pr", "gitea_mcp_read_and_gated_wiki_write_when_configured"],
+            "network": [
+                "gitea_http_when_apply_or_submit_pr",
+                "gitea_mcp_read_and_gated_wiki_write_when_configured",
+                "gitea_mcp_gated_issue_create_from_redmine_sync",
+            ],
             "tracker_write": "write_gate_apply_only",
         },
         "security": {
@@ -808,6 +828,7 @@ Only these `/qa-aist` commands are public:
 - `/qa-aist setup`
 - `/qa-aist doctor`
 - `/qa-aist issues sync`
+- `/qa-aist issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]`
 - `/qa-aist issues status`
 - `/qa-aist issues show <issue_id>`
 - `/qa-aist issues fix --all`
@@ -816,7 +837,7 @@ Only these `/qa-aist` commands are public:
 - `/qa-aist cases generate --init`
 - `/qa-aist cases generate --init --count 5`
 - `/qa-aist cases generate --growing`
-- `/qa-aist cases generate --redmine-issues <id> [<id> ...]`
+- `/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]`
 - `/qa-aist cases review`
 - `/qa-aist cases validate`
 - `/qa-aist cases list`
@@ -850,14 +871,14 @@ When the user invokes `/qa-aist <arguments>`, you must:
 
 Hermes MCP rule: QA-AIST does not store Gitea/Redmine URLs, repo names, or token environment variables in `.qa-aist.yaml`. It relies on the user's Hermes session to provide MCP servers. At the start of setup/doctor, make the available server list visible to QA-AIST through `QA_AIST_HERMES_MCP_SERVERS=gitea,redmine` or the configured `.qa-aist-project/state/hermes-mcp/status.json`. If Gitea or Redmine MCP is missing or unknown, tell the user immediately and do not pretend remote sync/write is ready.
 
-Gitea MCP rule: if the product repo config uses `tracker.provider: hermes_mcp`, you may use Hermes' configured Gitea MCP tooling for two narrow operations only: read issue data before `/qa-aist issues sync`, and update the configured Wiki page after `/qa-aist publish wiki apply` returns `status: needs_mcp_apply` with a gated `mcp_write_request`. Do not treat the MCP read itself as a completed sync.
+Gitea MCP rule: if the product repo config uses `tracker.provider: hermes_mcp`, you may use Hermes' configured Gitea MCP tooling for three narrow operations only: read issue data before `/qa-aist issues sync`, create Gitea issues after `/qa-aist issues sync --redmine-issues ...` returns `status: needs_mcp_apply` with a gated `mcp_issue_write_request`, and update the configured Wiki page after `/qa-aist publish wiki apply` returns `status: needs_mcp_apply` with a gated `mcp_write_request`. Do not treat the MCP read itself as a completed sync.
 
 Gitea MCP snapshot workflow (when the user confirms, chooses a suggested sync option, or invokes `/qa-aist issues sync` after `gitea_mcp_snapshot_missing`):
 1. Use Gitea MCP read-only pagination for the current Hermes product repository context, typically `state=all` and `perPage=50`, until an empty page is returned.
 2. Preserve the MCP payload shape as JSON and write it to `tracker.mcp.gitea_issues_json`, creating parent directories if needed.
 3. If the MCP list response includes pull requests mixed with issues, keep only real Gitea issues before writing the QA-AIST `issues` list. A reliable guard is `html_url` containing `/issues/` and excluding `/pulls/`.
 4. Immediately run `/qa-aist issues sync` via the dispatcher command.
-5. Never use Gitea MCP for issue comments, issue creation, PRs, or arbitrary remote writes.
+5. In this snapshot workflow, never use Gitea MCP for issue comments, issue creation, PRs, or arbitrary remote writes.
 
 Gitea MCP Wiki write workflow (only after `/qa-aist publish wiki apply` returns `status: needs_mcp_apply`):
 1. Read `payload.mcp_write_request`.
@@ -866,7 +887,16 @@ Gitea MCP Wiki write workflow (only after `/qa-aist publish wiki apply` returns 
 4. Write the MCP tool result JSON to `payload.mcp_write_result_path`.
 5. Treat this as the same `/qa-aist publish wiki apply` user flow. Report the MCP result and suggest `/qa-aist publish wiki status`; do not expose a second completion command to the user.
 
-Redmine MCP rule: QA-AIST V1 reads Redmine only through a Hermes Redmine MCP snapshot. When `/qa-aist doctor` reports missing Redmine MCP readiness, use Hermes Redmine MCP to read the requested IDs, write the configured snapshot path, then run `/qa-aist cases generate --redmine-issues <id> [<id> ...]`.
+Gitea MCP Redmine issue creation workflow (only after `/qa-aist issues sync --redmine-issues ...` returns `status: needs_mcp_apply`):
+1. Read `payload.mcp_issue_write_request`.
+2. Confirm the request schema is `qa-aist.gitea-mcp-issue-write-request.v1`, operation is `gitea.issue.sync_from_redmine`, and `safety.allowed_targets` is only `issues`.
+3. For each action, confirm `operation` is exactly `gitea.issue.create` and `write_gate_result.allowed` is true.
+4. Call the configured Hermes Gitea MCP issue-create tool for each action's `title`, `body`, and `labels` in the current product repo context.
+5. Write the combined MCP tool results JSON to `payload.mcp_issue_write_result_path`.
+6. Treat this as the same `/qa-aist issues sync --redmine-issues ...` user flow. Report created issue IDs/URLs, then suggest `/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]`.
+7. Do not create comments, close issues, reopen issues, edit arbitrary issues, or create PRs in this workflow.
+
+Redmine MCP rule: QA-AIST V1 reads Redmine only through a Hermes Redmine MCP snapshot. When `/qa-aist doctor` reports missing Redmine MCP readiness, use Hermes Redmine MCP to read the requested IDs and write the configured snapshot path. Then run `/qa-aist issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]` to create local Redmine mirrors and gated Gitea issue-create requests; if it returns `needs_mcp_apply`, execute the Gitea MCP Redmine issue creation workflow immediately. Run `/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]` only when testcase contracts are needed.
 
 Reference: see `references/gitea-mcp-snapshot.md` for the MCP snapshot pitfall and recommended JSON shape.
 
@@ -918,7 +948,8 @@ Recommended interaction by situation:
 - `/qa-aist cases generate --init` is already fast/high-standard autonomous mode.
 - If the user wants a smaller first batch, run `/qa-aist cases generate --init --count 5`.
 - If the user asks for follow-up ideas after issues/PRs/runs changed, run `/qa-aist cases generate --growing`; it creates incremental executable growth cases from repo, issues, PR references, latest run, reports, existing cases, and runners.
-- If the user names Redmine issue IDs, run `/qa-aist cases generate --redmine-issues <id> [<id> ...]`; Hermes supplies the MCP snapshot, QA-AIST validates it and writes local mirrors/cases.
+- If the user names Redmine issue IDs and asks to sync or record issues, run `/qa-aist issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]`; Hermes supplies the MCP snapshot, QA-AIST validates it and writes local Redmine mirrors plus gated Gitea issue candidates.
+- If the user names one or more Redmine issue IDs and asks for testcases, run `/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]`; Hermes supplies the MCP snapshot, QA-AIST directly uses those IDs and writes linked executable case contracts. Do not create a Gitea issue plan in this command.
 - If the user types bare `/qa-aist cases generate`, run the dispatcher and present its mode-selection error; do not silently choose a mode.
 - After `cases generate --init` or `cases generate --growing`, assume the generated cases are runnable safe probes unless QA-AIST explicitly returns `payload.hermes_needs_input`. If needs-input exists, call `clarify` only for category-level blockers. Do not discuss each generated case one by one unless the user explicitly asks.
 - After `/qa-aist cases list`: suggest running one selected case first, then all cases.
@@ -926,6 +957,7 @@ Recommended interaction by situation:
 - After a test run: QA-AIST auto-plans or applies the Wiki test-result status. Suggest `/qa-aist publish wiki status` and `/qa-aist report status`.
 - If the user explicitly wants to update only the Wiki, use `/qa-aist publish wiki plan`, then `/qa-aist publish wiki apply` after confirmation. QA-AIST returns a gated `mcp_write_request`; Hermes Gitea MCP performs the Wiki update in the same user flow. This path must never create issue comments, new issues, or PRs.
 - If `/qa-aist publish wiki apply` returns `status: needs_mcp_apply`, read `payload.mcp_write_request`. Call the configured Hermes Gitea MCP wiki update/write-page tool for the request's `page`, `body`, and `message` in the current product repo context; if `repo` is present, enforce it exactly. Write the MCP tool result JSON to `payload.mcp_write_result_path`, then summarize the result and suggest `/qa-aist publish wiki status`.
+- If `/qa-aist issues sync --redmine-issues ...` returns `status: needs_mcp_apply`, read `payload.mcp_issue_write_request`. Call the configured Hermes Gitea MCP issue-create tool for each gated action, write the result JSON to `payload.mcp_issue_write_result_path`, then summarize created issue IDs/URLs and suggest `/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]`.
 - Before `/qa-aist issues fix --issue <id> --push-pr` or `/qa-aist cases push-pr <case_id>`: ask for explicit confirmation and summarize what will be written remotely.
 
 Use this command shape:
@@ -943,6 +975,7 @@ Examples:
 {runner_command} --root "$PWD" /qa-aist setup
 {runner_command} --root "$PWD" /qa-aist doctor
 {runner_command} --root "$PWD" /qa-aist issues sync
+{runner_command} --root "$PWD" /qa-aist issues sync --redmine-issues 144780 144693
 {runner_command} --root "$PWD" /qa-aist issues status
 {runner_command} --root "$PWD" /qa-aist issues fix --issue 123 --push-pr
 {runner_command} --root "$PWD" /qa-aist cases generate --init
@@ -960,9 +993,9 @@ Examples:
 
 ## Safety Rules
 
-- Do not directly write Gitea comments, issues, or PRs. Wiki remote writes are allowed only by QA-AIST auto-sync, `/qa-aist publish wiki apply`, or the gated MCP handoff returned by `/qa-aist publish wiki apply` with `status: needs_mcp_apply`. Product PR creation remains behind `/qa-aist issues fix --issue <id> --push-pr` or `/qa-aist cases push-pr <case_id>`.
+- Do not directly write Gitea comments, close/reopen/edit issues, or PRs. New Gitea issue creation is allowed only through the gated MCP handoff returned by `/qa-aist issues sync --redmine-issues ...` with `status: needs_mcp_apply`. Wiki remote writes are allowed only by QA-AIST auto-sync, `/qa-aist publish wiki apply`, or the gated MCP handoff returned by `/qa-aist publish wiki apply` with `status: needs_mcp_apply`. Product PR creation remains behind `/qa-aist issues fix --issue <id> --push-pr` or `/qa-aist cases push-pr <case_id>`.
 - Automatic Wiki sync must only update the configured Wiki page. It must not create issue comments, create issues, or open PRs.
-- Do not use Gitea MCP for issue comments, issue creation, PR creation, or arbitrary writes. In QA-AIST V1, Hermes MCP may write only the configured Wiki page, and only after QA-AIST returns a gated `mcp_write_request` from `/qa-aist publish wiki apply`.
+- Do not use Gitea MCP for issue comments, issue edits, issue close/reopen, PR creation, or arbitrary writes. In QA-AIST V1, Hermes MCP may create new issues only from the gated `mcp_issue_write_request` returned by `/qa-aist issues sync --redmine-issues ...`, and may update only the configured Wiki page from `/qa-aist publish wiki apply`.
 - Do not reorder the QA-AIST close-loop pipeline.
 - Do not invent evidence paths.
 - Do not print raw secrets.
@@ -1055,7 +1088,7 @@ Filtering rule:
 - Exclude `html_url` containing `/pulls/` or entries carrying explicit PR markers.
 - Preserve real issue bodies/comments when available; closed issues may be minimal because QA-AIST only needs them to remove stale mirrors.
 
-Remote write rule: never use Gitea MCP for comments, issues, PRs, or arbitrary writes in QA-AIST. Gitea MCP may update only the configured Wiki page after `/qa-aist publish wiki apply` returns a gated `mcp_write_request`; write the MCP result JSON to the requested path and report it as the same apply flow. Product PR creation is a separate explicit workflow and must not be folded into Wiki apply.
+Remote write rule: never use Gitea MCP for comments, issue edits, issue close/reopen, PRs, or arbitrary writes in QA-AIST. Gitea MCP may create new issues only after `/qa-aist issues sync --redmine-issues ...` returns a gated `mcp_issue_write_request`, and may update only the configured Wiki page after `/qa-aist publish wiki apply` returns a gated `mcp_write_request`. Write MCP result JSON to the requested path and report it as the same user flow. Product PR creation is a separate explicit workflow and must not be folded into Wiki apply or Redmine sync.
 """
 
 
@@ -1130,6 +1163,7 @@ def _overview_help_payload() -> dict[str, Any]:
         {"command": "/qa-aist setup", "purpose": "在目前產品 repo 建立 .qa-aist.yaml 與 .qa-aist-project"},
         {"command": "/qa-aist doctor", "purpose": "檢查設定、Hermes MCP、Gitea/Redmine readiness、runner、secret reference"},
         {"command": "/qa-aist issues sync", "purpose": "同步 Gitea issues，內建 dedupe、prune 與遠端 duplicate gated action plan"},
+        {"command": "/qa-aist issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]", "purpose": "透過 Hermes Redmine MCP snapshot 同步 Redmine mirror，並經 gate 用 Gitea MCP 建立 issues"},
         {"command": "/qa-aist issues status", "purpose": "查看 issue sync、duplicates、fix queue、PR/handoff 狀態"},
         {"command": "/qa-aist issues show <issue_id>", "purpose": "查看單一 issue mirror"},
         {"command": "/qa-aist issues fix --all", "purpose": "依 open issue queue 逐一修復，遇到 gate/block 停下"},
@@ -1138,7 +1172,7 @@ def _overview_help_payload() -> dict[str, Any]:
         {"command": "/qa-aist cases generate --init", "purpose": "首次全 repo SWQA 建案，依 README/code/metadata 產生可執行 safe-probe cases"},
         {"command": "/qa-aist cases generate --init --count 5", "purpose": "限制初始建案第一批 case 數量"},
         {"command": "/qa-aist cases generate --growing", "purpose": "依最新 issues/PR/latest-run/reports 狀態擴散 executable cases"},
-        {"command": "/qa-aist cases generate --redmine-issues <id> [<id> ...]", "purpose": "透過 Hermes Redmine MCP snapshot 生成 linked cases"},
+        {"command": "/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]", "purpose": "透過 Hermes Redmine MCP snapshot 生成 linked cases"},
         {"command": "/qa-aist cases review", "purpose": "查看仍需人工補強的 drafts；通常 init/growing 產物可直接 validate/dry-run"},
         {"command": "/qa-aist cases validate", "purpose": "驗證 case YAML 是否可執行"},
         {"command": "/qa-aist cases list", "purpose": "列出可以跑的測試 case"},

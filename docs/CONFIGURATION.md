@@ -80,11 +80,12 @@ Gitea issue sync is a two-step MCP handoff:
 2. Hermes writes the raw JSON snapshot to `tracker.mcp.gitea_issues_json`.
 3. QA-AIST runs `/qa-aist issues sync` to mirror, dedupe, prune closed issues, and persist local state.
 
-Redmine import is similar:
+Redmine import has two explicit paths:
 
 1. Hermes reads requested Redmine IDs through Redmine MCP.
 2. Hermes writes the snapshot to `tracker.mcp.redmine_issues_json`.
-3. QA-AIST runs `/qa-aist cases generate --redmine-issues <id> [<id> ...]`.
+3. QA-AIST runs `/qa-aist issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]` when those Redmine tickets should be mirrored locally and created as gated Gitea issues through Hermes MCP.
+4. QA-AIST runs `/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]` when linked testcase contracts should be generated directly. This command does not create a Gitea sync plan.
 
 ## Wiki Status
 
