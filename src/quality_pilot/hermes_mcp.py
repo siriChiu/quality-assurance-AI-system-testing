@@ -7,8 +7,8 @@ from typing import Any
 
 from .config import ProjectConfig
 
-MCP_SERVERS_ENV = "QA_AIST_HERMES_MCP_SERVERS"
-MCP_STATUS_ENV = "QA_AIST_HERMES_MCP_STATUS_JSON"
+MCP_SERVERS_ENV = "QUALITY_PILOT_HERMES_MCP_SERVERS"
+MCP_STATUS_ENV = "QUALITY_PILOT_HERMES_MCP_STATUS_JSON"
 
 
 def tracker_mcp_config(config_data: dict[str, Any]) -> dict[str, Any]:
@@ -16,11 +16,11 @@ def tracker_mcp_config(config_data: dict[str, Any]) -> dict[str, Any]:
     mcp = tracker.get("mcp") if isinstance(tracker.get("mcp"), dict) else {}
     return {
         "required_servers": _list_of_strings(mcp.get("required_servers") or ["gitea", "redmine"]),
-        "status_json": str(mcp.get("status_json") or ".qa-aist-project/state/hermes-mcp/status.json"),
-        "gitea_issues_json": str(mcp.get("gitea_issues_json") or ".qa-aist-project/state/gitea-mcp/issues.json"),
-        "redmine_issues_json": str(mcp.get("redmine_issues_json") or ".qa-aist-project/state/redmine-mcp/issues.json"),
-        "wiki_write_request_json": str(mcp.get("wiki_write_request_json") or ".qa-aist-project/state/gitea-mcp/wiki-write-request.json"),
-        "wiki_write_result_json": str(mcp.get("wiki_write_result_json") or ".qa-aist-project/state/gitea-mcp/wiki-write-result.json"),
+        "status_json": str(mcp.get("status_json") or ".quality-pilot-project/state/hermes-mcp/status.json"),
+        "gitea_issues_json": str(mcp.get("gitea_issues_json") or ".quality-pilot-project/state/gitea-mcp/issues.json"),
+        "redmine_issues_json": str(mcp.get("redmine_issues_json") or ".quality-pilot-project/state/redmine-mcp/issues.json"),
+        "wiki_write_request_json": str(mcp.get("wiki_write_request_json") or ".quality-pilot-project/state/gitea-mcp/wiki-write-request.json"),
+        "wiki_write_result_json": str(mcp.get("wiki_write_result_json") or ".quality-pilot-project/state/gitea-mcp/wiki-write-result.json"),
     }
 
 
@@ -101,7 +101,7 @@ def hermes_mcp_readiness(config: ProjectConfig) -> dict[str, Any]:
             "status": "WARN",
             "path": status.get("status_path"),
             "message": (
-                "Hermes MCP server list was not provided to QA-AIST. "
+                "Hermes MCP server list was not provided to AI Quality Pilot. "
                 f"Set {MCP_SERVERS_ENV}=gitea,redmine or write the configured MCP status JSON before setup/doctor."
             ),
         })
@@ -116,7 +116,7 @@ def hermes_mcp_readiness(config: ProjectConfig) -> dict[str, Any]:
                 "name": f"hermes.mcp.{server}",
                 "status": "WARN",
                 "server": server,
-                "message": f"Hermes {server} MCP server is not available to QA-AIST yet.",
+                "message": f"Hermes {server} MCP server is not available to AI Quality Pilot yet.",
             })
 
     return {

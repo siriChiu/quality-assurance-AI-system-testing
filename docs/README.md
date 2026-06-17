@@ -1,18 +1,18 @@
-# QA-AIST documentation
+# AI Quality Pilot documentation
 
-QA-AIST is a reusable tool. Documentation in this repository must describe the product, interfaces, and generic templates only.
+AI Quality Pilot is a reusable tool. Documentation in this repository must describe the product, interfaces, and generic templates only.
 
-Hermes integration is guided and interactive: `/qa-aist ...` responses include `next_actions`, and the skill should present those actions as a Traditional Chinese numbered menu instead of acting like a passive command relay. When user input is required, the payload includes `hermes_needs_input`; Hermes should call `clarify`.
+Hermes integration is guided and interactive: `/quality-pilot ...` responses include `next_actions`, and the skill should present those actions as a Traditional Chinese numbered menu instead of acting like a passive command relay. When user input is required, the payload includes `hermes_needs_input`; Hermes should call `clarify`.
 
 Project-specific materials belong to the target repository overlay:
 
-- `.qa-aist.yaml`
-- `.qa-aist-project/cases/`
-- `.qa-aist-project/runners/`
-- `.qa-aist-project/rules/`
-- `.qa-aist-project/state/`
-- `.qa-aist-project/evidence/`
-- `.qa-aist-project/reports/`
+- `.quality-pilot.yaml`
+- `.quality-pilot-project/cases/`
+- `.quality-pilot-project/runners/`
+- `.quality-pilot-project/rules/`
+- `.quality-pilot-project/state/`
+- `.quality-pilot-project/evidence/`
+- `.quality-pilot-project/reports/`
 
 Read next:
 

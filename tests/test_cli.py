@@ -8,7 +8,7 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
-from qa_aist import cli
+from quality_pilot import cli
 
 
 class CliTest(unittest.TestCase):
@@ -23,22 +23,22 @@ class CliTest(unittest.TestCase):
             code, payload = self.run_cli(["setup", "--root", tmp])
             self.assertEqual(code, 0)
             root = Path(tmp)
-            self.assertTrue((root / ".qa-aist.yaml").exists())
-            self.assertTrue((root / ".qa-aist-project" / "cases" / "example-contract.yaml").exists())
-            self.assertTrue((root / ".qa-aist-project" / "runners" / "example-runner.sh").exists())
-            swqa_rule = root / ".qa-aist-project" / "rules" / "swqa-test-design.md"
+            self.assertTrue((root / ".quality-pilot.yaml").exists())
+            self.assertTrue((root / ".quality-pilot-project" / "cases" / "example-contract.yaml").exists())
+            self.assertTrue((root / ".quality-pilot-project" / "runners" / "example-runner.sh").exists())
+            swqa_rule = root / ".quality-pilot-project" / "rules" / "swqa-test-design.md"
             self.assertTrue(swqa_rule.exists())
             rule_text = swqa_rule.read_text(encoding="utf-8")
             self.assertIn("CLI argument-order matrix", rule_text)
             self.assertIn("Boundary and invalid-value tests", rule_text)
-            self.assertFalse((root / ".qa-aist" / "cases").exists())
+            self.assertFalse((root / ".quality-pilot" / "cases").exists())
             self.assertEqual(payload["status"], "ok")
-            self.assertEqual(Path(payload["workspace"]).name, ".qa-aist-project")
-            self.assertIn("workspace: .qa-aist-project", (root / ".qa-aist.yaml").read_text(encoding="utf-8"))
+            self.assertEqual(Path(payload["workspace"]).name, ".quality-pilot-project")
+            self.assertIn("workspace: .quality-pilot-project", (root / ".quality-pilot.yaml").read_text(encoding="utf-8"))
             self.assertEqual(payload["tracker_setup"]["provider"], "hermes_mcp")
-            config = (root / ".qa-aist.yaml").read_text(encoding="utf-8")
-            self.assertNotIn("QA_AIST_" + "GITEA_TOKEN", config)
-            self.assertNotIn("QA_AIST_" + "TRACKER_TOKEN", config)
+            config = (root / ".quality-pilot.yaml").read_text(encoding="utf-8")
+            self.assertNotIn("QUALITY_PILOT_" + "GITEA_TOKEN", config)
+            self.assertNotIn("QUALITY_PILOT_" + "TRACKER_TOKEN", config)
             self.assertNotIn("api_token_env", config)
             self.assertNotIn("token_env", config)
             self.assertNotIn("  gitea:", config)
@@ -56,9 +56,9 @@ class CliTest(unittest.TestCase):
             self.assertEqual(payload["tracker_setup"]["backend"], "mcp")
             self.assertEqual(payload["tracker_setup"]["git_remote_base_url_detected"], "https://git.sw.ciot.work")
             self.assertEqual(payload["tracker_setup"]["git_remote_repo_detected"], "Redfish/irctool")
-            config = (root / ".qa-aist.yaml").read_text(encoding="utf-8")
+            config = (root / ".quality-pilot.yaml").read_text(encoding="utf-8")
             self.assertIn("provider: hermes_mcp", config)
-            self.assertIn("gitea_issues_json: .qa-aist-project/state/gitea-mcp/issues.json", config)
+            self.assertIn("gitea_issues_json: .quality-pilot-project/state/gitea-mcp/issues.json", config)
             self.assertNotIn("base_url:", config)
             self.assertNotIn("    repo:", config)
             self.assertNotIn("  gitea:", config)
@@ -86,7 +86,7 @@ class CliTest(unittest.TestCase):
             self.assertEqual(payload["tracker_setup"]["backend"], "mcp")
             self.assertEqual(payload["tracker_setup"]["git_remote_base_url_detected"], "https://git.example.test")
             self.assertEqual(payload["tracker_setup"]["git_remote_repo_detected"], "owner/repo")
-            config = (root / ".qa-aist.yaml").read_text(encoding="utf-8")
+            config = (root / ".quality-pilot.yaml").read_text(encoding="utf-8")
             self.assertIn("provider: hermes_mcp", config)
             self.assertNotIn("backend: http", config)
             self.assertNotIn("base_url:", config)
@@ -96,31 +96,31 @@ class CliTest(unittest.TestCase):
     def test_setup_refuses_to_write_into_tool_checkout_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            tool_checkout = root / ".qa-aist"
-            (tool_checkout / "src" / "qa_aist").mkdir(parents=True)
-            (tool_checkout / "pyproject.toml").write_text('[project]\nname = "qa-aist"\n', encoding="utf-8")
-            (tool_checkout / "src" / "qa_aist" / "cli.py").write_text("", encoding="utf-8")
+            tool_checkout = root / ".quality-pilot"
+            (tool_checkout / "src" / "quality_pilot").mkdir(parents=True)
+            (tool_checkout / "pyproject.toml").write_text('[project]\nname = "quality-pilot"\n', encoding="utf-8")
+            (tool_checkout / "src" / "quality_pilot" / "cli.py").write_text("", encoding="utf-8")
 
-            code, payload = self.run_cli(["setup", "--root", tmp, "--workspace", ".qa-aist"])
+            code, payload = self.run_cli(["setup", "--root", tmp, "--workspace", ".quality-pilot"])
 
             self.assertEqual(code, 4)
             self.assertEqual(payload["status"], "error")
             self.assertEqual(payload["error"], "workspace_is_tool_checkout")
             self.assertFalse((tool_checkout / "cases").exists())
-            self.assertFalse((root / ".qa-aist.yaml").exists())
+            self.assertFalse((root / ".quality-pilot.yaml").exists())
 
     def test_setup_uses_safe_default_when_tool_checkout_is_embedded(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            tool_checkout = root / ".qa-aist"
-            (tool_checkout / "src" / "qa_aist").mkdir(parents=True)
-            (tool_checkout / "pyproject.toml").write_text('[project]\nname = "qa-aist"\n', encoding="utf-8")
+            tool_checkout = root / ".quality-pilot"
+            (tool_checkout / "src" / "quality_pilot").mkdir(parents=True)
+            (tool_checkout / "pyproject.toml").write_text('[project]\nname = "quality-pilot"\n', encoding="utf-8")
 
             code, payload = self.run_cli(["setup", "--root", tmp])
 
             self.assertEqual(code, 0)
-            self.assertEqual(Path(payload["workspace"]).name, ".qa-aist-project")
-            self.assertTrue((root / ".qa-aist-project" / "cases" / "example-contract.yaml").exists())
+            self.assertEqual(Path(payload["workspace"]).name, ".quality-pilot-project")
+            self.assertTrue((root / ".quality-pilot-project" / "cases" / "example-contract.yaml").exists())
             self.assertFalse((tool_checkout / "cases").exists())
 
     def test_doctor_reports_config_and_paths(self) -> None:
@@ -128,7 +128,7 @@ class CliTest(unittest.TestCase):
             self.run_cli(["setup", "--root", tmp])
             code, payload = self.run_cli(["doctor", "--root", tmp, "--json"])
             self.assertEqual(code, 0)
-            self.assertEqual(payload["tool"], "qa-aist")
+            self.assertEqual(payload["tool"], "quality-pilot")
             self.assertTrue(any(check["name"] == "config" for check in payload["checks"]))
             self.assertIn("hermes_mcp", payload)
             self.assertIn("issue_sync", payload)
@@ -137,8 +137,8 @@ class CliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self.run_cli(["setup", "--root", tmp])
             for args, replacement in [
-                (["status", "--root", tmp, "--json"], "/qa-aist doctor"),
-                (["config", "validate", "--config", str(Path(tmp) / ".qa-aist.yaml"), "--json"], "/qa-aist doctor"),
+                (["status", "--root", tmp, "--json"], "/quality-pilot doctor"),
+                (["config", "validate", "--config", str(Path(tmp) / ".quality-pilot.yaml"), "--json"], "/quality-pilot doctor"),
             ]:
                 with self.subTest(args=args):
                     code, payload = self.run_cli(args)

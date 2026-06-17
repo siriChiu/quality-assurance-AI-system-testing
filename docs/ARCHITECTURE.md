@@ -1,10 +1,10 @@
 # Architecture
 
-QA-AIST uses a deterministic-first close-loop pipeline. Agents and LLMs may summarize evidence or draft text, but they do not decide whether to skip required steps or write to trackers.
+AI Quality Pilot uses a deterministic-first close-loop pipeline. Agents and LLMs may summarize evidence or draft text, but they do not decide whether to skip required steps or write to trackers.
 
 ```text
 +--------------------+
-| qa-aist CLI        |
+| quality-pilot CLI        |
 +---------+----------+
           |
           v
@@ -58,19 +58,19 @@ Case generation and close-loop guidance share the built-in policy pack:
 Observe -> Normalize -> Execute -> Triage -> Publish -> Evolve -> Prune
 ```
 
-The policy pack is intentionally generic. It defines stable dimensions such as exact reproduction, positive, negative, boundary, invalid input, sibling surface, side-effect-safe, and stress/timeout-risk coverage. Project-specific assumptions such as lab topology, hardware fixture paths, Redfish baselines, or VM images belong in the host project's `.qa-aist-project/rules/` or generated case contracts, not in QA-AIST core.
+The policy pack is intentionally generic. It defines stable dimensions such as exact reproduction, positive, negative, boundary, invalid input, sibling surface, side-effect-safe, and stress/timeout-risk coverage. Project-specific assumptions such as lab topology, hardware fixture paths, Redfish baselines, or VM images belong in the host project's `.quality-pilot-project/rules/` or generated case contracts, not in AI Quality Pilot core.
 
 ## Init and growing case generation
 
 `cases generate` requires `--init` or `--growing`; a bare command returns `explicit_generation_mode_required`.
 
-`cases generate --init` builds `.qa-aist-project/state/init-context.json` from README presence, code inventory, package metadata, existing cases, runners, and rules. It writes `source.type: init` executable contracts for functional, positive, negative, boundary, side-effect-safe, and stress/timeout-risk coverage. Every generated contract gets a side-effect-safe `commands[].run` probe; lab fixtures are later enhancements, not init blockers.
+`cases generate --init` builds `.quality-pilot-project/state/init-context.json` from README presence, code inventory, package metadata, existing cases, runners, and rules. It writes `source.type: init` executable contracts for functional, positive, negative, boundary, side-effect-safe, and stress/timeout-risk coverage. Every generated contract gets a side-effect-safe `commands[].run` probe; lab fixtures are later enhancements, not init blockers.
 
-`cases generate --growing` builds `.qa-aist-project/state/growth-context.json` from repo metadata, issue snapshots, PR references, latest run, publish plan, existing cases, runners, and rules. It then writes `source.type: growth` executable case contracts under `.qa-aist-project/cases/`.
+`cases generate --growing` builds `.quality-pilot-project/state/growth-context.json` from repo metadata, issue snapshots, PR references, latest run, publish plan, existing cases, runners, and rules. It then writes `source.type: growth` executable case contracts under `.quality-pilot-project/cases/`.
 
-`--generated_count <max>` is the explicit generation limit for users who want a smaller batch. `--fast` switches case generation to autonomous strict-safe defaults: QA-AIST asks no interactive category questions, records its assumptions, and chooses repo-only/help/parser/build probes before any state-changing operation.
+`--generated_count <max>` is the explicit generation limit for users who want a smaller batch. `--fast` switches case generation to autonomous strict-safe defaults: AI Quality Pilot asks no interactive category questions, records its assumptions, and chooses repo-only/help/parser/build probes before any state-changing operation.
 
-Hermes may use a separate growth session to analyze the context, but that session may only produce candidate JSON. QA-AIST validates candidate schema, dedupe fingerprints, secret leakage, internal prompt leakage, dangerous `.qa` runtime paths, and command fields before writing YAML.
+Hermes may use a separate growth session to analyze the context, but that session may only produce candidate JSON. AI Quality Pilot validates candidate schema, dedupe fingerprints, secret leakage, internal prompt leakage, dangerous `.qa` runtime paths, and command fields before writing YAML.
 
 ## Invariants
 

@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="280" viewBox="0 0 960 280" role="img" aria-labelledby="title desc">
+  <title id="title">AI Quality Pilot logo</title>
+  <desc id="desc">A Hermes-inspired QA agent mark with a wing, lobster claw, check mark, and AI Quality Pilot wordmark.</desc>
+  <defs>
+    <linearGradient id="badgeGradient" x1="44" y1="24" x2="236" y2="244" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6c5ce7"/>
+      <stop offset="0.52" stop-color="#2f80ed"/>
+      <stop offset="1" stop-color="#14b8a6"/>
+    </linearGradient>
+    <linearGradient id="clawGradient" x1="78" y1="76" x2="208" y2="214" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ff8a65"/>
+      <stop offset="1" stop-color="#e64539"/>
+    </linearGradient>
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#102033" flood-opacity="0.18"/>
+    </filter>
+  </defs>
+
+  <rect width="960" height="280" rx="34" fill="#f7fafc"/>
+  <path d="M0 210 C130 174 210 248 342 206 C462 168 548 110 668 148 C780 184 842 232 960 188 L960 280 L0 280 Z" fill="#e9f5ff"/>
+
+  <g filter="url(#softShadow)">
+    <rect x="44" y="36" width="204" height="204" rx="48" fill="url(#badgeGradient)"/>
+    <rect x="58" y="50" width="176" height="176" rx="40" fill="#ffffff" opacity="0.12"/>
+  </g>
+
+  <g transform="translate(44 36)">
+    <path d="M102 50 C86 66 76 82 72 104 C62 96 52 91 41 89 C55 70 76 56 102 50 Z" fill="#ffffff" opacity="0.9"/>
+    <path d="M95 73 C80 84 70 96 65 112 C57 106 49 103 40 101 C52 88 70 78 95 73 Z" fill="#ffffff" opacity="0.72"/>
+    <path d="M92 96 C79 105 70 116 65 130 C59 126 52 124 45 123 C56 112 71 103 92 96 Z" fill="#ffffff" opacity="0.56"/>
+
+    <path d="M107 61 C148 48 187 74 190 114 C192 139 178 158 155 166 C143 170 131 170 120 166 L139 143 C145 146 151 146 157 144 C170 139 177 126 174 111 C171 92 153 80 133 84 C115 88 102 104 101 124 C100 142 110 157 126 165 L109 186 C87 172 74 149 77 121 C80 92 91 72 107 61 Z" fill="url(#clawGradient)"/>
+    <path d="M128 88 C143 83 158 90 164 104 C153 101 141 103 131 111 C122 119 118 130 120 143 C108 132 108 99 128 88 Z" fill="#ffb199"/>
+    <path d="M136 123 L154 105 C159 100 167 101 171 106 C175 111 174 119 169 123 L137 155 L115 134 L125 124 L136 123 Z" fill="#102033" opacity="0.2"/>
+
+    <circle cx="115" cy="132" r="38" fill="#ffffff" opacity="0.94"/>
+    <path d="M96 132 L110 146 L136 116" fill="none" stroke="#0f8f7d" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M92 180 C119 194 149 194 176 180" fill="none" stroke="#ffffff" stroke-width="8" stroke-linecap="round" opacity="0.75"/>
+  </g>
+
+  <g transform="translate(292 74)">
+    <text x="0" y="64" fill="#172033" font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif" font-size="58" font-weight="800" letter-spacing="0">AI Quality Pilot</text>
+    <text x="2" y="108" fill="#43536a" font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif" font-size="24" font-weight="600" letter-spacing="0">Hermes-first AI agent for software QA and testing</text>
+    <g transform="translate(2 140)">
+      <rect x="0" y="0" width="158" height="34" rx="17" fill="#eef2ff"/>
+      <text x="18" y="23" fill="#5b4fd8" font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif" font-size="15" font-weight="700">Hermes-ready</text>
+      <rect x="174" y="0" width="156" height="34" rx="17" fill="#fff0ec"/>
+      <text x="192" y="23" fill="#d94832" font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif" font-size="15" font-weight="700">Lobster-friendly</text>
+      <rect x="346" y="0" width="150" height="34" rx="17" fill="#e9fbf7"/>
+      <text x="364" y="23" fill="#0f8f7d" font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif" font-size="15" font-weight="700">Write-gated</text>
+    </g>
+  </g>
+</svg>

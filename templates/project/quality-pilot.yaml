@@ -1,0 +1,34 @@
+project:
+  name: example-project
+  default_branch: main
+paths:
+  workspace: .quality-pilot-project
+  cases: .quality-pilot-project/cases
+  runners: .quality-pilot-project/runners
+  rules: .quality-pilot-project/rules
+  issues: .quality-pilot-project/issues
+  state: .quality-pilot-project/state
+  evidence: .quality-pilot-project/evidence
+  reports: .quality-pilot-project/reports
+tracker:
+  provider: hermes_mcp
+  wiki_page: "Test status (Siri)"
+  mcp:
+    required_servers:
+      - gitea
+      - redmine
+    status_json: .quality-pilot-project/state/hermes-mcp/status.json
+    gitea_issues_json: .quality-pilot-project/state/gitea-mcp/issues.json
+    redmine_issues_json: .quality-pilot-project/state/redmine-mcp/issues.json
+    wiki_write_request_json: .quality-pilot-project/state/gitea-mcp/wiki-write-request.json
+    wiki_write_result_json: .quality-pilot-project/state/gitea-mcp/wiki-write-result.json
+policy:
+  deterministic_first: true
+  require_write_gate: true
+  auto_publish_wiki: true
+  prohibit_closed_issue_comments: true
+  prohibit_raw_secrets_in_repo: true
+  require_swqa_pattern_expansion: true
+  require_sibling_surface_scan: true
+  require_boundary_invalid_tests: true
+  require_side_effect_safe_repro: true

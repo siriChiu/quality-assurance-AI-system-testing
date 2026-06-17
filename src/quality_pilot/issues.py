@@ -13,7 +13,7 @@ from .hermes_mcp import hermes_mcp_readiness, mcp_server_is_available
 from .runner import utc_now
 
 ISSUE_SNAPSHOT_NAME = "issues-snapshot.json"
-MCP_ISSUES_ENV = "QA_AIST_GITEA_MCP_ISSUES_JSON"
+MCP_ISSUES_ENV = "QUALITY_PILOT_GITEA_MCP_ISSUES_JSON"
 
 
 class IssueSyncError(RuntimeError):
@@ -118,7 +118,7 @@ def issue_sync_readiness(config: ProjectConfig) -> dict[str, Any]:
             "name": "tracker.provider",
             "status": "WARN",
             "value": provider,
-            "message": "QA-AIST V1 only syncs remote issues through Hermes MCP. Set tracker.provider: hermes_mcp.",
+            "message": "AI Quality Pilot V1 only syncs remote issues through Hermes MCP. Set tracker.provider: hermes_mcp.",
         })
     else:
         checks.append({"name": "tracker.provider", "status": "PASS", "value": provider})
@@ -131,7 +131,7 @@ def issue_sync_readiness(config: ProjectConfig) -> dict[str, Any]:
             "name": "tracker.backend",
             "status": "FAIL",
             "value": gitea_cfg.backend,
-            "message": "QA-AIST V1 does not use internal Gitea HTTP credentials. Use Hermes Gitea MCP.",
+            "message": "AI Quality Pilot V1 does not use internal Gitea HTTP credentials. Use Hermes Gitea MCP.",
         })
 
     mcp_ready = hermes_mcp_readiness(config)
@@ -244,7 +244,7 @@ def normalize_issue(raw: dict[str, Any]) -> NormalizedIssue:
 def build_issue_snapshot(config: ProjectConfig, open_issues: list[NormalizedIssue]) -> dict[str, Any]:
     gitea = gitea_config_from_project(config.data)
     return {
-        "schema": "qa-aist.issue-snapshot.v1",
+        "schema": "quality-pilot.issue-snapshot.v1",
         "synced_at": utc_now(),
         "provider": "gitea",
         "repo": gitea.repo or config.data.get("tracker", {}).get("project", ""),
@@ -297,11 +297,11 @@ def render_issue_mirror(issue: NormalizedIssue, config: ProjectConfig) -> str:
             "",
             render_pull_requests(issue.pull_requests),
             "",
-            "## QA-AIST Notes",
+            "## AI Quality Pilot Notes",
             "",
             "- Source of truth is the live Gitea issue state.",
             "- Closed issues are removed from active mirrors and must not be reopened automatically.",
-            "- Use `/qa-aist cases generate --growing` to grow draft case contracts from current issue and repo state.",
+            "- Use `/quality-pilot cases generate --growing` to grow draft case contracts from current issue and repo state.",
             "",
         ]
     )
@@ -334,12 +334,12 @@ def render_pull_requests(pull_requests: list[dict[str, Any]]) -> str:
 def load_issue_snapshot(config: ProjectConfig) -> dict[str, Any]:
     path = issue_snapshot_path(config)
     if not path.exists():
-        return {"schema": "qa-aist.issue-snapshot.v1", "items": []}
+        return {"schema": "quality-pilot.issue-snapshot.v1", "items": []}
     try:
         loaded = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise IssueSyncError(f"invalid issue snapshot JSON: {path}") from exc
-    return loaded if isinstance(loaded, dict) else {"schema": "qa-aist.issue-snapshot.v1", "items": []}
+    return loaded if isinstance(loaded, dict) else {"schema": "quality-pilot.issue-snapshot.v1", "items": []}
 
 
 def issue_snapshot_path(config: ProjectConfig) -> Path:
@@ -386,7 +386,7 @@ def _load_input_issues(config: ProjectConfig, issues_json: str | Path | None) ->
         path = mcp_issues_snapshot_path(config, gitea_cfg)
         if not path.exists():
             raise IssueSyncError(
-                "gitea_mcp_snapshot_missing: QA-AIST is configured for Hermes Gitea MCP, but issue snapshot JSON was not found at "
+                "gitea_mcp_snapshot_missing: AI Quality Pilot is configured for Hermes Gitea MCP, but issue snapshot JSON was not found at "
                 f"{_relative_or_str(path, config.root)}. Use Hermes Gitea MCP read-only fetch to write raw issues JSON there, "
                 f"or set {MCP_ISSUES_ENV}."
             )
@@ -397,7 +397,7 @@ def _load_input_issues(config: ProjectConfig, issues_json: str | Path | None) ->
         return _extract_issue_list(loaded), {"source": "mcp", "mcp_issues_json": _relative_or_str(path, config.root)}
 
     if not gitea_cfg.configured:
-        raise GiteaError("Gitea HTTP backend is not configured. New QA-AIST projects should use Hermes MCP snapshots instead.")
+        raise GiteaError("Gitea HTTP backend is not configured. New AI Quality Pilot projects should use Hermes MCP snapshots instead.")
     return GiteaClient(gitea_cfg).list_issues(state="all", include_comments=True), {"source": "gitea"}
 
 

@@ -15,7 +15,7 @@ from .config import (
     LEGACY_PROJECT_WORKSPACE,
     QAConfigError,
     default_config,
-    is_qa_aist_source_checkout,
+    is_quality_pilot_source_checkout,
     json_dumps,
     load_project_config,
     load_yaml,
@@ -56,34 +56,34 @@ from .wiki import (
 
 
 REMOVED_COMMAND_REPLACEMENTS: dict[tuple[str, ...], str] = {
-    ("init-project",): "/qa-aist setup",
-    ("status",): "/qa-aist doctor",
-    ("config",): "/qa-aist doctor",
-    ("qa-test",): "/qa-aist cases run",
-    ("qa-test", "help"): "/qa-aist help",
-    ("qa-test", "list"): "/qa-aist cases list",
-    ("qa-test", "validate"): "/qa-aist cases validate",
-    ("qa-test", "dry-run"): "/qa-aist cases run",
-    ("qa-test", "run"): "/qa-aist cases run",
-    ("qa-test", "run-one"): "/qa-aist cases run <case_id>",
-    ("issues", "dedupe"): "/qa-aist issues sync",
-    ("fix-issues",): "/qa-aist issues fix --issue <id>",
-    ("fix-issues", "plan"): "/qa-aist issues fix --issue <id>",
-    ("fix-issues", "run"): "/qa-aist issues fix --issue <id>",
-    ("fix-issues", "submit-pr"): "/qa-aist issues fix --issue <id> --push-pr",
-    ("fix-issues", "status"): "/qa-aist issues status",
-    ("publish", "plan"): "/qa-aist publish wiki plan",
-    ("publish", "apply"): "/qa-aist publish wiki apply",
-    ("publish", "status"): "/qa-aist publish wiki status",
-    ("publish", "wiki", "render"): "/qa-aist publish wiki plan",
-    ("publish", "wiki", "complete-mcp"): "/qa-aist publish wiki apply",
-    ("sync-gitea",): "/qa-aist issues sync",
-    ("sync-gitea", "pull"): "/qa-aist issues sync",
-    ("sync-gitea", "status"): "/qa-aist issues status",
-    ("sync-gitea", "validate"): "/qa-aist issues status",
-    ("find-new-issues",): "/qa-aist cases generate --growing",
-    ("find-new-issues", "run"): "/qa-aist cases generate --growing",
-    ("find-new-issues", "dry-run"): "/qa-aist cases generate --growing",
+    ("init-project",): "/quality-pilot setup",
+    ("status",): "/quality-pilot doctor",
+    ("config",): "/quality-pilot doctor",
+    ("qa-test",): "/quality-pilot cases run",
+    ("qa-test", "help"): "/quality-pilot help",
+    ("qa-test", "list"): "/quality-pilot cases list",
+    ("qa-test", "validate"): "/quality-pilot cases validate",
+    ("qa-test", "dry-run"): "/quality-pilot cases run",
+    ("qa-test", "run"): "/quality-pilot cases run",
+    ("qa-test", "run-one"): "/quality-pilot cases run <case_id>",
+    ("issues", "dedupe"): "/quality-pilot issues sync",
+    ("fix-issues",): "/quality-pilot issues fix --issue <id>",
+    ("fix-issues", "plan"): "/quality-pilot issues fix --issue <id>",
+    ("fix-issues", "run"): "/quality-pilot issues fix --issue <id>",
+    ("fix-issues", "submit-pr"): "/quality-pilot issues fix --issue <id> --push-pr",
+    ("fix-issues", "status"): "/quality-pilot issues status",
+    ("publish", "plan"): "/quality-pilot publish wiki plan",
+    ("publish", "apply"): "/quality-pilot publish wiki apply",
+    ("publish", "status"): "/quality-pilot publish wiki status",
+    ("publish", "wiki", "render"): "/quality-pilot publish wiki plan",
+    ("publish", "wiki", "complete-mcp"): "/quality-pilot publish wiki apply",
+    ("sync-gitea",): "/quality-pilot issues sync",
+    ("sync-gitea", "pull"): "/quality-pilot issues sync",
+    ("sync-gitea", "status"): "/quality-pilot issues status",
+    ("sync-gitea", "validate"): "/quality-pilot issues status",
+    ("find-new-issues",): "/quality-pilot cases generate --growing",
+    ("find-new-issues", "run"): "/quality-pilot cases generate --growing",
+    ("find-new-issues", "dry-run"): "/quality-pilot cases generate --growing",
 }
 
 
@@ -98,12 +98,12 @@ def cmd_init_project(args: argparse.Namespace) -> int:
     workspace = args.workspace or DEFAULT_PROJECT_WORKSPACE
     paths = project_paths(root, workspace)
     tracker_setup = resolve_setup_tracker(root, args)
-    if is_qa_aist_source_checkout(paths.workspace):
+    if is_quality_pilot_source_checkout(paths.workspace):
         return print_json({
             "status": "error",
             "error": "workspace_is_tool_checkout",
             "workspace": str(paths.workspace),
-            "message": "Refusing to write host-project assets into a QA-AIST source checkout. Use --workspace .qa-aist-project or another host-owned overlay path.",
+            "message": "Refusing to write host-project assets into a AI Quality Pilot source checkout. Use --workspace .quality-pilot-project or another host-owned overlay path.",
         }, exit_code=4)
 
     for path in [paths.cases, paths.runners, paths.rules, paths.issues, paths.state, paths.evidence, paths.reports]:
@@ -141,7 +141,7 @@ def cmd_init_project(args: argparse.Namespace) -> int:
         "issue_sync": issue_sync,
         "wiki_sync": wiki_sync,
         "config_error": config_error,
-        "embedded_tool_checkout_detected": is_qa_aist_source_checkout(root / LEGACY_PROJECT_WORKSPACE),
+        "embedded_tool_checkout_detected": is_quality_pilot_source_checkout(root / LEGACY_PROJECT_WORKSPACE),
     })
 
 
@@ -272,15 +272,15 @@ def cmd_status(args: argparse.Namespace) -> int:
     runners = sorted(paths.runners.glob("*")) if paths.runners.exists() else []
     return print_json({
         "status": payload_status,
-        "tool": "qa-aist",
+        "tool": "quality-pilot",
         "root": str(root),
         "config_exists": config_exists,
         "setup_required": not config_exists,
         "config_error": config_error,
         "workspace": str(paths.workspace),
         "workspace_exists": paths.workspace.exists(),
-        "workspace_is_tool_checkout": is_qa_aist_source_checkout(paths.workspace),
-        "embedded_tool_checkout_detected": is_qa_aist_source_checkout(root / LEGACY_PROJECT_WORKSPACE),
+        "workspace_is_tool_checkout": is_quality_pilot_source_checkout(paths.workspace),
+        "embedded_tool_checkout_detected": is_quality_pilot_source_checkout(root / LEGACY_PROJECT_WORKSPACE),
         "case_contract_count": len(cases),
         "runner_count": len([p for p in runners if p.is_file()]),
         "latest_run": latest_payload,
@@ -318,7 +318,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         checks = _dedupe_checks(checks)
         statuses = {str(check.get("status")) for check in checks}
         status = "FAIL" if "FAIL" in statuses else ("WARN" if "WARN" in statuses else "PASS")
-        return print_json({"status": status, "tool": "qa-aist", "checks": checks, "hermes_mcp": hermes_ready, "issue_sync": readiness, "redmine_sync": redmine_ready, "wiki_sync": wiki_ready})
+        return print_json({"status": status, "tool": "quality-pilot", "checks": checks, "hermes_mcp": hermes_ready, "issue_sync": readiness, "redmine_sync": redmine_ready, "wiki_sync": wiki_ready})
     except QAConfigError as exc:
         return print_json({"status": "FAIL", "error": exc.error, "message": exc.message, **exc.details}, exit_code=2)
 
@@ -442,7 +442,7 @@ def cmd_issues_fix(args: argparse.Namespace) -> int:
                 {
                     "status": "error",
                     "error": "issue_required",
-                    "message": "Use /qa-aist issues fix --issue <id> or /qa-aist issues fix --all.",
+                    "message": "Use /quality-pilot issues fix --issue <id> or /quality-pilot issues fix --all.",
                 },
                 exit_code=2,
             )
@@ -469,9 +469,9 @@ def cmd_cases_generate(args: argparse.Namespace) -> int:
                     "error": "explicit_generation_mode_required",
                     "message": "cases generate requires an explicit mode. Use --init, --growing, or --redmine-issues.",
                     "choices": [
-                        "/qa-aist cases generate --init",
-                        "/qa-aist cases generate --growing",
-                        "/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]",
+                        "/quality-pilot cases generate --init",
+                        "/quality-pilot cases generate --growing",
+                        "/quality-pilot cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]",
                     ],
                 },
                 exit_code=2,
@@ -483,9 +483,9 @@ def cmd_cases_generate(args: argparse.Namespace) -> int:
                     "error": "ambiguous_generation_mode",
                     "message": "Choose exactly one generation mode: --init, --growing, or --redmine-issues.",
                     "choices": [
-                        "/qa-aist cases generate --init",
-                        "/qa-aist cases generate --growing",
-                        "/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]",
+                        "/quality-pilot cases generate --init",
+                        "/quality-pilot cases generate --growing",
+                        "/quality-pilot cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]",
                     ],
                 },
                 exit_code=2,
@@ -551,7 +551,7 @@ def cmd_cases_push_pr(args: argparse.Namespace) -> int:
                 {
                     "status": "blocked",
                     "error": "linked_issue_required",
-                    "message": "cases push-pr needs a case linked to an open issue. Use /qa-aist issues fix --issue <id> --push-pr when the issue is known.",
+                    "message": "cases push-pr needs a case linked to an open issue. Use /quality-pilot issues fix --issue <id> --push-pr when the issue is known.",
                     "case_id": args.case_id,
                 },
                 exit_code=4,
@@ -860,35 +860,35 @@ def _relative_or_str(path: Path, root: Path) -> str:
 
 
 PUBLIC_COMMANDS = [
-    "/qa-aist help",
-    "/qa-aist setup",
-    "/qa-aist doctor",
-    "/qa-aist issues sync",
-    "/qa-aist issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]",
-    "/qa-aist issues status",
-    "/qa-aist issues show <issue_id>",
-    "/qa-aist issues fix --all",
-    "/qa-aist issues fix --issue <id>",
-    "/qa-aist issues fix --issue <id> --push-pr",
-    "/qa-aist cases generate --init",
-    "/qa-aist cases generate --init --count 5",
-    "/qa-aist cases generate --growing",
-    "/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]",
-    "/qa-aist cases review",
-    "/qa-aist cases validate",
-    "/qa-aist cases list",
-    "/qa-aist cases run",
-    "/qa-aist cases run <case_id>",
-    "/qa-aist cases push-pr",
-    "/qa-aist cases push-pr <case_id>",
-    "/qa-aist publish wiki status",
-    "/qa-aist publish wiki plan",
-    "/qa-aist publish wiki apply",
-    "/qa-aist close-loop status",
-    "/qa-aist close-loop run-once",
-    "/qa-aist report status",
-    "/qa-aist report json",
-    "/qa-aist tracker plan-write",
+    "/quality-pilot help",
+    "/quality-pilot setup",
+    "/quality-pilot doctor",
+    "/quality-pilot issues sync",
+    "/quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]",
+    "/quality-pilot issues status",
+    "/quality-pilot issues show <issue_id>",
+    "/quality-pilot issues fix --all",
+    "/quality-pilot issues fix --issue <id>",
+    "/quality-pilot issues fix --issue <id> --push-pr",
+    "/quality-pilot cases generate --init",
+    "/quality-pilot cases generate --init --count 5",
+    "/quality-pilot cases generate --growing",
+    "/quality-pilot cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]",
+    "/quality-pilot cases review",
+    "/quality-pilot cases validate",
+    "/quality-pilot cases list",
+    "/quality-pilot cases run",
+    "/quality-pilot cases run <case_id>",
+    "/quality-pilot cases push-pr",
+    "/quality-pilot cases push-pr <case_id>",
+    "/quality-pilot publish wiki status",
+    "/quality-pilot publish wiki plan",
+    "/quality-pilot publish wiki apply",
+    "/quality-pilot close-loop status",
+    "/quality-pilot close-loop run-once",
+    "/quality-pilot report status",
+    "/quality-pilot report json",
+    "/quality-pilot tracker plan-write",
 ]
 
 
@@ -896,23 +896,23 @@ def cmd_help(args: argparse.Namespace) -> int:
     return print_json(
         {
             "status": "ok",
-            "tool": "qa-aist",
+            "tool": "quality-pilot",
             "command_group": "help",
             "language": "zh-Hant",
             "commands": [{"command": command} for command in PUBLIC_COMMANDS],
             "help_text": "\n".join(
                 [
-                    "qa-aist> HELP",
-                    "QA-AIST 指令總覽",
+                    "quality-pilot> HELP",
+                    "AI Quality Pilot 指令總覽",
                     "",
                     "第一次使用建議流程：",
-                    "1. /qa-aist setup",
-                    "2. /qa-aist doctor",
-                    "3. /qa-aist issues sync",
-                    "4. /qa-aist cases generate --init",
-                    "5. /qa-aist cases validate",
-                    "6. /qa-aist cases run",
-                    "7. /qa-aist publish wiki apply",
+                    "1. /quality-pilot setup",
+                    "2. /quality-pilot doctor",
+                    "3. /quality-pilot issues sync",
+                    "4. /quality-pilot cases generate --init",
+                    "5. /quality-pilot cases validate",
+                    "6. /quality-pilot cases run",
+                    "7. /quality-pilot publish wiki apply",
                     "",
                     "正式指令：",
                     *[f"- {command}" for command in PUBLIC_COMMANDS],
@@ -923,15 +923,15 @@ def cmd_help(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="qa-aist", description="Reusable deterministic-first QA toolkit")
+    parser = argparse.ArgumentParser(prog="quality-pilot", description="Reusable deterministic-first QA toolkit")
     parser.add_argument("--json", action="store_true", help="Emit JSON output; accepted for stable Hermes scripts")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    help_cmd = sub.add_parser("help", help="Show all QA-AIST commands")
+    help_cmd = sub.add_parser("help", help="Show all AI Quality Pilot commands")
     help_cmd.add_argument("--json", action="store_true", help="Emit JSON output")
     help_cmd.set_defaults(func=cmd_help)
 
-    setup = sub.add_parser("setup", help="Initialize QA-AIST project files for the current product repository")
+    setup = sub.add_parser("setup", help="Initialize AI Quality Pilot project files for the current product repository")
     _add_root_workspace_force(setup)
     setup.set_defaults(func=cmd_setup)
 
@@ -1068,16 +1068,16 @@ def removed_command_payload(argv: list[str]) -> dict[str, Any] | None:
     if not args:
         return None
     if args[0] == "help" and len(args) > 1:
-        return _command_removed(" ".join(args[:2]), "/qa-aist help", "Subtopic help was removed; /qa-aist help now lists every command.")
+        return _command_removed(" ".join(args[:2]), "/quality-pilot help", "Subtopic help was removed; /quality-pilot help now lists every command.")
     if args[:2] == ["cases", "generate"]:
         removed_options = {
-            "--generated_count": "/qa-aist cases generate --init --count 5",
-            "--generated-count": "/qa-aist cases generate --init --count 5",
-            "--fast": "/qa-aist cases generate --init",
-            "--candidate-json": "/qa-aist cases generate --growing",
-            "--from-issues": "/qa-aist cases generate --growing",
-            "--from-scratch": "/qa-aist cases generate --init",
-            "--issue": "/qa-aist cases generate --growing",
+            "--generated_count": "/quality-pilot cases generate --init --count 5",
+            "--generated-count": "/quality-pilot cases generate --init --count 5",
+            "--fast": "/quality-pilot cases generate --init",
+            "--candidate-json": "/quality-pilot cases generate --growing",
+            "--from-issues": "/quality-pilot cases generate --growing",
+            "--from-scratch": "/quality-pilot cases generate --init",
+            "--issue": "/quality-pilot cases generate --growing",
         }
         for option, replacement in removed_options.items():
             if option in argv:
@@ -1096,7 +1096,7 @@ def _command_removed(command: str, replacement: str, message: str | None = None)
         "error": "command_removed",
         "removed_command": command,
         "replacement": replacement,
-        "message": message or f"`{command}` was removed from QA-AIST public commands. Use `{replacement}`.",
+        "message": message or f"`{command}` was removed from AI Quality Pilot public commands. Use `{replacement}`.",
     }
 
 

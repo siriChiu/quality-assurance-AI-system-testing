@@ -14,8 +14,8 @@ from typing import Any
 from . import __version__, cli
 from .config import CONFIG_FILE, json_dumps
 
-PRIMARY_PREFIX = "/qa-aist"
-ALIAS_PREFIX = "qa-aist"
+PRIMARY_PREFIX = "/quality-pilot"
+ALIAS_PREFIX = "quality-pilot"
 ACCEPTED_PREFIXES = {PRIMARY_PREFIX, ALIAS_PREFIX}
 ROOT_COMMANDS = {
     "setup",
@@ -27,9 +27,9 @@ ROOT_COMMANDS = {
     "report",
     "tracker",
 }
-AGENT_MANIFEST_NAME = "qa-aist.agent.json"
-AGENT_WRAPPER_NAME = "qa-aist-agent.sh"
-HERMES_SKILL_NAME = "qa-aist"
+AGENT_MANIFEST_NAME = "quality-pilot.agent.json"
+AGENT_WRAPPER_NAME = "quality-pilot-agent.sh"
+HERMES_SKILL_NAME = "quality-pilot"
 HERMES_SKILL_FILE_NAME = "SKILL.md"
 
 
@@ -45,9 +45,9 @@ def parse_chat_command(message: str, *, root: str | Path = ".") -> HermesCommand
         raise ValueError("empty_hermes_message")
     prefix = parts[0]
     if prefix not in ACCEPTED_PREFIXES:
-        raise ValueError("not_a_qa_aist_command")
+        raise ValueError("not_a_quality_pilot_command")
     if len(parts) == 1:
-        raise ValueError("empty_qa_aist_command")
+        raise ValueError("empty_quality_pilot_command")
 
     engine_argv = list(parts[1:])
     if not _has_option(engine_argv, "--json"):
@@ -107,7 +107,7 @@ def dispatch_chat_command(message: str, *, root: str | Path = ".") -> dict[str, 
         payload = {
             "status": "error",
             "error": "engine_output_not_json",
-            "message": raw_stderr or raw_stdout or "QA-AIST engine did not emit JSON.",
+            "message": raw_stderr or raw_stdout or "AI Quality Pilot engine did not emit JSON.",
             "stdout": raw_stdout,
             "stderr": raw_stderr,
         }
@@ -135,7 +135,7 @@ def render_chat_response(payload: dict[str, Any], *, exit_code: int = 0) -> str:
         return f"{payload['help_text']}\n\n{menu}" if menu else payload["help_text"]
 
     status = str(payload.get("status") or ("ok" if exit_code == 0 else "error"))
-    lines = [f"qa-aist> {status.upper()}"]
+    lines = [f"quality-pilot> {status.upper()}"]
 
     if payload.get("error"):
         lines.append(f"         error: {payload.get('error')}")
@@ -173,7 +173,7 @@ def render_chat_response(payload: dict[str, Any], *, exit_code: int = 0) -> str:
             lines.append(f"         wiki.apply: {wiki.get('apply_result_path')}")
         if wiki.get("blocked_by_gate") is not None:
             lines.append(f"         wiki.blocked_by_gate: {wiki.get('blocked_by_gate')}")
-    elif payload.get("page") and ("wiki" in str(payload.get("schema", "")) or "wiki" in str(payload.get("event", "")) or payload.get("report_path") == ".qa-aist-project/reports/wiki-status.md"):
+    elif payload.get("page") and ("wiki" in str(payload.get("schema", "")) or "wiki" in str(payload.get("event", "")) or payload.get("report_path") == ".quality-pilot-project/reports/wiki-status.md"):
         lines.append(f"         wiki.page: {payload.get('page')}")
     if isinstance(payload.get("tracker_writes"), dict):
         blocked = payload["tracker_writes"].get("blocked_by_gate")
@@ -287,7 +287,7 @@ def _next_actions_lines(next_actions: list[Any]) -> list[str]:
             lines.append(f"{index}. {label}：`{command}`{suffix}")
         else:
             lines.append(f"{index}. {label}{suffix}")
-    lines.append("請回覆選項編號，或直接輸入下一個 `/qa-aist ...` 指令。")
+    lines.append("請回覆選項編號，或直接輸入下一個 `/quality-pilot ...` 指令。")
     return lines
 
 
@@ -308,7 +308,7 @@ def _with_hermes_needs_input(payload: dict[str, Any]) -> dict[str, Any]:
         return payload
     needs_input = {
         "status": "required",
-        "title": "QA-AIST clarify",
+        "title": "AI Quality Pilot clarify",
         "language": "zh-Hant",
         "mode": "questionnaire",
         "preferred_mechanism": "clarify",
@@ -326,7 +326,7 @@ def _with_hermes_needs_input(payload: dict[str, Any]) -> dict[str, Any]:
         "input_required": True,
         "interaction": {
             "type": "needs_input",
-            "title": "QA-AIST clarify",
+            "title": "AI Quality Pilot clarify",
             "field": "payload.hermes_needs_input",
             "handler": "clarify",
         },
@@ -383,7 +383,7 @@ def _collect_needs_input_questions(payload: dict[str, Any]) -> list[dict[str, An
             add(_missing_input_prompt(item), source="payload.missing_inputs")
 
     if str(payload.get("status") or "").lower() == "needs_input" and not questions:
-        add("請補齊 QA-AIST 回報的必要測試資訊後再繼續。", source="payload.status")
+        add("請補齊 AI Quality Pilot 回報的必要測試資訊後再繼續。", source="payload.status")
     return questions
 
 
@@ -446,161 +446,161 @@ def suggest_next_actions(payload: dict[str, Any], engine_argv: list[str], exit_c
 
     if error == "command_removed":
         replacement = payload.get("replacement")
-        return [_next("改用新的正式指令", str(replacement), confirm=True)] if replacement else [_next("查看正式指令", "/qa-aist help")]
+        return [_next("改用新的正式指令", str(replacement), confirm=True)] if replacement else [_next("查看正式指令", "/quality-pilot help")]
     if error == "config_not_found":
         return [
-            _next("初始化目前 repo", "/qa-aist setup", confirm=True),
-            _next("執行健康檢查", "/qa-aist doctor"),
+            _next("初始化目前 repo", "/quality-pilot setup", confirm=True),
+            _next("執行健康檢查", "/quality-pilot doctor"),
         ]
     if "gitea_mcp_snapshot_missing" in message:
         return [
-            _next("用 Hermes Gitea MCP 讀取 issues，寫入 snapshot 後重跑 sync", "/qa-aist issues sync", confirm=True),
-            _next("查看 issue sync 狀態", "/qa-aist issues status"),
-            _next("執行健康檢查", "/qa-aist doctor"),
+            _next("用 Hermes Gitea MCP 讀取 issues，寫入 snapshot 後重跑 sync", "/quality-pilot issues sync", confirm=True),
+            _next("查看 issue sync 狀態", "/quality-pilot issues status"),
+            _next("執行健康檢查", "/quality-pilot doctor"),
         ]
     if "redmine_mcp_snapshot_missing" in message:
         return [
             _redmine_snapshot_retry_action(current, engine_argv),
-            _next("執行健康檢查", "/qa-aist doctor"),
+            _next("執行健康檢查", "/quality-pilot doctor"),
         ]
     if error in {"GiteaError", "IssueSyncError"}:
         return [
-            _next("執行健康檢查", "/qa-aist doctor"),
-            _next("查看 issue 狀態", "/qa-aist issues status"),
+            _next("執行健康檢查", "/quality-pilot doctor"),
+            _next("查看 issue 狀態", "/quality-pilot issues status"),
         ]
     if error in {"QAConfigError", "config_invalid"} or status == "error" and "config" in error.lower():
-        return [_next("執行健康檢查", "/qa-aist doctor"), _next("查看正式指令", "/qa-aist help")]
+        return [_next("執行健康檢查", "/quality-pilot doctor"), _next("查看正式指令", "/quality-pilot help")]
 
     if not args or args[0] == "help":
         return [
-            _next("初始化產品 repo", "/qa-aist setup", confirm=True),
-            _next("執行健康檢查", "/qa-aist doctor"),
-            _next("同步 Gitea issues", "/qa-aist issues sync", confirm=True),
-            _next("首次建立 SWQA cases", "/qa-aist cases generate --init", confirm=True),
+            _next("初始化產品 repo", "/quality-pilot setup", confirm=True),
+            _next("執行健康檢查", "/quality-pilot doctor"),
+            _next("同步 Gitea issues", "/quality-pilot issues sync", confirm=True),
+            _next("首次建立 SWQA cases", "/quality-pilot cases generate --init", confirm=True),
         ]
     if current == "setup":
         if "gitea_mcp_snapshot_missing" in blockers:
             return [
-                _next("用 Hermes Gitea MCP 讀取 issues，寫入 snapshot 後重跑 sync", "/qa-aist issues sync", confirm=True),
-                _next("執行健康檢查", "/qa-aist doctor"),
+                _next("用 Hermes Gitea MCP 讀取 issues，寫入 snapshot 後重跑 sync", "/quality-pilot issues sync", confirm=True),
+                _next("執行健康檢查", "/quality-pilot doctor"),
             ]
-        return [_next("執行健康檢查", "/qa-aist doctor"), _next("同步 Gitea issues", "/qa-aist issues sync", confirm=True)]
+        return [_next("執行健康檢查", "/quality-pilot doctor"), _next("同步 Gitea issues", "/quality-pilot issues sync", confirm=True)]
     if current == "doctor":
         if "gitea_mcp_snapshot_missing" in blockers:
             return [
-                _next("用 Hermes Gitea MCP 讀取 issues，寫入 snapshot 後重跑 sync", "/qa-aist issues sync", confirm=True),
-                _next("查看 issue sync 狀態", "/qa-aist issues status"),
+                _next("用 Hermes Gitea MCP 讀取 issues，寫入 snapshot 後重跑 sync", "/quality-pilot issues sync", confirm=True),
+                _next("查看 issue sync 狀態", "/quality-pilot issues status"),
             ]
         if "hermes_gitea_mcp_unknown_or_missing" in blockers or "hermes_gitea_mcp_missing" in blockers or "hermes_gitea_mcp_unknown" in blockers:
-            return [{"label": "在 Hermes 啟用 Gitea MCP，或提供 QA_AIST_HERMES_MCP_SERVERS/status JSON 後重跑 doctor", "kind": "ask_user"}]
+            return [{"label": "在 Hermes 啟用 Gitea MCP，或提供 QUALITY_PILOT_HERMES_MCP_SERVERS/status JSON 後重跑 doctor", "kind": "ask_user"}]
         if "hermes_redmine_mcp_missing" in blockers or "hermes_redmine_mcp_unknown" in blockers:
-            return [{"label": "在 Hermes 啟用 Redmine MCP，或提供 QA_AIST_HERMES_MCP_SERVERS/status JSON 後重跑 doctor", "kind": "ask_user"}]
+            return [{"label": "在 Hermes 啟用 Redmine MCP，或提供 QUALITY_PILOT_HERMES_MCP_SERVERS/status JSON 後重跑 doctor", "kind": "ask_user"}]
         if "tracker_provider_disabled" in blockers:
-            return [{"label": "執行 /qa-aist setup 產生 tracker.provider: hermes_mcp 後重跑 doctor", "kind": "ask_user"}]
+            return [{"label": "執行 /quality-pilot setup 產生 tracker.provider: hermes_mcp 後重跑 doctor", "kind": "ask_user"}]
         if status in {"warn", "error", "fail"}:
-            return [_next("查看 issue sync 狀態", "/qa-aist issues status"), _next("查看 Wiki 狀態", "/qa-aist publish wiki status")]
+            return [_next("查看 issue sync 狀態", "/quality-pilot issues status"), _next("查看 Wiki 狀態", "/quality-pilot publish wiki status")]
         return [
-            _next("同步 Gitea issues", "/qa-aist issues sync", confirm=True),
-            _next("首次建立 SWQA cases", "/qa-aist cases generate --init", confirm=True),
-            _next("列出測試 cases", "/qa-aist cases list"),
+            _next("同步 Gitea issues", "/quality-pilot issues sync", confirm=True),
+            _next("首次建立 SWQA cases", "/quality-pilot cases generate --init", confirm=True),
+            _next("列出測試 cases", "/quality-pilot cases list"),
         ]
     if current == "issues sync":
         if exit_code == 0 and (payload.get("source") == "redmine_mcp" or payload.get("mode") == "redmine_issues"):
             issue_ids = " ".join(str(item) for item in payload.get("imported_issue_ids", []) or payload.get("requested_issue_ids", []))
             if status == "needs_mcp_apply":
                 return [
-                    _next("用 Hermes Gitea MCP 建立這批 Gitea issues", "/qa-aist issues sync --redmine-issues " + issue_ids, confirm=True, destructive=True),
-                    _next("建立完成後產生 linked testcases", f"/qa-aist cases generate --redmine-issues {issue_ids}".strip(), confirm=True),
-                    _next("查看 issue sync 狀態", "/qa-aist issues status"),
+                    _next("用 Hermes Gitea MCP 建立這批 Gitea issues", "/quality-pilot issues sync --redmine-issues " + issue_ids, confirm=True, destructive=True),
+                    _next("建立完成後產生 linked testcases", f"/quality-pilot cases generate --redmine-issues {issue_ids}".strip(), confirm=True),
+                    _next("查看 issue sync 狀態", "/quality-pilot issues status"),
                 ]
             if status in {"ok", "dry_run", "no_remote_write_needed"}:
-                command = f"/qa-aist cases generate --redmine-issues {issue_ids}".strip()
+                command = f"/quality-pilot cases generate --redmine-issues {issue_ids}".strip()
                 return [
                     _next("針對這批 Redmine tickets 產生 linked testcases", command, confirm=True),
-                    _next("查看 issue sync 狀態", "/qa-aist issues status"),
-                    _next("查看 Gitea issue 建立狀態", "/qa-aist issues status"),
+                    _next("查看 issue sync 狀態", "/quality-pilot issues status"),
+                    _next("查看 Gitea issue 建立狀態", "/quality-pilot issues status"),
                 ]
         if exit_code == 0 and status in {"ok", "dry_run"}:
             return [
-                _next("用最新狀態長出測試 cases", "/qa-aist cases generate --growing", confirm=True),
-                _next("查看 issue sync 狀態", "/qa-aist issues status"),
-                _next("修復全部 open issues", "/qa-aist issues fix --all", confirm=True),
+                _next("用最新狀態長出測試 cases", "/quality-pilot cases generate --growing", confirm=True),
+                _next("查看 issue sync 狀態", "/quality-pilot issues status"),
+                _next("修復全部 open issues", "/quality-pilot issues fix --all", confirm=True),
             ]
-        return [_next("執行健康檢查", "/qa-aist doctor"), _next("查看 issue sync 狀態", "/qa-aist issues status")]
+        return [_next("執行健康檢查", "/quality-pilot doctor"), _next("查看 issue sync 狀態", "/quality-pilot issues status")]
     if current == "issues status":
         if not payload.get("snapshot_exists"):
-            return [_next("同步 Gitea issues", "/qa-aist issues sync", confirm=True), _next("執行健康檢查", "/qa-aist doctor")]
+            return [_next("同步 Gitea issues", "/quality-pilot issues sync", confirm=True), _next("執行健康檢查", "/quality-pilot doctor")]
         return [
-            _next("長出測試 cases", "/qa-aist cases generate --growing", confirm=True),
-            _next("修復指定 issue", "/qa-aist issues fix --issue <id>", confirm=True),
+            _next("長出測試 cases", "/quality-pilot cases generate --growing", confirm=True),
+            _next("修復指定 issue", "/quality-pilot issues fix --issue <id>", confirm=True),
         ]
     if current == "issues fix":
         return [
-            _next("執行 linked cases", "/qa-aist cases run", confirm=True),
-            _next("推產品修復 PR", "/qa-aist issues fix --issue <id> --push-pr", confirm=True, destructive=True),
-            _next("查看 issue/fix 狀態", "/qa-aist issues status"),
+            _next("執行 linked cases", "/quality-pilot cases run", confirm=True),
+            _next("推產品修復 PR", "/quality-pilot issues fix --issue <id> --push-pr", confirm=True, destructive=True),
+            _next("查看 issue/fix 狀態", "/quality-pilot issues status"),
         ]
     if current == "cases generate":
         if error == "explicit_generation_mode_required":
             return [
-                _next("首次全 repo SWQA 建案", "/qa-aist cases generate --init", confirm=True),
-                _next("依最新狀態擴散 cases", "/qa-aist cases generate --growing", confirm=True),
-                _next("從 Redmine issues 產生 cases", "/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]", confirm=True),
+                _next("首次全 repo SWQA 建案", "/quality-pilot cases generate --init", confirm=True),
+                _next("依最新狀態擴散 cases", "/quality-pilot cases generate --growing", confirm=True),
+                _next("從 Redmine issues 產生 cases", "/quality-pilot cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]", confirm=True),
             ]
         if status == "needs_input":
             return [
-                _next("查看 Wiki draft 狀態", "/qa-aist publish wiki status"),
-                _next("審查待補資訊", "/qa-aist cases review"),
+                _next("查看 Wiki draft 狀態", "/quality-pilot publish wiki status"),
+                _next("審查待補資訊", "/quality-pilot cases review"),
                 {"label": "一次補齊大分類 fixture、輸入檔、成功條件與不可碰範圍", "kind": "ask_user"},
-                _next("補完後驗證 cases", "/qa-aist cases validate"),
+                _next("補完後驗證 cases", "/quality-pilot cases validate"),
             ]
         return [
-            _next("查看 Wiki draft 狀態", "/qa-aist publish wiki status"),
-            _next("驗證 cases", "/qa-aist cases validate"),
-            _next("執行所有 safe probes", "/qa-aist cases run", confirm=True),
-            _next("列出可跑測試", "/qa-aist cases list"),
+            _next("查看 Wiki draft 狀態", "/quality-pilot publish wiki status"),
+            _next("驗證 cases", "/quality-pilot cases validate"),
+            _next("執行所有 safe probes", "/quality-pilot cases run", confirm=True),
+            _next("列出可跑測試", "/quality-pilot cases list"),
         ]
     if current in {"cases review", "cases validate"}:
         return [
-            _next("列出可跑測試", "/qa-aist cases list"),
-            _next("執行 cases", "/qa-aist cases run", confirm=True),
+            _next("列出可跑測試", "/quality-pilot cases list"),
+            _next("執行 cases", "/quality-pilot cases run", confirm=True),
         ]
     if current == "cases list":
         first_case = _first_case_id(payload)
-        actions = [_next("執行所有 cases", "/qa-aist cases run", confirm=True)]
+        actions = [_next("執行所有 cases", "/quality-pilot cases run", confirm=True)]
         if first_case:
-            actions.append(_next(f"執行單一 case {first_case}", f"/qa-aist cases run {first_case}", confirm=True))
-        actions.append(_next("驗證 case YAML", "/qa-aist cases validate"))
+            actions.append(_next(f"執行單一 case {first_case}", f"/quality-pilot cases run {first_case}", confirm=True))
+        actions.append(_next("驗證 case YAML", "/quality-pilot cases validate"))
         return actions
     if current == "cases run":
         return [
-            _next("查看 Wiki 自動同步狀態", "/qa-aist publish wiki status"),
-            _next("產生報告", "/qa-aist report status"),
-            _next("手動重建 Wiki plan", "/qa-aist publish wiki plan", confirm=True),
-            _next("推產品修復 PR", "/qa-aist cases push-pr <case_id>", confirm=True, destructive=True),
+            _next("查看 Wiki 自動同步狀態", "/quality-pilot publish wiki status"),
+            _next("產生報告", "/quality-pilot report status"),
+            _next("手動重建 Wiki plan", "/quality-pilot publish wiki plan", confirm=True),
+            _next("推產品修復 PR", "/quality-pilot cases push-pr <case_id>", confirm=True, destructive=True),
         ]
     if current == "cases push-pr":
-        return [_next("查看 issue/fix 狀態", "/qa-aist issues status"), _next("查看 Wiki 狀態", "/qa-aist publish wiki status")]
+        return [_next("查看 issue/fix 狀態", "/quality-pilot issues status"), _next("查看 Wiki 狀態", "/quality-pilot publish wiki status")]
     if current == "close-loop run-once":
         return [
-            _next("查看 Wiki 自動同步狀態", "/qa-aist publish wiki status"),
-            _next("產生報告", "/qa-aist report status"),
-            _next("手動重建 Wiki plan", "/qa-aist publish wiki plan", confirm=True),
+            _next("查看 Wiki 自動同步狀態", "/quality-pilot publish wiki status"),
+            _next("產生報告", "/quality-pilot report status"),
+            _next("手動重建 Wiki plan", "/quality-pilot publish wiki plan", confirm=True),
         ]
     if current == "report status":
         return [
-            _next("更新 Wiki plan", "/qa-aist publish wiki plan", confirm=True),
-            _next("查看 latest run JSON", "/qa-aist report json"),
+            _next("更新 Wiki plan", "/quality-pilot publish wiki plan", confirm=True),
+            _next("查看 latest run JSON", "/quality-pilot report json"),
         ]
     if current3 == "publish wiki plan":
         if payload.get("status") == "ready":
             return [
-                _next("套用 Wiki 更新", "/qa-aist publish wiki apply", confirm=True, destructive=True),
-                _next("查看 Wiki 狀態", "/qa-aist publish wiki status"),
+                _next("套用 Wiki 更新", "/quality-pilot publish wiki apply", confirm=True, destructive=True),
+                _next("查看 Wiki 狀態", "/quality-pilot publish wiki status"),
             ]
         return [
-            _next("查看 Wiki 狀態", "/qa-aist publish wiki status"),
-            _next("執行 doctor 檢查 token/backend/gate", "/qa-aist doctor"),
+            _next("查看 Wiki 狀態", "/quality-pilot publish wiki status"),
+            _next("執行 doctor 檢查 token/backend/gate", "/quality-pilot doctor"),
         ]
     if current3 == "publish wiki apply":
         if status == "needs_mcp_apply":
@@ -611,19 +611,19 @@ def suggest_next_actions(payload: dict[str, Any], engine_argv: list[str], exit_c
                     "requires_confirmation": True,
                     "request_path": payload.get("mcp_write_request_path"),
                     "result_path": payload.get("mcp_write_result_path"),
-                    "command": "/qa-aist publish wiki apply",
+                    "command": "/quality-pilot publish wiki apply",
                 },
-                _next("查看 Wiki 狀態", "/qa-aist publish wiki status"),
+                _next("查看 Wiki 狀態", "/quality-pilot publish wiki status"),
             ]
         if status == "blocked":
             return [
-                _next("查看 Wiki 狀態", "/qa-aist publish wiki status"),
-                _next("重新產生 Wiki plan", "/qa-aist publish wiki plan", confirm=True),
+                _next("查看 Wiki 狀態", "/quality-pilot publish wiki status"),
+                _next("重新產生 Wiki plan", "/quality-pilot publish wiki plan", confirm=True),
             ]
-        return [_next("查看 Wiki 狀態", "/qa-aist publish wiki status")]
+        return [_next("查看 Wiki 狀態", "/quality-pilot publish wiki status")]
     if current3 == "publish wiki status":
         return [
-            _next("重建 Wiki plan", "/qa-aist publish wiki plan", confirm=True),
+            _next("重建 Wiki plan", "/quality-pilot publish wiki plan", confirm=True),
         ]
     return []
 
@@ -643,12 +643,12 @@ def _redmine_snapshot_retry_action(current: str, engine_argv: list[str]) -> dict
     if current == "issues sync":
         return _next(
             "用 Hermes Redmine MCP 讀取指定 issues，寫入 snapshot 後重跑 sync",
-            f"/qa-aist issues sync --redmine-issues {id_text}",
+            f"/quality-pilot issues sync --redmine-issues {id_text}",
             confirm=True,
         )
     return _next(
         "用 Hermes Redmine MCP 讀取指定 issues，寫入 snapshot 後重跑 generate",
-        f"/qa-aist cases generate --redmine-issues {id_text}",
+        f"/quality-pilot cases generate --redmine-issues {id_text}",
         confirm=True,
     )
 
@@ -687,12 +687,12 @@ def _first_case_id(payload: dict[str, Any]) -> str | None:
     return None
 
 
-def build_agent_manifest(*, wrapper_path: str | None = None, runner_command: str = "qa-aist-hermes") -> dict[str, Any]:
+def build_agent_manifest(*, wrapper_path: str | None = None, runner_command: str = "quality-pilot-hermes") -> dict[str, Any]:
     entrypoint_command = [wrapper_path] if wrapper_path else [runner_command, "--root", "${HERMES_PROJECT_ROOT}", "${HERMES_MESSAGE}"]
     return {
         "schema": "hermes.agent.v1",
-        "name": "qa-aist",
-        "display_name": "QA-AIST",
+        "name": "quality-pilot",
+        "display_name": "AI Quality Pilot",
         "version": __version__,
         "description": "Hermes-first deterministic QA lifecycle agent/plugin for Gitea issue sync, tests, publishing, and PR flow.",
         "command_prefix": PRIMARY_PREFIX,
@@ -705,12 +705,12 @@ def build_agent_manifest(*, wrapper_path: str | None = None, runner_command: str
             "message_args": "append",
         },
         "python_api": {
-            "module": "qa_aist.hermes",
+            "module": "quality_pilot.hermes",
             "callable": "dispatch_chat_command",
             "signature": "dispatch_chat_command(message: str, root: str | Path = '.') -> dict",
         },
         "engine": {
-            "console_script": "qa-aist",
+            "console_script": "quality-pilot",
             "hermes_console_script": runner_command,
             "json_output": True,
         },
@@ -773,7 +773,7 @@ def build_agent_manifest(*, wrapper_path: str | None = None, runner_command: str
     }
 
 
-def install_agent(agent_dir: str | Path, *, force: bool = False, runner_command: str = "qa-aist-hermes") -> dict[str, Any]:
+def install_agent(agent_dir: str | Path, *, force: bool = False, runner_command: str = "quality-pilot-hermes") -> dict[str, Any]:
     target = Path(agent_dir).expanduser().resolve()
     target.mkdir(parents=True, exist_ok=True)
     wrapper_path = target / AGENT_WRAPPER_NAME
@@ -835,12 +835,12 @@ def default_skills_dir() -> Path:
     return Path.home() / ".hermes" / "skills"
 
 
-def build_skill_markdown(*, runner_command: str = "qa-aist-hermes") -> str:
+def build_skill_markdown(*, runner_command: str = "quality-pilot-hermes") -> str:
     return f"""---
-name: qa-aist
-description: "QA-AIST dynamic skill: call the deterministic QA lifecycle engine for issues, cases, Wiki status, close-loop health, reports, and gated PR flow."
+name: quality-pilot
+description: "AI Quality Pilot dynamic skill: call the deterministic QA lifecycle engine for issues, cases, Wiki status, close-loop health, reports, and gated PR flow."
 version: {__version__}
-author: QA-AIST contributors
+author: AI Quality Pilot contributors
 license: MIT
 platforms: [linux, macos]
 metadata:
@@ -848,56 +848,56 @@ metadata:
     tags: [qa, testing, deterministic, evidence, write-gate, tracker, dynamic-skill]
 ---
 
-# QA-AIST Hermes Skill
+# AI Quality Pilot Hermes Skill
 
-This SKILL.md is the current Hermes integration for QA-AIST.
+This SKILL.md is the current Hermes integration for AI Quality Pilot.
 
-It makes `/qa-aist ...` visible to Hermes as a dynamic skill slash command, then instructs the Hermes agent to call the deterministic QA-AIST dispatcher. This is skill-mediated. It is not a native Hermes router, not a pre-LLM command hook, and not a Python package autoload mechanism.
+It makes `/quality-pilot ...` visible to Hermes as a dynamic skill slash command, then instructs the Hermes agent to call the deterministic AI Quality Pilot dispatcher. This is skill-mediated. It is not a native Hermes router, not a pre-LLM command hook, and not a Python package autoload mechanism.
 
-QA-AIST is responsible for issue sync, case contracts, test execution, evidence, write gate, automatic Gitea Wiki status sync, gated issue publishing, and Gitea PR creation. Hermes may answer questions and make code changes, but it must not bypass QA-AIST for tracker/wiki/PR decisions.
+AI Quality Pilot is responsible for issue sync, case contracts, test execution, evidence, write gate, automatic Gitea Wiki status sync, gated issue publishing, and Gitea PR creation. Hermes may answer questions and make code changes, but it must not bypass AI Quality Pilot for tracker/wiki/PR decisions.
 
 ## Public Command Surface
 
-Only these `/qa-aist` commands are public:
+Only these `/quality-pilot` commands are public:
 
-- `/qa-aist help`
-- `/qa-aist setup`
-- `/qa-aist doctor`
-- `/qa-aist issues sync`
-- `/qa-aist issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]`
-- `/qa-aist issues status`
-- `/qa-aist issues show <issue_id>`
-- `/qa-aist issues fix --all`
-- `/qa-aist issues fix --issue <id>`
-- `/qa-aist issues fix --issue <id> --push-pr`
-- `/qa-aist cases generate --init`
-- `/qa-aist cases generate --init --count 5`
-- `/qa-aist cases generate --growing`
-- `/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]`
-- `/qa-aist cases review`
-- `/qa-aist cases validate`
-- `/qa-aist cases list`
-- `/qa-aist cases run`
-- `/qa-aist cases run <case_id>`
-- `/qa-aist cases push-pr`
-- `/qa-aist cases push-pr <case_id>`
-- `/qa-aist publish wiki status`
-- `/qa-aist publish wiki plan`
-- `/qa-aist publish wiki apply`
-- `/qa-aist close-loop status`
-- `/qa-aist close-loop run-once`
-- `/qa-aist report status`
-- `/qa-aist report json`
-- `/qa-aist tracker plan-write`
+- `/quality-pilot help`
+- `/quality-pilot setup`
+- `/quality-pilot doctor`
+- `/quality-pilot issues sync`
+- `/quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]`
+- `/quality-pilot issues status`
+- `/quality-pilot issues show <issue_id>`
+- `/quality-pilot issues fix --all`
+- `/quality-pilot issues fix --issue <id>`
+- `/quality-pilot issues fix --issue <id> --push-pr`
+- `/quality-pilot cases generate --init`
+- `/quality-pilot cases generate --init --count 5`
+- `/quality-pilot cases generate --growing`
+- `/quality-pilot cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]`
+- `/quality-pilot cases review`
+- `/quality-pilot cases validate`
+- `/quality-pilot cases list`
+- `/quality-pilot cases run`
+- `/quality-pilot cases run <case_id>`
+- `/quality-pilot cases push-pr`
+- `/quality-pilot cases push-pr <case_id>`
+- `/quality-pilot publish wiki status`
+- `/quality-pilot publish wiki plan`
+- `/quality-pilot publish wiki apply`
+- `/quality-pilot close-loop status`
+- `/quality-pilot close-loop run-once`
+- `/quality-pilot report status`
+- `/quality-pilot report json`
+- `/quality-pilot tracker plan-write`
 
 Removed commands must not be run. If the user asks for `qa-test`, `fix-issues`, `issues dedupe`, `config`, legacy `publish plan/apply/status`, `sync-gitea`, `find-new-issues`, or `help <topic>`, run the dispatcher and report its `command_removed` replacement. Do not silently translate and execute old commands.
 
-## Required Behavior For Every `/qa-aist` Turn
+## Required Behavior For Every `/quality-pilot` Turn
 
-When the user invokes `/qa-aist <arguments>`, you must:
+When the user invokes `/quality-pilot <arguments>`, you must:
 
-1. Treat everything after `/qa-aist` as QA-AIST dispatcher arguments.
-2. Use the current product repository root as `--root`. Do not use the QA-AIST source checkout as root unless the user is working on QA-AIST itself.
+1. Treat everything after `/quality-pilot` as AI Quality Pilot dispatcher arguments.
+2. Use the current product repository root as `--root`. Do not use the AI Quality Pilot source checkout as root unless the user is working on AI Quality Pilot itself.
 3. Execute the dispatcher through the terminal. Do not answer from memory.
 4. Read the returned JSON.
 5. Reply primarily with the JSON `chat_response` field.
@@ -905,46 +905,46 @@ When the user invokes `/qa-aist <arguments>`, you must:
 7. If `chat_response` is missing, summarize `status`, `payload.status`, `payload.error`, `payload.message`, `latest_run_json`, `report_path`, and evidence paths.
 8. Preserve failures. If the dispatcher exits non-zero or emits invalid JSON, tell the user the exit code and useful stderr/stdout details.
 
-Hermes MCP rule: QA-AIST does not store Gitea/Redmine URLs, repo names, or token environment variables in `.qa-aist.yaml`. It relies on the user's Hermes session to provide MCP servers. At the start of setup/doctor, make the available server list visible to QA-AIST through `QA_AIST_HERMES_MCP_SERVERS=gitea,redmine` or the configured `.qa-aist-project/state/hermes-mcp/status.json`. If Gitea or Redmine MCP is missing or unknown, tell the user immediately and do not pretend remote sync/write is ready.
+Hermes MCP rule: AI Quality Pilot does not store Gitea/Redmine URLs, repo names, or token environment variables in `.quality-pilot.yaml`. It relies on the user's Hermes session to provide MCP servers. At the start of setup/doctor, make the available server list visible to AI Quality Pilot through `QUALITY_PILOT_HERMES_MCP_SERVERS=gitea,redmine` or the configured `.quality-pilot-project/state/hermes-mcp/status.json`. If Gitea or Redmine MCP is missing or unknown, tell the user immediately and do not pretend remote sync/write is ready.
 
-Gitea MCP rule: if the product repo config uses `tracker.provider: hermes_mcp`, you may use Hermes' configured Gitea MCP tooling for three narrow operations only: read issue data before `/qa-aist issues sync`, create Gitea issues after `/qa-aist issues sync --redmine-issues ...` returns `status: needs_mcp_apply` with a gated `mcp_issue_write_request`, and update the configured Wiki page after `/qa-aist publish wiki apply` returns `status: needs_mcp_apply` with a gated `mcp_write_request`. Do not treat the MCP read itself as a completed sync.
+Gitea MCP rule: if the product repo config uses `tracker.provider: hermes_mcp`, you may use Hermes' configured Gitea MCP tooling for three narrow operations only: read issue data before `/quality-pilot issues sync`, create Gitea issues after `/quality-pilot issues sync --redmine-issues ...` returns `status: needs_mcp_apply` with a gated `mcp_issue_write_request`, and update the configured Wiki page after `/quality-pilot publish wiki apply` returns `status: needs_mcp_apply` with a gated `mcp_write_request`. Do not treat the MCP read itself as a completed sync.
 
-Gitea MCP snapshot workflow (when the user confirms, chooses a suggested sync option, or invokes `/qa-aist issues sync` after `gitea_mcp_snapshot_missing`):
+Gitea MCP snapshot workflow (when the user confirms, chooses a suggested sync option, or invokes `/quality-pilot issues sync` after `gitea_mcp_snapshot_missing`):
 1. Use Gitea MCP read-only pagination for the current Hermes product repository context, typically `state=all` and `perPage=50`, until an empty page is returned.
 2. Preserve the MCP payload shape as JSON and write it to `tracker.mcp.gitea_issues_json`, creating parent directories if needed.
-3. If the MCP list response includes pull requests mixed with issues, keep only real Gitea issues before writing the QA-AIST `issues` list. A reliable guard is `html_url` containing `/issues/` and excluding `/pulls/`.
-4. Immediately run `/qa-aist issues sync` via the dispatcher command.
+3. If the MCP list response includes pull requests mixed with issues, keep only real Gitea issues before writing the AI Quality Pilot `issues` list. A reliable guard is `html_url` containing `/issues/` and excluding `/pulls/`.
+4. Immediately run `/quality-pilot issues sync` via the dispatcher command.
 5. In this snapshot workflow, never use Gitea MCP for issue comments, issue creation, PRs, or arbitrary remote writes.
 
-Gitea MCP Wiki write workflow (only after `/qa-aist publish wiki apply` returns `status: needs_mcp_apply`):
+Gitea MCP Wiki write workflow (only after `/quality-pilot publish wiki apply` returns `status: needs_mcp_apply`):
 1. Read `payload.mcp_write_request`.
-2. Confirm the request schema is `qa-aist.gitea-mcp-wiki-write-request.v1`, operation is `gitea.wiki.update_page`, and `safety.allowed_targets` is only `wiki`.
+2. Confirm the request schema is `quality-pilot.gitea-mcp-wiki-write-request.v1`, operation is `gitea.wiki.update_page`, and `safety.allowed_targets` is only `wiki`.
 3. Call the configured Hermes Gitea MCP wiki update/write-page tool for the exact `repo`, `page`, `body`, and `message` in that request only.
 4. Write the MCP tool result JSON to `payload.mcp_write_result_path`.
-5. Treat this as the same `/qa-aist publish wiki apply` user flow. Report the MCP result and suggest `/qa-aist publish wiki status`; do not expose a second completion command to the user.
+5. Treat this as the same `/quality-pilot publish wiki apply` user flow. Report the MCP result and suggest `/quality-pilot publish wiki status`; do not expose a second completion command to the user.
 
-Gitea MCP Redmine issue creation workflow (only after `/qa-aist issues sync --redmine-issues ...` returns `status: needs_mcp_apply`):
+Gitea MCP Redmine issue creation workflow (only after `/quality-pilot issues sync --redmine-issues ...` returns `status: needs_mcp_apply`):
 1. Read `payload.mcp_issue_write_request`.
-2. Confirm the request schema is `qa-aist.gitea-mcp-issue-write-request.v1`, operation is `gitea.issue.sync_from_redmine`, and `safety.allowed_targets` is only `issues`.
+2. Confirm the request schema is `quality-pilot.gitea-mcp-issue-write-request.v1`, operation is `gitea.issue.sync_from_redmine`, and `safety.allowed_targets` is only `issues`.
 3. For each action, confirm `operation` is exactly `gitea.issue.create` and `write_gate_result.allowed` is true.
 4. Call the configured Hermes Gitea MCP issue-create tool for each action's `title`, `body`, and `labels` in the current product repo context.
 5. Write the combined MCP tool results JSON to `payload.mcp_issue_write_result_path`.
-6. Treat this as the same `/qa-aist issues sync --redmine-issues ...` user flow. Report created issue IDs/URLs, then suggest `/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]`.
+6. Treat this as the same `/quality-pilot issues sync --redmine-issues ...` user flow. Report created issue IDs/URLs, then suggest `/quality-pilot cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]`.
 7. Do not create comments, close issues, reopen issues, edit arbitrary issues, or create PRs in this workflow.
 
-Redmine MCP rule: QA-AIST V1 reads Redmine only through a Hermes Redmine MCP snapshot. When `/qa-aist doctor` reports missing Redmine MCP readiness, use Hermes Redmine MCP to read the requested IDs and write the configured snapshot path. Then run `/qa-aist issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]` to create local Redmine mirrors and gated Gitea issue-create requests; if it returns `needs_mcp_apply`, execute the Gitea MCP Redmine issue creation workflow immediately. Run `/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]` only when testcase contracts are needed.
+Redmine MCP rule: AI Quality Pilot V1 reads Redmine only through a Hermes Redmine MCP snapshot. When `/quality-pilot doctor` reports missing Redmine MCP readiness, use Hermes Redmine MCP to read the requested IDs and write the configured snapshot path. Then run `/quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]` to create local Redmine mirrors and gated Gitea issue-create requests; if it returns `needs_mcp_apply`, execute the Gitea MCP Redmine issue creation workflow immediately. Run `/quality-pilot cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]` only when testcase contracts are needed.
 
 Reference: see `references/gitea-mcp-snapshot.md` for the MCP snapshot pitfall and recommended JSON shape.
 
-Setup rule: `/qa-aist setup` always writes `tracker.provider: hermes_mcp` plus `tracker.mcp.*` local handoff paths. It may report the detected git remote in JSON for human context, but it must not write Gitea repo URL, repo name, token env, or HTTP credentials into `.qa-aist.yaml`.
+Setup rule: `/quality-pilot setup` always writes `tracker.provider: hermes_mcp` plus `tracker.mcp.*` local handoff paths. It may report the detected git remote in JSON for human context, but it must not write Gitea repo URL, repo name, token env, or HTTP credentials into `.quality-pilot.yaml`.
 
 ## Interactive Guidance Model
 
-Do not behave like a passive command relay. After every QA-AIST turn, guide the user toward the next useful step in Traditional Chinese.
+Do not behave like a passive command relay. After every AI Quality Pilot turn, guide the user toward the next useful step in Traditional Chinese.
 
 Hermes clarify / needs-input contract:
 
-- `payload.input_required: true` means QA-AIST needs a user answer before the workflow should continue.
+- `payload.input_required: true` means AI Quality Pilot needs a user answer before the workflow should continue.
 - `payload.interaction.type: "needs_input"` points Hermes to the interaction type.
 - `payload.interaction.handler: "clarify"` says the Hermes agent should call `clarify`, not invent a custom prompt flow.
 - `payload.hermes_needs_input.preferred_mechanism` is `clarify`.
@@ -957,7 +957,7 @@ Use this pattern:
 
 1. Briefly explain what just happened.
 2. If the JSON payload contains `next_actions`, present them as a small numbered menu.
-3. Ask the user to choose a number, approve the recommended action, or type another `/qa-aist ...` command.
+3. Ask the user to choose a number, approve the recommended action, or type another `/quality-pilot ...` command.
 4. If the next action is safe and read-only, you may offer to run it immediately.
 5. If the next action writes files, runs tests, uses Gitea MCP, publishes to Gitea, pushes a branch, or creates a PR, ask for confirmation first.
 6. If the command returns `payload.hermes_needs_input`, call `clarify` for the listed category-level questions in Traditional Chinese and wait for the user's answer.
@@ -966,79 +966,79 @@ Preferred menu style:
 
 ```text
 下一步可以選：
-1. 執行健康檢查：/qa-aist doctor
-2. 同步 Gitea issues：/qa-aist issues sync（需確認）
-3. 首次建立 SWQA cases：/qa-aist cases generate --init（需確認）
+1. 執行健康檢查：/quality-pilot doctor
+2. 同步 Gitea issues：/quality-pilot issues sync（需確認）
+3. 首次建立 SWQA cases：/quality-pilot cases generate --init（需確認）
 
-請回覆 1、2、3，或直接輸入下一個 /qa-aist ... 指令。
+請回覆 1、2、3，或直接輸入下一個 /quality-pilot ... 指令。
 ```
 
 Recommended interaction by situation:
 
-- After `/qa-aist setup`: suggest `/qa-aist doctor`, then `/qa-aist issues sync`.
-- If setup reports `auto_configured_mcp: true`, explain that QA-AIST is configured for Hermes MCP and the remaining step is `doctor` confirming Hermes Gitea/Redmine MCP availability.
-- After `/qa-aist doctor` warning: explain the warning and suggest the smallest check that resolves it.
-- After `gitea_mcp_snapshot_missing`: offer to use Hermes Gitea MCP read-only fetch, write the snapshot, then rerun `/qa-aist issues sync`.
-- After `/qa-aist issues sync`: explain that sync includes dedupe/prune, then suggest `/qa-aist issues status` and `/qa-aist cases generate --growing`.
-- If the user asks for first-time test ideas or has no cases yet, run `/qa-aist cases generate --init`; it acts as an opinionated SWQA engineer, scans README, code, package metadata, existing runners, existing cases, and project rules, then creates executable safe-probe cases across functional, positive, negative, boundary, invalid-input, side-effect-safe, and stress/timeout-risk coverage. Every INIT case must have `commands[].run`; it must not ask case-by-case confirmation questions.
-- `/qa-aist cases generate --init` is already fast/high-standard autonomous mode.
-- If the user wants a smaller first batch, run `/qa-aist cases generate --init --count 5`.
-- If the user asks for follow-up ideas after issues/PRs/runs changed, run `/qa-aist cases generate --growing`; it creates incremental executable growth cases from repo, issues, PR references, latest run, reports, existing cases, and runners.
-- If the user names Redmine issue IDs and asks to sync or record issues, run `/qa-aist issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]`; Hermes supplies the MCP snapshot, QA-AIST validates it and writes local Redmine mirrors plus gated Gitea issue candidates.
-- If the user names one or more Redmine issue IDs and asks for testcases, run `/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]`; Hermes supplies the MCP snapshot, QA-AIST directly uses those IDs and writes linked executable case contracts. Do not create a Gitea issue plan in this command.
-- If the user types bare `/qa-aist cases generate`, run the dispatcher and present its mode-selection error; do not silently choose a mode.
-- After `cases generate --init` or `cases generate --growing`, assume the generated cases are runnable safe probes unless QA-AIST explicitly returns `payload.hermes_needs_input`. If needs-input exists, call `clarify` only for category-level blockers. Do not discuss each generated case one by one unless the user explicitly asks.
-- After `/qa-aist cases list`: suggest running one selected case first, then all cases.
-- After `cases generate --init` or `cases generate --growing`: QA-AIST auto-plans the Wiki draft/missing-input status. Suggest `/qa-aist publish wiki status`.
-- After a test run: QA-AIST auto-plans or applies the Wiki test-result status. Suggest `/qa-aist publish wiki status` and `/qa-aist report status`.
-- If the user explicitly wants to update only the Wiki, use `/qa-aist publish wiki plan`, then `/qa-aist publish wiki apply` after confirmation. QA-AIST returns a gated `mcp_write_request`; Hermes Gitea MCP performs the Wiki update in the same user flow. This path must never create issue comments, new issues, or PRs.
-- If `/qa-aist publish wiki apply` returns `status: needs_mcp_apply`, read `payload.mcp_write_request`. Call the configured Hermes Gitea MCP wiki update/write-page tool for the request's `page`, `body`, and `message` in the current product repo context; if `repo` is present, enforce it exactly. Write the MCP tool result JSON to `payload.mcp_write_result_path`, then summarize the result and suggest `/qa-aist publish wiki status`.
-- If `/qa-aist issues sync --redmine-issues ...` returns `status: needs_mcp_apply`, read `payload.mcp_issue_write_request`. Call the configured Hermes Gitea MCP issue-create tool for each gated action, write the result JSON to `payload.mcp_issue_write_result_path`, then summarize created issue IDs/URLs and suggest `/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]`.
-- Before `/qa-aist issues fix --issue <id> --push-pr` or `/qa-aist cases push-pr <case_id>`: ask for explicit confirmation and summarize what will be written remotely.
+- After `/quality-pilot setup`: suggest `/quality-pilot doctor`, then `/quality-pilot issues sync`.
+- If setup reports `auto_configured_mcp: true`, explain that AI Quality Pilot is configured for Hermes MCP and the remaining step is `doctor` confirming Hermes Gitea/Redmine MCP availability.
+- After `/quality-pilot doctor` warning: explain the warning and suggest the smallest check that resolves it.
+- After `gitea_mcp_snapshot_missing`: offer to use Hermes Gitea MCP read-only fetch, write the snapshot, then rerun `/quality-pilot issues sync`.
+- After `/quality-pilot issues sync`: explain that sync includes dedupe/prune, then suggest `/quality-pilot issues status` and `/quality-pilot cases generate --growing`.
+- If the user asks for first-time test ideas or has no cases yet, run `/quality-pilot cases generate --init`; it acts as an opinionated SWQA engineer, scans README, code, package metadata, existing runners, existing cases, and project rules, then creates executable safe-probe cases across functional, positive, negative, boundary, invalid-input, side-effect-safe, and stress/timeout-risk coverage. Every INIT case must have `commands[].run`; it must not ask case-by-case confirmation questions.
+- `/quality-pilot cases generate --init` is already fast/high-standard autonomous mode.
+- If the user wants a smaller first batch, run `/quality-pilot cases generate --init --count 5`.
+- If the user asks for follow-up ideas after issues/PRs/runs changed, run `/quality-pilot cases generate --growing`; it creates incremental executable growth cases from repo, issues, PR references, latest run, reports, existing cases, and runners.
+- If the user names Redmine issue IDs and asks to sync or record issues, run `/quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]`; Hermes supplies the MCP snapshot, AI Quality Pilot validates it and writes local Redmine mirrors plus gated Gitea issue candidates.
+- If the user names one or more Redmine issue IDs and asks for testcases, run `/quality-pilot cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]`; Hermes supplies the MCP snapshot, AI Quality Pilot directly uses those IDs and writes linked executable case contracts. Do not create a Gitea issue plan in this command.
+- If the user types bare `/quality-pilot cases generate`, run the dispatcher and present its mode-selection error; do not silently choose a mode.
+- After `cases generate --init` or `cases generate --growing`, assume the generated cases are runnable safe probes unless AI Quality Pilot explicitly returns `payload.hermes_needs_input`. If needs-input exists, call `clarify` only for category-level blockers. Do not discuss each generated case one by one unless the user explicitly asks.
+- After `/quality-pilot cases list`: suggest running one selected case first, then all cases.
+- After `cases generate --init` or `cases generate --growing`: AI Quality Pilot auto-plans the Wiki draft/missing-input status. Suggest `/quality-pilot publish wiki status`.
+- After a test run: AI Quality Pilot auto-plans or applies the Wiki test-result status. Suggest `/quality-pilot publish wiki status` and `/quality-pilot report status`.
+- If the user explicitly wants to update only the Wiki, use `/quality-pilot publish wiki plan`, then `/quality-pilot publish wiki apply` after confirmation. AI Quality Pilot returns a gated `mcp_write_request`; Hermes Gitea MCP performs the Wiki update in the same user flow. This path must never create issue comments, new issues, or PRs.
+- If `/quality-pilot publish wiki apply` returns `status: needs_mcp_apply`, read `payload.mcp_write_request`. Call the configured Hermes Gitea MCP wiki update/write-page tool for the request's `page`, `body`, and `message` in the current product repo context; if `repo` is present, enforce it exactly. Write the MCP tool result JSON to `payload.mcp_write_result_path`, then summarize the result and suggest `/quality-pilot publish wiki status`.
+- If `/quality-pilot issues sync --redmine-issues ...` returns `status: needs_mcp_apply`, read `payload.mcp_issue_write_request`. Call the configured Hermes Gitea MCP issue-create tool for each gated action, write the result JSON to `payload.mcp_issue_write_result_path`, then summarize created issue IDs/URLs and suggest `/quality-pilot cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]`.
+- Before `/quality-pilot issues fix --issue <id> --push-pr` or `/quality-pilot cases push-pr <case_id>`: ask for explicit confirmation and summarize what will be written remotely.
 
 Use this command shape:
 
 ```bash
-{runner_command} --root "$PWD" /qa-aist <arguments>
+{runner_command} --root "$PWD" /quality-pilot <arguments>
 ```
 
-`$PWD` must be the user's product repository root. If the active root is unclear, inspect the current workspace/cwd. If it is still unclear, ask the user for the product repo path instead of creating `.qa-aist-project` in the wrong directory.
+`$PWD` must be the user's product repository root. If the active root is unclear, inspect the current workspace/cwd. If it is still unclear, ask the user for the product repo path instead of creating `.quality-pilot-project` in the wrong directory.
 
 Examples:
 
 ```bash
-{runner_command} --root "$PWD" /qa-aist help
-{runner_command} --root "$PWD" /qa-aist setup
-{runner_command} --root "$PWD" /qa-aist doctor
-{runner_command} --root "$PWD" /qa-aist issues sync
-{runner_command} --root "$PWD" /qa-aist issues sync --redmine-issues 144780 144693
-{runner_command} --root "$PWD" /qa-aist issues status
-{runner_command} --root "$PWD" /qa-aist issues fix --issue 123 --push-pr
-{runner_command} --root "$PWD" /qa-aist cases generate --init
-{runner_command} --root "$PWD" /qa-aist cases generate --init --count 5
-{runner_command} --root "$PWD" /qa-aist cases generate --growing
-{runner_command} --root "$PWD" /qa-aist cases generate --redmine-issues 144780 144693
-{runner_command} --root "$PWD" /qa-aist cases list
-{runner_command} --root "$PWD" /qa-aist cases run EXAMPLE-001
-{runner_command} --root "$PWD" /qa-aist publish wiki status
-{runner_command} --root "$PWD" /qa-aist publish wiki plan
-{runner_command} --root "$PWD" /qa-aist publish wiki apply
-{runner_command} --root "$PWD" /qa-aist close-loop run-once
-{runner_command} --root "$PWD" /qa-aist report status
+{runner_command} --root "$PWD" /quality-pilot help
+{runner_command} --root "$PWD" /quality-pilot setup
+{runner_command} --root "$PWD" /quality-pilot doctor
+{runner_command} --root "$PWD" /quality-pilot issues sync
+{runner_command} --root "$PWD" /quality-pilot issues sync --redmine-issues 144780 144693
+{runner_command} --root "$PWD" /quality-pilot issues status
+{runner_command} --root "$PWD" /quality-pilot issues fix --issue 123 --push-pr
+{runner_command} --root "$PWD" /quality-pilot cases generate --init
+{runner_command} --root "$PWD" /quality-pilot cases generate --init --count 5
+{runner_command} --root "$PWD" /quality-pilot cases generate --growing
+{runner_command} --root "$PWD" /quality-pilot cases generate --redmine-issues 144780 144693
+{runner_command} --root "$PWD" /quality-pilot cases list
+{runner_command} --root "$PWD" /quality-pilot cases run EXAMPLE-001
+{runner_command} --root "$PWD" /quality-pilot publish wiki status
+{runner_command} --root "$PWD" /quality-pilot publish wiki plan
+{runner_command} --root "$PWD" /quality-pilot publish wiki apply
+{runner_command} --root "$PWD" /quality-pilot close-loop run-once
+{runner_command} --root "$PWD" /quality-pilot report status
 ```
 
 ## Safety Rules
 
-- Do not directly write Gitea comments, close/reopen/edit issues, or PRs. New Gitea issue creation is allowed only through the gated MCP handoff returned by `/qa-aist issues sync --redmine-issues ...` with `status: needs_mcp_apply`. Wiki remote writes are allowed only by QA-AIST auto-sync, `/qa-aist publish wiki apply`, or the gated MCP handoff returned by `/qa-aist publish wiki apply` with `status: needs_mcp_apply`. Product PR creation remains behind `/qa-aist issues fix --issue <id> --push-pr` or `/qa-aist cases push-pr <case_id>`.
+- Do not directly write Gitea comments, close/reopen/edit issues, or PRs. New Gitea issue creation is allowed only through the gated MCP handoff returned by `/quality-pilot issues sync --redmine-issues ...` with `status: needs_mcp_apply`. Wiki remote writes are allowed only by AI Quality Pilot auto-sync, `/quality-pilot publish wiki apply`, or the gated MCP handoff returned by `/quality-pilot publish wiki apply` with `status: needs_mcp_apply`. Product PR creation remains behind `/quality-pilot issues fix --issue <id> --push-pr` or `/quality-pilot cases push-pr <case_id>`.
 - Automatic Wiki sync must only update the configured Wiki page. It must not create issue comments, create issues, or open PRs.
-- Do not use Gitea MCP for issue comments, issue edits, issue close/reopen, PR creation, or arbitrary writes. In QA-AIST V1, Hermes MCP may create new issues only from the gated `mcp_issue_write_request` returned by `/qa-aist issues sync --redmine-issues ...`, and may update only the configured Wiki page from `/qa-aist publish wiki apply`.
-- Do not reorder the QA-AIST close-loop pipeline.
+- Do not use Gitea MCP for issue comments, issue edits, issue close/reopen, PR creation, or arbitrary writes. In AI Quality Pilot V1, Hermes MCP may create new issues only from the gated `mcp_issue_write_request` returned by `/quality-pilot issues sync --redmine-issues ...`, and may update only the configured Wiki page from `/quality-pilot publish wiki apply`.
+- Do not reorder the AI Quality Pilot close-loop pipeline.
 - Do not invent evidence paths.
 - Do not print raw secrets.
-- Do not run arbitrary shell commands assembled from chat. The only command you should run for `/qa-aist ...` is the dispatcher command above with the user's QA-AIST arguments.
+- Do not run arbitrary shell commands assembled from chat. The only command you should run for `/quality-pilot ...` is the dispatcher command above with the user's AI Quality Pilot arguments.
 - Do not bypass `write_gate`, issue sync, duplicate checks, or case contracts, even if the user asks you to write tracker output directly.
-- `/qa-aist cases generate --init` and `--growing` should produce executable side-effect-safe probes. If they return `payload.hermes_needs_input`, call `clarify` for category-level blocking inputs in Traditional Chinese. Do not force the user to approve test cases one by one.
-- If you open a separate growth session/agent, it may only produce candidate analysis for QA-AIST to validate; it must not directly edit case YAML, tracker, wiki, PRs, or reports.
+- `/quality-pilot cases generate --init` and `--growing` should produce executable side-effect-safe probes. If they return `payload.hermes_needs_input`, call `clarify` for category-level blocking inputs in Traditional Chinese. Do not force the user to approve test cases one by one.
+- If you open a separate growth session/agent, it may only produce candidate analysis for AI Quality Pilot to validate; it must not directly edit case YAML, tracker, wiki, PRs, or reports.
 - If the user types a removed command, report `command_removed` and its replacement.
 
 ## Expected Human Reply
@@ -1046,56 +1046,56 @@ Examples:
 Prefer concise replies like:
 
 ```text
-qa-aist> PASS
+quality-pilot> PASS
          cases: 1
          runners: 1
-         latest_run_json: .qa-aist-project/state/latest-run.json
-         report: .qa-aist-project/reports/status.md
+         latest_run_json: .quality-pilot-project/state/latest-run.json
+         report: .quality-pilot-project/reports/status.md
 ```
 
-If the result is blocked, failed, or invalid, include the reason and the next actionable command, for example `/qa-aist help`, `/qa-aist setup`, `/qa-aist doctor`, or `/qa-aist cases list`.
+If the result is blocked, failed, or invalid, include the reason and the next actionable command, for example `/quality-pilot help`, `/quality-pilot setup`, `/quality-pilot doctor`, or `/quality-pilot cases list`.
 
 When `next_actions` exists, do not stop at the status line. Show a compact menu and invite the user to choose. The goal is an interactive QA assistant, not a silent JSON printer.
 
 ## If The Dispatcher Is Missing Or Broken
 
-If `{runner_command}` is not found, tell the user that the console script may not be installed. Recommend reinstalling this skill from the QA-AIST source checkout with an explicit runner command:
+If `{runner_command}` is not found, tell the user that the console script may not be installed. Recommend reinstalling this skill from the AI Quality Pilot source checkout with an explicit runner command:
 
 ```bash
-PYTHONPATH=/path/to/QA-AIST/src python3 -m qa_aist.hermes install-skill --force --runner-command "/usr/bin/env PYTHONPATH=/path/to/QA-AIST/src python3 -m qa_aist.hermes"
+PYTHONPATH=/path/to/AI Quality Pilot/src python3 -m quality_pilot.hermes install-skill --force --runner-command "/usr/bin/env PYTHONPATH=/path/to/AI Quality Pilot/src python3 -m quality_pilot.hermes"
 ```
 
 If direct dispatcher verification is needed, tell the user to run this from the product repo root:
 
 ```bash
-PYTHONPATH=/path/to/QA-AIST/src python3 -m qa_aist.hermes --root "$PWD" /qa-aist doctor
+PYTHONPATH=/path/to/AI Quality Pilot/src python3 -m quality_pilot.hermes --root "$PWD" /quality-pilot doctor
 ```
 """
 
 
-def build_gitea_mcp_snapshot_reference(*, runner_command: str = "qa-aist-hermes") -> str:
-    return f"""# Gitea MCP snapshot for QA-AIST issue sync
+def build_gitea_mcp_snapshot_reference(*, runner_command: str = "quality-pilot-hermes") -> str:
+    return f"""# Gitea MCP snapshot for AI Quality Pilot issue sync
 
-Use this when QA-AIST reports `gitea_mcp_snapshot_missing` and the product config has `tracker.provider: hermes_mcp`.
+Use this when AI Quality Pilot reports `gitea_mcp_snapshot_missing` and the product config has `tracker.provider: hermes_mcp`.
 
 ## Workflow
 
 1. Use the current Hermes product repository context.
 2. Read pages with Gitea MCP using `state=all`, `perPage=50`, incrementing `page` until the returned page is empty.
-3. Write the local snapshot to the configured `tracker.mcp.gitea_issues_json` path, usually `.qa-aist-project/state/gitea-mcp/issues.json`.
+3. Write the local snapshot to the configured `tracker.mcp.gitea_issues_json` path, usually `.quality-pilot-project/state/gitea-mcp/issues.json`.
 4. Run the dispatcher command from the product repo root:
-   `{runner_command} --root "$PWD" /qa-aist issues sync`
+   `{runner_command} --root "$PWD" /quality-pilot issues sync`
 5. Report the dispatcher `chat_response`; do not treat the MCP read itself as a completed sync.
 
 ## Pitfall: MCP issue list may include PRs
 
-Some Gitea MCP `list_issues` responses can include pull requests as well as issues. QA-AIST's HTTP client uses `type=issues`, so the MCP snapshot should avoid turning PRs into issue mirrors.
+Some Gitea MCP `list_issues` responses can include pull requests as well as issues. AI Quality Pilot's HTTP client uses `type=issues`, so the MCP snapshot should avoid turning PRs into issue mirrors.
 
 Recommended safe shape:
 
 ```json
 {{
-  "schema": "qa-aist.gitea-mcp-issues.v1",
+  "schema": "quality-pilot.gitea-mcp-issues.v1",
   "repo": "OWNER/REPO",
   "source_tool": "mcp_gitea_list_issues",
   "state": "all",
@@ -1122,9 +1122,9 @@ Filtering rule:
 
 - Keep `html_url` containing `/issues/`.
 - Exclude `html_url` containing `/pulls/` or entries carrying explicit PR markers.
-- Preserve real issue bodies/comments when available; closed issues may be minimal because QA-AIST only needs them to remove stale mirrors.
+- Preserve real issue bodies/comments when available; closed issues may be minimal because AI Quality Pilot only needs them to remove stale mirrors.
 
-Remote write rule: never use Gitea MCP for comments, issue edits, issue close/reopen, PRs, or arbitrary writes in QA-AIST. Gitea MCP may create new issues only after `/qa-aist issues sync --redmine-issues ...` returns a gated `mcp_issue_write_request`, and may update only the configured Wiki page after `/qa-aist publish wiki apply` returns a gated `mcp_write_request`. Write MCP result JSON to the requested path and report it as the same user flow. Product PR creation is a separate explicit workflow and must not be folded into Wiki apply or Redmine sync.
+Remote write rule: never use Gitea MCP for comments, issue edits, issue close/reopen, PRs, or arbitrary writes in AI Quality Pilot. Gitea MCP may create new issues only after `/quality-pilot issues sync --redmine-issues ...` returns a gated `mcp_issue_write_request`, and may update only the configured Wiki page after `/quality-pilot publish wiki apply` returns a gated `mcp_write_request`. Write MCP result JSON to the requested path and report it as the same user flow. Product PR creation is a separate explicit workflow and must not be folded into Wiki apply or Redmine sync.
 """
 
 
@@ -1132,7 +1132,7 @@ def install_skill(
     skills_dir: str | Path | None = None,
     *,
     force: bool = False,
-    runner_command: str = "qa-aist-hermes",
+    runner_command: str = "quality-pilot-hermes",
 ) -> dict[str, Any]:
     base = Path(skills_dir).expanduser().resolve() if skills_dir else default_skills_dir().expanduser().resolve()
     skill_dir = base / HERMES_SKILL_NAME
@@ -1141,7 +1141,7 @@ def install_skill(
         return {
             "status": "error",
             "error": "skill_exists",
-            "message": "Hermes QA-AIST skill already exists. Re-run with --force to overwrite.",
+            "message": "Hermes AI Quality Pilot skill already exists. Re-run with --force to overwrite.",
             "skills_dir": str(base),
             "skill_dir": str(skill_dir),
             "skill_path": str(skill_path),
@@ -1172,7 +1172,7 @@ def skill_status(skills_dir: str | Path | None = None) -> dict[str, Any]:
     valid = False
     if exists:
         text = skill_path.read_text(encoding="utf-8")
-        valid = "name: qa-aist" in text and "QA-AIST Hermes Skill" in text
+        valid = "name: quality-pilot" in text and "AI Quality Pilot Hermes Skill" in text
     return {
         "status": "ok" if valid else "missing",
         "skills_dir": str(base),
@@ -1195,38 +1195,38 @@ def _help_payload(engine_argv: list[str]) -> dict[str, Any] | None:
 
 def _overview_help_payload() -> dict[str, Any]:
     commands = [
-        {"command": "/qa-aist help", "purpose": "顯示這份中文手冊"},
-        {"command": "/qa-aist setup", "purpose": "在目前產品 repo 建立 .qa-aist.yaml 與 .qa-aist-project"},
-        {"command": "/qa-aist doctor", "purpose": "檢查設定、Hermes MCP、Gitea/Redmine readiness、runner、secret reference"},
-        {"command": "/qa-aist issues sync", "purpose": "同步 Gitea issues，內建 dedupe、prune 與遠端 duplicate gated action plan"},
-        {"command": "/qa-aist issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]", "purpose": "透過 Hermes Redmine MCP snapshot 同步 Redmine mirror，並經 gate 用 Gitea MCP 建立 issues"},
-        {"command": "/qa-aist issues status", "purpose": "查看 issue sync、duplicates、fix queue、PR/handoff 狀態"},
-        {"command": "/qa-aist issues show <issue_id>", "purpose": "查看單一 issue mirror"},
-        {"command": "/qa-aist issues fix --all", "purpose": "依 open issue queue 逐一修復，遇到 gate/block 停下"},
-        {"command": "/qa-aist issues fix --issue <id>", "purpose": "對指定 issue 做 preflight、handoff、linked case/evidence 檢查"},
-        {"command": "/qa-aist issues fix --issue <id> --push-pr", "purpose": "修復與 gate 通過後建立產品修復 PR"},
-        {"command": "/qa-aist cases generate --init", "purpose": "首次全 repo SWQA 建案，依 README/code/metadata 產生可執行 safe-probe cases"},
-        {"command": "/qa-aist cases generate --init --count 5", "purpose": "限制初始建案第一批 case 數量"},
-        {"command": "/qa-aist cases generate --growing", "purpose": "依最新 issues/PR/latest-run/reports 狀態擴散 executable cases"},
-        {"command": "/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]", "purpose": "透過 Hermes Redmine MCP snapshot 生成 linked cases"},
-        {"command": "/qa-aist cases review", "purpose": "查看仍需人工補強的 drafts；通常 init/growing 產物可直接 validate/dry-run"},
-        {"command": "/qa-aist cases validate", "purpose": "驗證 case YAML 是否可執行"},
-        {"command": "/qa-aist cases list", "purpose": "列出可以跑的測試 case"},
-        {"command": "/qa-aist cases run <case_id>", "purpose": "只跑一個 case，最適合第一次測試"},
-        {"command": "/qa-aist cases run", "purpose": "跑全部 case"},
-        {"command": "/qa-aist cases push-pr <case_id>", "purpose": "依 failing case/evidence 建立產品修復 PR"},
-        {"command": "/qa-aist publish wiki status", "purpose": "查看自動 Wiki 狀態同步結果"},
-        {"command": "/qa-aist publish wiki plan", "purpose": "手動產生 Wiki-only gated plan"},
-        {"command": "/qa-aist publish wiki apply", "purpose": "gate 通過後只更新 Gitea Wiki；MCP backend 會產生 Hermes MCP write request"},
-        {"command": "/qa-aist close-loop status", "purpose": "查看 Observe/Normalize/Execute/Triage/Publish/Evolve/Prune health dashboard"},
-        {"command": "/qa-aist close-loop run-once", "purpose": "跑完整 pipeline：檢查、測試、write gate、報告、保存 state"},
-        {"command": "/qa-aist report status", "purpose": "產生 Markdown report"},
-        {"command": "/qa-aist report json", "purpose": "輸出 latest run JSON"},
-        {"command": "/qa-aist tracker plan-write", "purpose": "相容舊版：只檢查單一 tracker write gate"},
+        {"command": "/quality-pilot help", "purpose": "顯示這份中文手冊"},
+        {"command": "/quality-pilot setup", "purpose": "在目前產品 repo 建立 .quality-pilot.yaml 與 .quality-pilot-project"},
+        {"command": "/quality-pilot doctor", "purpose": "檢查設定、Hermes MCP、Gitea/Redmine readiness、runner、secret reference"},
+        {"command": "/quality-pilot issues sync", "purpose": "同步 Gitea issues，內建 dedupe、prune 與遠端 duplicate gated action plan"},
+        {"command": "/quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]", "purpose": "透過 Hermes Redmine MCP snapshot 同步 Redmine mirror，並經 gate 用 Gitea MCP 建立 issues"},
+        {"command": "/quality-pilot issues status", "purpose": "查看 issue sync、duplicates、fix queue、PR/handoff 狀態"},
+        {"command": "/quality-pilot issues show <issue_id>", "purpose": "查看單一 issue mirror"},
+        {"command": "/quality-pilot issues fix --all", "purpose": "依 open issue queue 逐一修復，遇到 gate/block 停下"},
+        {"command": "/quality-pilot issues fix --issue <id>", "purpose": "對指定 issue 做 preflight、handoff、linked case/evidence 檢查"},
+        {"command": "/quality-pilot issues fix --issue <id> --push-pr", "purpose": "修復與 gate 通過後建立產品修復 PR"},
+        {"command": "/quality-pilot cases generate --init", "purpose": "首次全 repo SWQA 建案，依 README/code/metadata 產生可執行 safe-probe cases"},
+        {"command": "/quality-pilot cases generate --init --count 5", "purpose": "限制初始建案第一批 case 數量"},
+        {"command": "/quality-pilot cases generate --growing", "purpose": "依最新 issues/PR/latest-run/reports 狀態擴散 executable cases"},
+        {"command": "/quality-pilot cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]", "purpose": "透過 Hermes Redmine MCP snapshot 生成 linked cases"},
+        {"command": "/quality-pilot cases review", "purpose": "查看仍需人工補強的 drafts；通常 init/growing 產物可直接 validate/dry-run"},
+        {"command": "/quality-pilot cases validate", "purpose": "驗證 case YAML 是否可執行"},
+        {"command": "/quality-pilot cases list", "purpose": "列出可以跑的測試 case"},
+        {"command": "/quality-pilot cases run <case_id>", "purpose": "只跑一個 case，最適合第一次測試"},
+        {"command": "/quality-pilot cases run", "purpose": "跑全部 case"},
+        {"command": "/quality-pilot cases push-pr <case_id>", "purpose": "依 failing case/evidence 建立產品修復 PR"},
+        {"command": "/quality-pilot publish wiki status", "purpose": "查看自動 Wiki 狀態同步結果"},
+        {"command": "/quality-pilot publish wiki plan", "purpose": "手動產生 Wiki-only gated plan"},
+        {"command": "/quality-pilot publish wiki apply", "purpose": "gate 通過後只更新 Gitea Wiki；MCP backend 會產生 Hermes MCP write request"},
+        {"command": "/quality-pilot close-loop status", "purpose": "查看 Observe/Normalize/Execute/Triage/Publish/Evolve/Prune health dashboard"},
+        {"command": "/quality-pilot close-loop run-once", "purpose": "跑完整 pipeline：檢查、測試、write gate、報告、保存 state"},
+        {"command": "/quality-pilot report status", "purpose": "產生 Markdown report"},
+        {"command": "/quality-pilot report json", "purpose": "輸出 latest run JSON"},
+        {"command": "/quality-pilot tracker plan-write", "purpose": "相容舊版：只檢查單一 tracker write gate"},
     ]
     return {
         "status": "ok",
-        "tool": "qa-aist",
+        "tool": "quality-pilot",
         "command_group": "help",
         "topic": "overview",
         "language": "zh-Hant",
@@ -1239,21 +1239,21 @@ def _overview_help_text(commands: list[dict[str, str]]) -> str:
     command_lines = [f"- `{item['command']}`：{item['purpose']}" for item in commands]
     return "\n".join(
         [
-            "qa-aist> HELP",
-            "QA-AIST 中文使用手冊",
+            "quality-pilot> HELP",
+            "AI Quality Pilot 中文使用手冊",
             "",
-            "`/qa-aist setup` 會自動讀 git remote origin；若能辨識 Gitea repo，會先設定成 Hermes-friendly MCP backend。",
+            "`/quality-pilot setup` 會自動讀 git remote origin；若能辨識 Gitea repo，會先設定成 Hermes-friendly MCP backend。",
             "",
             "第一次使用建議流程：",
-            "1. `/qa-aist setup`：初始化目前產品 repo。",
-            "2. `/qa-aist doctor`：確認設定和目錄健康。",
-            "3. `/qa-aist issues sync`：同步 Gitea issues 到本地 mirror。",
-            "4. `/qa-aist cases generate --init`：首次分析 README、程式碼、metadata 與 rules，建立可執行 SWQA safe-probe cases。",
-            "5. `/qa-aist cases validate`：確認 generated contracts 可執行。",
-            "6. `/qa-aist cases list`：看有哪些 case_id。",
-            "7. `/qa-aist cases run <case_id>`：先跑一個 case，再決定是否跑全部。",
-            "8. 測試或產生 cases 後，QA-AIST 會自動更新本地 Wiki plan；查看 `/qa-aist publish wiki status`。",
-            "9. 若需要手動更新遠端 Wiki，跑 `/qa-aist publish wiki plan` 再確認 `/qa-aist publish wiki apply`。",
+            "1. `/quality-pilot setup`：初始化目前產品 repo。",
+            "2. `/quality-pilot doctor`：確認設定和目錄健康。",
+            "3. `/quality-pilot issues sync`：同步 Gitea issues 到本地 mirror。",
+            "4. `/quality-pilot cases generate --init`：首次分析 README、程式碼、metadata 與 rules，建立可執行 SWQA safe-probe cases。",
+            "5. `/quality-pilot cases validate`：確認 generated contracts 可執行。",
+            "6. `/quality-pilot cases list`：看有哪些 case_id。",
+            "7. `/quality-pilot cases run <case_id>`：先跑一個 case，再決定是否跑全部。",
+            "8. 測試或產生 cases 後，AI Quality Pilot 會自動更新本地 Wiki plan；查看 `/quality-pilot publish wiki status`。",
+            "9. 若需要手動更新遠端 Wiki，跑 `/quality-pilot publish wiki plan` 再確認 `/quality-pilot publish wiki apply`。",
             "   若 backend 是 MCP，`apply` 會產生 gated MCP write request，由 Hermes 在同一流程呼叫 Gitea MCP。",
             "",
             "常用指令：",
@@ -1267,7 +1267,7 @@ def _overview_help_text(commands: list[dict[str, str]]) -> str:
             "title: Project smoke test",
             "commands:",
             "  - id: smoke",
-            "    run: .qa-aist-project/runners/example-runner.sh",
+            "    run: .quality-pilot-project/runners/example-runner.sh",
             "    expected_exit_code: 0",
             "```",
             "",
@@ -1380,11 +1380,11 @@ def _first_result(payload: dict[str, Any]) -> dict[str, Any] | None:
 
 def _parse_error_message(error: str) -> str:
     if error == "empty_hermes_message":
-        return "Expected a Hermes chat command such as /qa-aist doctor."
-    if error == "not_a_qa_aist_command":
-        return "Only /qa-aist commands are accepted by this dispatcher."
-    if error == "empty_qa_aist_command":
-        return "Expected /qa-aist followed by a QA-AIST subcommand."
+        return "Expected a Hermes chat command such as /quality-pilot doctor."
+    if error == "not_a_quality_pilot_command":
+        return "Only /quality-pilot commands are accepted by this dispatcher."
+    if error == "empty_quality_pilot_command":
+        return "Expected /quality-pilot followed by a AI Quality Pilot subcommand."
     return error
 
 
@@ -1404,9 +1404,9 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(argv if argv is not None else sys.argv[1:])
     if argv and argv[0] in {"manifest", "install", "status", "install-skill", "skill-status"}:
         return _main_agent_command(argv)
-    parser = argparse.ArgumentParser(prog="qa-aist-hermes", description="Dispatch a Hermes /qa-aist chat command to the QA-AIST engine")
+    parser = argparse.ArgumentParser(prog="quality-pilot-hermes", description="Dispatch a Hermes /quality-pilot chat command to the AI Quality Pilot engine")
     parser.add_argument("--root", default=".", help="Product repository root provided by Hermes context")
-    parser.add_argument("message", nargs=argparse.REMAINDER, help="Hermes chat message, for example: /qa-aist doctor")
+    parser.add_argument("message", nargs=argparse.REMAINDER, help="Hermes chat message, for example: /quality-pilot doctor")
     args = parser.parse_args(argv)
     message = args.message[0].strip() if len(args.message) == 1 else shlex.join(args.message).strip()
     result = dispatch_chat_command(message, root=args.root)
@@ -1417,37 +1417,37 @@ def main(argv: list[str] | None = None) -> int:
 def _main_agent_command(argv: list[str]) -> int:
     command = argv[0]
     if command == "manifest":
-        parser = argparse.ArgumentParser(prog="qa-aist-hermes manifest", description="Print a portable Hermes agent manifest")
-        parser.add_argument("--runner-command", default="qa-aist-hermes")
+        parser = argparse.ArgumentParser(prog="quality-pilot-hermes manifest", description="Print a portable Hermes agent manifest")
+        parser.add_argument("--runner-command", default="quality-pilot-hermes")
         args = parser.parse_args(argv[1:])
         print(json_dumps(build_agent_manifest(runner_command=args.runner_command)))
         return 0
     if command == "install":
-        parser = argparse.ArgumentParser(prog="qa-aist-hermes install", description="Install QA-AIST agent files into a Hermes agents directory")
+        parser = argparse.ArgumentParser(prog="quality-pilot-hermes install", description="Install AI Quality Pilot agent files into a Hermes agents directory")
         parser.add_argument("--agent-dir", required=True, help="Hermes agents directory")
-        parser.add_argument("--runner-command", default="qa-aist-hermes")
-        parser.add_argument("--force", action="store_true", help="Overwrite existing QA-AIST agent files")
+        parser.add_argument("--runner-command", default="quality-pilot-hermes")
+        parser.add_argument("--force", action="store_true", help="Overwrite existing AI Quality Pilot agent files")
         args = parser.parse_args(argv[1:])
         payload = install_agent(args.agent_dir, force=args.force, runner_command=args.runner_command)
         print(json_dumps(payload))
         return 0 if payload["status"] == "ok" else 4
     if command == "install-skill":
-        parser = argparse.ArgumentParser(prog="qa-aist-hermes install-skill", description="Install QA-AIST as a Hermes dynamic skill slash command")
+        parser = argparse.ArgumentParser(prog="quality-pilot-hermes install-skill", description="Install AI Quality Pilot as a Hermes dynamic skill slash command")
         parser.add_argument("--skills-dir", default=None, help="Hermes skills directory; defaults to $HERMES_HOME/skills or ~/.hermes/skills")
-        parser.add_argument("--runner-command", default="qa-aist-hermes")
-        parser.add_argument("--force", action="store_true", help="Overwrite an existing QA-AIST skill")
+        parser.add_argument("--runner-command", default="quality-pilot-hermes")
+        parser.add_argument("--force", action="store_true", help="Overwrite an existing AI Quality Pilot skill")
         args = parser.parse_args(argv[1:])
         payload = install_skill(args.skills_dir, force=args.force, runner_command=args.runner_command)
         print(json_dumps(payload))
         return 0 if payload["status"] == "ok" else 4
     if command == "skill-status":
-        parser = argparse.ArgumentParser(prog="qa-aist-hermes skill-status", description="Check QA-AIST Hermes skill installation")
+        parser = argparse.ArgumentParser(prog="quality-pilot-hermes skill-status", description="Check AI Quality Pilot Hermes skill installation")
         parser.add_argument("--skills-dir", default=None, help="Hermes skills directory; defaults to $HERMES_HOME/skills or ~/.hermes/skills")
         args = parser.parse_args(argv[1:])
         payload = skill_status(args.skills_dir)
         print(json_dumps(payload))
         return 0 if payload["status"] == "ok" else 2
-    parser = argparse.ArgumentParser(prog="qa-aist-hermes status", description="Check QA-AIST Hermes agent installation")
+    parser = argparse.ArgumentParser(prog="quality-pilot-hermes status", description="Check AI Quality Pilot Hermes agent installation")
     parser.add_argument("--agent-dir", required=True, help="Hermes agents directory")
     args = parser.parse_args(argv[1:])
     payload = agent_status(args.agent_dir)

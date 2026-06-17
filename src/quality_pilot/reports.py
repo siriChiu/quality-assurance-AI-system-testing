@@ -8,7 +8,7 @@ from typing import Any
 def render_status_report(results: list[dict[str, Any]], report_path: Path) -> Path:
     report_path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
-        "# QA-AIST status",
+        "# AI Quality Pilot status",
         "",
         "| Case | Status | Commands | Evidence |",
         "|---|---|---:|---|",

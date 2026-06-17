@@ -7,12 +7,12 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
-from qa_aist.cli import main
-from qa_aist.config import load_project_config
-from qa_aist.contracts import load_contract
-from qa_aist.pipeline import PIPELINE_ORDER, run_close_loop
-from qa_aist.runner import RunContext, run_case
-from qa_aist.write_gate import evaluate_write_gate
+from quality_pilot.cli import main
+from quality_pilot.config import load_project_config
+from quality_pilot.contracts import load_contract
+from quality_pilot.pipeline import PIPELINE_ORDER, run_close_loop
+from quality_pilot.runner import RunContext, run_case
+from quality_pilot.write_gate import evaluate_write_gate
 
 
 class RunnerPipelineTest(unittest.TestCase):
@@ -53,8 +53,8 @@ commands:
             config = load_project_config(root)
             result = run_close_loop(config)
             self.assertEqual([step["name"] for step in result.payload["steps"]], PIPELINE_ORDER)
-            self.assertTrue((root / ".qa-aist-project" / "state" / "latest-run.json").exists())
-            latest = json.loads((root / ".qa-aist-project" / "state" / "latest-run.json").read_text(encoding="utf-8"))
+            self.assertTrue((root / ".quality-pilot-project" / "state" / "latest-run.json").exists())
+            latest = json.loads((root / ".quality-pilot-project" / "state" / "latest-run.json").read_text(encoding="utf-8"))
             self.assertIn("tracker_writes", latest)
             self.assertEqual(latest["steps"][-1]["name"], "persist_state")
             self.assertEqual(latest["steps"][-1]["status"], "PASS")

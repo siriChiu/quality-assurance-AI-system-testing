@@ -1,6 +1,6 @@
 # SWQA test-design rule
 
-QA-AIST treats each confirmed bug as a reusable failure pattern, not as a
+AI Quality Pilot treats each confirmed bug as a reusable failure pattern, not as a
 single reproduction command. A fix is not complete until deterministic tests
 prove the original failure, adjacent inputs, invalid inputs, and safe no-op
 smoke paths.

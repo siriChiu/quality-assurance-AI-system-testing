@@ -41,7 +41,7 @@ TRIAGE_CATEGORIES = [
 
 def policy_pack() -> dict[str, Any]:
     return {
-        "name": "qa-aist-swqa-closed-loop-v1",
+        "name": "quality-pilot-swqa-closed-loop-v1",
         "closed_loop_steps": list(CLOSED_LOOP_STEPS),
         "swqa_dimensions": list(SWQA_DIMENSIONS),
         "gates": dict(GATES),
@@ -105,5 +105,5 @@ def common_questions(*, feature: str, profile: str, has_confirmed_command: bool)
     if has_confirmed_command:
         return questions[1:]
     if profile == "auto":
-        questions.insert(1, "QA-AIST 尚未能從 repo 訊號安全推斷 profile；這比較像 CLI、API、hardware/lab，還是 repo health 測試？")
+        questions.insert(1, "AI Quality Pilot 尚未能從 repo 訊號安全推斷 profile；這比較像 CLI、API、hardware/lab，還是 repo health 測試？")
     return questions

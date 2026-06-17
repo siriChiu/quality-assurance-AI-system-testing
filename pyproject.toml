@@ -3,13 +3,13 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "qa-aist"
+name = "quality-pilot"
 version = "0.1.0"
 description = "Reusable deterministic-first QA closed-loop toolkit"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
-authors = [{name = "QA-AIST contributors"}]
+authors = [{name = "AI Quality Pilot contributors"}]
 keywords = ["qa", "testing", "automation", "closed-loop", "agents"]
 classifiers = [
   "Programming Language :: Python :: 3",
@@ -20,11 +20,11 @@ dependencies = [
 ]
 
 [project.scripts]
-qa-aist = "qa_aist.cli:main"
-qa-aist-hermes = "qa_aist.hermes:main"
+quality-pilot = "quality_pilot.cli:main"
+quality-pilot-hermes = "quality_pilot.hermes:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-qa_aist = ["py.typed", "template_files/project/**/*"]
+quality_pilot = ["py.typed", "template_files/project/**/*"]

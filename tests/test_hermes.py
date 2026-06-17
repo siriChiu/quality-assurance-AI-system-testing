@@ -9,26 +9,26 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
-from qa_aist import hermes
+from quality_pilot import hermes
 
 
 class HermesDispatchTest(unittest.TestCase):
     def test_help_command_returns_traditional_chinese_manual(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            result = hermes.dispatch_chat_command("/qa-aist help", root=tmp)
+            result = hermes.dispatch_chat_command("/quality-pilot help", root=tmp)
             self.assertEqual(result["exit_code"], 0)
             self.assertEqual(result["status"], "ok")
             self.assertEqual(result["payload"]["topic"], "overview")
             self.assertEqual(result["payload"]["language"], "zh-Hant")
-            self.assertIn("QA-AIST 中文使用手冊", result["chat_response"])
-            self.assertIn("/qa-aist setup", result["chat_response"])
-            self.assertIn("/qa-aist cases list", result["chat_response"])
-            self.assertIn("/qa-aist cases run <case_id>", result["chat_response"])
-            self.assertNotIn("/qa-aist qa-test list", result["chat_response"])
+            self.assertIn("AI Quality Pilot 中文使用手冊", result["chat_response"])
+            self.assertIn("/quality-pilot setup", result["chat_response"])
+            self.assertIn("/quality-pilot cases list", result["chat_response"])
+            self.assertIn("/quality-pilot cases run <case_id>", result["chat_response"])
+            self.assertNotIn("/quality-pilot qa-test list", result["chat_response"])
 
     def test_removed_help_topics_and_qa_test_commands_return_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            for command in ["/qa-aist help qa-test", "/qa-aist qa-test help"]:
+            for command in ["/quality-pilot help qa-test", "/quality-pilot qa-test help"]:
                 with self.subTest(command=command):
                     result = hermes.dispatch_chat_command(command, root=tmp)
                     self.assertEqual(result["exit_code"], 2)
@@ -39,23 +39,23 @@ class HermesDispatchTest(unittest.TestCase):
     def test_redmine_missing_snapshot_retry_keeps_current_workflow(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            hermes.dispatch_chat_command("/qa-aist setup", root=root)
+            hermes.dispatch_chat_command("/quality-pilot setup", root=root)
 
-            sync = hermes.dispatch_chat_command("/qa-aist issues sync --redmine-issues 144732 144694 144693 144780", root=root)
+            sync = hermes.dispatch_chat_command("/quality-pilot issues sync --redmine-issues 144732 144694 144693 144780", root=root)
             self.assertEqual(sync["exit_code"], 2)
             self.assertEqual(sync["payload"]["error"], "RedmineError")
             self.assertEqual(
                 sync["payload"]["next_actions"][0]["command"],
-                "/qa-aist issues sync --redmine-issues 144732 144694 144693 144780",
+                "/quality-pilot issues sync --redmine-issues 144732 144694 144693 144780",
             )
             self.assertIn("重跑 sync", sync["payload"]["next_actions"][0]["label"])
             self.assertNotIn("cases generate", sync["payload"]["next_actions"][0]["command"])
 
-            generate = hermes.dispatch_chat_command("/qa-aist cases generate --redmine-issues 144732 144694", root=root)
+            generate = hermes.dispatch_chat_command("/quality-pilot cases generate --redmine-issues 144732 144694", root=root)
             self.assertEqual(generate["exit_code"], 2)
             self.assertEqual(
                 generate["payload"]["next_actions"][0]["command"],
-                "/qa-aist cases generate --redmine-issues 144732 144694",
+                "/quality-pilot cases generate --redmine-issues 144732 144694",
             )
             self.assertIn("重跑 generate", generate["payload"]["next_actions"][0]["label"])
 
@@ -63,58 +63,58 @@ class HermesDispatchTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
 
-            setup = hermes.dispatch_chat_command("/qa-aist setup", root=root)
+            setup = hermes.dispatch_chat_command("/quality-pilot setup", root=root)
             self.assertEqual(setup["exit_code"], 0)
             self.assertEqual(setup["status"], "ok")
             self.assertIn("--root", setup["engine_argv"])
-            self.assertTrue((root / ".qa-aist.yaml").exists())
-            self.assertTrue((root / ".qa-aist-project" / "cases" / "example-contract.yaml").exists())
+            self.assertTrue((root / ".quality-pilot.yaml").exists())
+            self.assertTrue((root / ".quality-pilot-project" / "cases" / "example-contract.yaml").exists())
 
-            doctor = hermes.dispatch_chat_command("/qa-aist doctor", root=root)
+            doctor = hermes.dispatch_chat_command("/quality-pilot doctor", root=root)
             self.assertEqual(doctor["status"], "WARN")
             self.assertIn("Hermes MCP server list was not provided", doctor["chat_response"])
             self.assertIn("hermes_mcp_status_unknown", doctor["payload"]["hermes_mcp"]["blockers"])
             self.assertIn("下一步可以選", doctor["chat_response"])
 
-            listed = hermes.dispatch_chat_command("/qa-aist cases list", root=root)
+            listed = hermes.dispatch_chat_command("/quality-pilot cases list", root=root)
             self.assertEqual(listed["status"], "ok")
             self.assertEqual(listed["payload"]["cases"][0]["case_id"], "EXAMPLE-001")
 
-            run_one = hermes.dispatch_chat_command("/qa-aist cases run EXAMPLE-001", root=root)
+            run_one = hermes.dispatch_chat_command("/quality-pilot cases run EXAMPLE-001", root=root)
             self.assertEqual(run_one["status"], "PASS")
             self.assertIn("result:", run_one["chat_response"])
 
-            close_loop = hermes.dispatch_chat_command("/qa-aist close-loop run-once", root=root)
+            close_loop = hermes.dispatch_chat_command("/quality-pilot close-loop run-once", root=root)
             self.assertEqual(close_loop["status"], "PASS")
             self.assertIn("latest_run_json", close_loop["payload"])
             self.assertIn("report_path", close_loop["payload"])
 
-            report = hermes.dispatch_chat_command("/qa-aist report status", root=root)
+            report = hermes.dispatch_chat_command("/quality-pilot report status", root=root)
             self.assertEqual(report["status"], "ok")
-            self.assertTrue((root / ".qa-aist-project" / "reports" / "status.md").exists())
+            self.assertTrue((root / ".quality-pilot-project" / "reports" / "status.md").exists())
 
-            plan = hermes.dispatch_chat_command("/qa-aist tracker plan-write", root=root)
+            plan = hermes.dispatch_chat_command("/quality-pilot tracker plan-write", root=root)
             self.assertEqual(plan["status"], "ok")
             self.assertEqual(plan["payload"]["write_gate_result"]["reason"], "allowed")
 
     def test_command_cheat_sheet_chat_commands_are_supported(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            hermes.dispatch_chat_command("/qa-aist setup", root=root)
+            hermes.dispatch_chat_command("/quality-pilot setup", root=root)
 
             commands = [
-                "/qa-aist help",
-                "/qa-aist doctor",
-                "/qa-aist issues status",
-                "/qa-aist cases list",
-                "/qa-aist cases validate",
-                "/qa-aist cases run",
-                "/qa-aist cases run EXAMPLE-001",
-                "/qa-aist close-loop status",
-                "/qa-aist close-loop run-once",
-                "/qa-aist report status",
-                "/qa-aist report json",
-                "/qa-aist tracker plan-write",
+                "/quality-pilot help",
+                "/quality-pilot doctor",
+                "/quality-pilot issues status",
+                "/quality-pilot cases list",
+                "/quality-pilot cases validate",
+                "/quality-pilot cases run",
+                "/quality-pilot cases run EXAMPLE-001",
+                "/quality-pilot close-loop status",
+                "/quality-pilot close-loop run-once",
+                "/quality-pilot report status",
+                "/quality-pilot report json",
+                "/quality-pilot tracker plan-write",
             ]
             for command in commands:
                 with self.subTest(command=command):
@@ -127,37 +127,37 @@ class HermesDispatchTest(unittest.TestCase):
     def test_alias_is_accepted_but_other_chat_text_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            hermes.dispatch_chat_command("/qa-aist setup", root=root)
+            hermes.dispatch_chat_command("/quality-pilot setup", root=root)
 
-            alias = hermes.dispatch_chat_command("qa-aist doctor", root=root)
+            alias = hermes.dispatch_chat_command("quality-pilot doctor", root=root)
             self.assertEqual(alias["exit_code"], 0)
-            self.assertEqual(alias["prefix"], "qa-aist")
+            self.assertEqual(alias["prefix"], "quality-pilot")
 
             rejected = hermes.dispatch_chat_command("status", root=root)
             self.assertEqual(rejected["exit_code"], 2)
             self.assertEqual(rejected["status"], "error")
-            self.assertEqual(rejected["payload"]["error"], "not_a_qa_aist_command")
+            self.assertEqual(rejected["payload"]["error"], "not_a_quality_pilot_command")
 
-            unsupported = hermes.dispatch_chat_command("/qa-aist rm -rf .", root=root)
+            unsupported = hermes.dispatch_chat_command("/quality-pilot rm -rf .", root=root)
             self.assertNotEqual(unsupported["exit_code"], 0)
             self.assertEqual(unsupported["status"], "error")
             self.assertEqual(unsupported["payload"]["error"], "engine_output_not_json")
 
     def test_console_entrypoint_emits_hermes_dispatch_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            hermes.dispatch_chat_command("/qa-aist setup", root=tmp)
+            hermes.dispatch_chat_command("/quality-pilot setup", root=tmp)
             buf = StringIO()
             with redirect_stdout(buf):
-                code = hermes.main(["--root", tmp, "/qa-aist", "doctor"])
+                code = hermes.main(["--root", tmp, "/quality-pilot", "doctor"])
             payload = json.loads(buf.getvalue())
             self.assertEqual(code, 0)
             self.assertEqual(payload["interface"], "hermes")
-            self.assertEqual(payload["command"], "/qa-aist doctor")
-            self.assertEqual(payload["payload"]["tool"], "qa-aist")
+            self.assertEqual(payload["command"], "/quality-pilot doctor")
+            self.assertEqual(payload["payload"]["tool"], "quality-pilot")
 
             buf = StringIO()
             with redirect_stdout(buf):
-                code = hermes.main(["--root", tmp, "/qa-aist", "cases", "generate", "--init", "--feature", "CLI help", "--profile", "cli", "--count", "1"])
+                code = hermes.main(["--root", tmp, "/quality-pilot", "cases", "generate", "--init", "--feature", "CLI help", "--profile", "cli", "--count", "1"])
             payload = json.loads(buf.getvalue())
             self.assertEqual(code, 0)
             self.assertEqual(payload["payload"]["source"], "init")
@@ -166,22 +166,22 @@ class HermesDispatchTest(unittest.TestCase):
     def test_agent_manifest_install_status_and_wrapper(self) -> None:
         with tempfile.TemporaryDirectory() as agent_tmp, tempfile.TemporaryDirectory() as project_tmp:
             manifest = hermes.build_agent_manifest()
-            self.assertEqual(manifest["command_prefix"], "/qa-aist")
-            self.assertIn("qa-aist", manifest["aliases"])
-            self.assertIn("/qa-aist help", manifest["commands"])
-            self.assertIn("/qa-aist cases generate --init", manifest["commands"])
-            self.assertIn("/qa-aist cases generate --init --count 5", manifest["commands"])
-            self.assertIn("/qa-aist cases generate --growing", manifest["commands"])
-            self.assertIn("/qa-aist issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]", manifest["commands"])
-            self.assertIn("/qa-aist cases run <case_id>", manifest["commands"])
-            self.assertNotIn("/qa-aist qa-test help", manifest["commands"])
+            self.assertEqual(manifest["command_prefix"], "/quality-pilot")
+            self.assertIn("quality-pilot", manifest["aliases"])
+            self.assertIn("/quality-pilot help", manifest["commands"])
+            self.assertIn("/quality-pilot cases generate --init", manifest["commands"])
+            self.assertIn("/quality-pilot cases generate --init --count 5", manifest["commands"])
+            self.assertIn("/quality-pilot cases generate --growing", manifest["commands"])
+            self.assertIn("/quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]", manifest["commands"])
+            self.assertIn("/quality-pilot cases run <case_id>", manifest["commands"])
+            self.assertNotIn("/quality-pilot qa-test help", manifest["commands"])
             self.assertEqual(manifest["permissions"]["tracker_write"], "write_gate_apply_only")
             self.assertIn("gitea_mcp_read_and_gated_wiki_write_when_configured", manifest["permissions"]["network"])
             self.assertIn("gitea_mcp_gated_issue_create_from_redmine_sync", manifest["permissions"]["network"])
             self.assertEqual(manifest["outputs"]["needs_input_field"], "payload.hermes_needs_input")
             self.assertEqual(manifest["outputs"]["interaction_style"], "guided_menu_with_needs_input")
 
-            installed = hermes.install_agent(agent_tmp, runner_command=f"{os.sys.executable} -m qa_aist.hermes")
+            installed = hermes.install_agent(agent_tmp, runner_command=f"{os.sys.executable} -m quality_pilot.hermes")
             self.assertEqual(installed["status"], "ok")
             manifest_path = Path(installed["manifest_path"])
             wrapper_path = Path(installed["wrapper_path"])
@@ -193,16 +193,16 @@ class HermesDispatchTest(unittest.TestCase):
             self.assertEqual(status["status"], "ok")
             self.assertTrue(status["manifest_valid"])
 
-            duplicate = hermes.install_agent(agent_tmp, runner_command=f"{os.sys.executable} -m qa_aist.hermes")
+            duplicate = hermes.install_agent(agent_tmp, runner_command=f"{os.sys.executable} -m quality_pilot.hermes")
             self.assertEqual(duplicate["status"], "error")
             self.assertEqual(duplicate["error"], "agent_files_exist")
 
-            hermes.dispatch_chat_command("/qa-aist setup", root=project_tmp)
+            hermes.dispatch_chat_command("/quality-pilot setup", root=project_tmp)
             env = os.environ.copy()
             env["PYTHONPATH"] = "src"
             env["HERMES_PROJECT_ROOT"] = project_tmp
             completed = subprocess.run(
-                [str(wrapper_path), "/qa-aist", "doctor"],
+                [str(wrapper_path), "/quality-pilot", "doctor"],
                 cwd=Path(__file__).resolve().parents[1],
                 env=env,
                 text=True,
@@ -212,7 +212,7 @@ class HermesDispatchTest(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             payload = json.loads(completed.stdout)
             self.assertEqual(payload["interface"], "hermes")
-            self.assertEqual(payload["payload"]["tool"], "qa-aist")
+            self.assertEqual(payload["payload"]["tool"], "quality-pilot")
 
     def test_agent_console_commands(self) -> None:
         with tempfile.TemporaryDirectory() as agent_tmp:
@@ -220,11 +220,11 @@ class HermesDispatchTest(unittest.TestCase):
             with redirect_stdout(buf):
                 code = hermes.main(["manifest"])
             self.assertEqual(code, 0)
-            self.assertEqual(json.loads(buf.getvalue())["command_prefix"], "/qa-aist")
+            self.assertEqual(json.loads(buf.getvalue())["command_prefix"], "/quality-pilot")
 
             buf = StringIO()
             with redirect_stdout(buf):
-                code = hermes.main(["install", "--agent-dir", agent_tmp, "--runner-command", f"{os.sys.executable} -m qa_aist.hermes"])
+                code = hermes.main(["install", "--agent-dir", agent_tmp, "--runner-command", f"{os.sys.executable} -m quality_pilot.hermes"])
             self.assertEqual(code, 0)
             installed = json.loads(buf.getvalue())
             self.assertEqual(installed["status"], "ok")
@@ -239,14 +239,14 @@ class HermesDispatchTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as skills_tmp:
             payload = hermes.install_skill(
                 skills_tmp,
-                runner_command="/usr/bin/env PYTHONPATH=/repo/QA-AIST/src python3 -m qa_aist.hermes",
+                runner_command="/usr/bin/env PYTHONPATH=/repo/AI Quality Pilot/src python3 -m quality_pilot.hermes",
             )
             self.assertEqual(payload["status"], "ok")
             skill_path = Path(payload["skill_path"])
             self.assertTrue(skill_path.exists())
             text = skill_path.read_text(encoding="utf-8")
-            self.assertIn("name: qa-aist", text)
-            self.assertIn("QA-AIST Hermes Skill", text)
+            self.assertIn("name: quality-pilot", text)
+            self.assertIn("AI Quality Pilot Hermes Skill", text)
             self.assertIn("skill-mediated", text)
             self.assertIn("not a native Hermes router", text)
             self.assertIn("Do not answer from memory", text)
@@ -254,27 +254,27 @@ class HermesDispatchTest(unittest.TestCase):
             self.assertIn("Gitea MCP Wiki write workflow", text)
             self.assertIn("Gitea MCP Redmine issue creation workflow", text)
             self.assertIn("needs_mcp_apply", text)
-            self.assertNotIn("/qa-aist publish wiki complete-mcp --result-json <path>", text)
+            self.assertNotIn("/quality-pilot publish wiki complete-mcp --result-json <path>", text)
             self.assertIn("chat_response", text)
             self.assertIn("call Hermes `clarify`", text)
             self.assertIn("payload.hermes_needs_input", text)
             self.assertNotIn("Hermes needs your input", text)
             self.assertIn("product repository root", text)
-            self.assertIn("/qa-aist help", text)
-            self.assertNotIn("/qa-aist help qa-test", text)
-            self.assertIn("/qa-aist cases generate --init", text)
+            self.assertIn("/quality-pilot help", text)
+            self.assertNotIn("/quality-pilot help qa-test", text)
+            self.assertIn("/quality-pilot cases generate --init", text)
             self.assertIn("opinionated SWQA engineer", text)
             self.assertIn("executable safe-probe cases", text)
             self.assertIn("Every INIT case must have `commands[].run`", text)
             self.assertIn("--count 5", text)
             self.assertNotIn("--generated_count 5", text)
             self.assertNotIn("--fast", text)
-            self.assertIn("/usr/bin/env PYTHONPATH=/repo/QA-AIST/src python3 -m qa_aist.hermes", text)
+            self.assertIn("/usr/bin/env PYTHONPATH=/repo/AI Quality Pilot/src python3 -m quality_pilot.hermes", text)
             reference_path = Path(payload["reference_path"])
             self.assertTrue(reference_path.exists())
             reference_text = reference_path.read_text(encoding="utf-8")
             self.assertIn("MCP issue list may include PRs", reference_text)
-            self.assertIn("/qa-aist issues sync", reference_text)
+            self.assertIn("/quality-pilot issues sync", reference_text)
             self.assertIn("Gitea MCP may create new issues only after", reference_text)
 
             status = hermes.skill_status(skills_tmp)
@@ -294,11 +294,11 @@ class HermesDispatchTest(unittest.TestCase):
                     "--skills-dir",
                     skills_tmp,
                     "--runner-command",
-                    "qa-aist-hermes",
+                    "quality-pilot-hermes",
                 ])
             self.assertEqual(code, 0)
             payload = json.loads(buf.getvalue())
-            self.assertEqual(payload["command_prefix"], "/qa-aist")
+            self.assertEqual(payload["command_prefix"], "/quality-pilot")
 
             buf = StringIO()
             with redirect_stdout(buf):

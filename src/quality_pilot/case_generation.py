@@ -55,7 +55,7 @@ def generate_cases_from_issues(
             skipped.append({"case_id": contract["case_id"], "path": _relative_or_str(path, config.root), "reason": "exists"})
             continue
         path.write_text(_dump_yaml(contract), encoding="utf-8")
-        item_questions = contract.get("qa_aist", {}).get("questions", [])
+        item_questions = contract.get("quality_pilot", {}).get("questions", [])
         if item_questions:
             questions.append({"case_id": contract["case_id"], "issue_id": item.get("issue_id"), "questions": item_questions})
         generated.append(
@@ -63,7 +63,7 @@ def generate_cases_from_issues(
                 "case_id": contract["case_id"],
                 "issue_id": item.get("issue_id"),
                 "path": _relative_or_str(path, config.root),
-                "draft": bool(contract.get("qa_aist", {}).get("draft")),
+                "draft": bool(contract.get("quality_pilot", {}).get("draft")),
                 "question_count": len(item_questions),
             }
         )
@@ -118,14 +118,14 @@ def generate_cases_from_scratch(
             skipped.append({"case_id": contract["case_id"], "path": _relative_or_str(path, config.root), "reason": "exists"})
             continue
         path.write_text(_dump_yaml(contract), encoding="utf-8")
-        item_questions = contract.get("qa_aist", {}).get("questions", [])
+        item_questions = contract.get("quality_pilot", {}).get("questions", [])
         if item_questions:
             questions.append({"case_id": contract["case_id"], "questions": item_questions})
         generated.append(
             {
                 "case_id": contract["case_id"],
                 "path": _relative_or_str(path, config.root),
-                "draft": bool(contract.get("qa_aist", {}).get("draft")),
+                "draft": bool(contract.get("quality_pilot", {}).get("draft")),
                 "question_count": len(item_questions),
                 "profile": resolved_profile,
                 "swqa_dimensions": contract.get("swqa_dimensions", []),
@@ -199,14 +199,14 @@ def generate_cases_init(
             skipped.append({"case_id": contract["case_id"], "path": _relative_or_str(path, config.root), "reason": "exists"})
             continue
         path.write_text(_dump_yaml(contract), encoding="utf-8")
-        item_questions = contract.get("qa_aist", {}).get("questions", [])
+        item_questions = contract.get("quality_pilot", {}).get("questions", [])
         if item_questions:
             questions.append({"case_id": contract["case_id"], "questions": item_questions})
         generated.append(
             {
                 "case_id": contract["case_id"],
                 "path": _relative_or_str(path, config.root),
-                "draft": bool(contract.get("qa_aist", {}).get("draft")),
+                "draft": bool(contract.get("quality_pilot", {}).get("draft")),
                 "question_count": len(item_questions),
                 "profile": contract.get("profile"),
                 "init_seed": contract.get("init_seed", {}).get("id"),
@@ -229,7 +229,7 @@ def generate_cases_init(
         "requested_generated_count": count,
         "requested_count": count,
         "assumption_policy": (
-            "Fast mode: QA-AIST chooses the strictest safe defaults and does not ask case-by-case questions."
+            "Fast mode: AI Quality Pilot chooses the strictest safe defaults and does not ask case-by-case questions."
             if fast else
             "Generate the initial SWQA map first; ask only category-level blocking execution inputs."
         ),
@@ -325,14 +325,14 @@ def generate_cases_growing(
             skipped.append({"case_id": contract["case_id"], "path": _relative_or_str(path, config.root), "reason": "exists"})
             continue
         path.write_text(_dump_yaml(contract), encoding="utf-8")
-        item_questions = contract.get("qa_aist", {}).get("questions", [])
+        item_questions = contract.get("quality_pilot", {}).get("questions", [])
         if item_questions:
             questions.append({"case_id": contract["case_id"], "questions": item_questions})
         generated.append(
             {
                 "case_id": contract["case_id"],
                 "path": _relative_or_str(path, config.root),
-                "draft": bool(contract.get("qa_aist", {}).get("draft")),
+                "draft": bool(contract.get("quality_pilot", {}).get("draft")),
                 "question_count": len(item_questions),
                 "profile": contract.get("profile"),
                 "growth_seed": contract.get("growth_seed", {}).get("id"),
@@ -372,7 +372,7 @@ def generate_cases_growing(
         "requested_generated_count": count,
         "requested_count": count,
         "assumption_policy": (
-            "Fast mode: QA-AIST chooses the strictest safe defaults and does not ask case-by-case questions."
+            "Fast mode: AI Quality Pilot chooses the strictest safe defaults and does not ask case-by-case questions."
             if fast else
             "Growing generation asks only category-level blocking inputs, never one question per test case."
         ),
@@ -453,7 +453,7 @@ def build_growth_context(
     publish_plan = load_state_json(config, "publish-plan.json")
     pr_refs = collect_pr_references(items)
     context: dict[str, Any] = {
-        "schema": "qa-aist.growth-context.v1",
+        "schema": "quality-pilot.growth-context.v1",
         "generated_at": utc_now(),
         "feature": feature_name,
         "requested_profile": profile,
@@ -489,7 +489,7 @@ def build_init_context(
     feature_name = _feature_name(config, feature, signals)
     inventory = scan_repo_inventory(config)
     context: dict[str, Any] = {
-        "schema": "qa-aist.init-context.v1",
+        "schema": "quality-pilot.init-context.v1",
         "generated_at": utc_now(),
         "feature": feature_name,
         "requested_profile": profile,
@@ -546,7 +546,7 @@ def build_init_seeds(context: dict[str, Any]) -> list[dict[str, Any]]:
                 "id": f"repo-{_slug(project_name).lower()}",
                 "type": "repository",
                 "title": project_name,
-                "summary": "Repository-level behavior discovered during initial QA-AIST setup.",
+                "summary": "Repository-level behavior discovered during initial AI Quality Pilot setup.",
                 "surface": project_name,
             }
         )
@@ -612,7 +612,7 @@ def draft_contract_from_init(
         "contract_version": 1,
         "init_seed": candidate["init_seed"],
         "analysis_reason": candidate["analysis_reason"],
-        "qa_aist": {
+        "quality_pilot": {
             "draft": False,
             "generation_mode": "init",
             "review_required_before_run": False,
@@ -759,7 +759,7 @@ def draft_contract_from_growth(
         "growth_seed": candidate["growth_seed"],
         "six_hats": candidate["six_hats"],
         "growth_reason": candidate["growth_reason"],
-        "qa_aist": {
+        "quality_pilot": {
             "draft": False,
             "generation_mode": "growth",
             "review_required_before_run": False,
@@ -788,7 +788,7 @@ def review_generated_cases(config: ProjectConfig) -> dict[str, Any]:
             data = _load_yaml(path)
         except Exception:
             continue
-        qa = data.get("qa_aist") if isinstance(data.get("qa_aist"), dict) else {}
+        qa = data.get("quality_pilot") if isinstance(data.get("quality_pilot"), dict) else {}
         if qa.get("draft") or qa.get("questions"):
             reviews.append(
                 {
@@ -832,7 +832,7 @@ def draft_contract_for_issue(item: dict[str, Any]) -> dict[str, Any]:
     body = str(item.get("body") or "")
     command = extract_repro_command(body)
     questions: list[str] = []
-    run = command or f"python3 -c \"print('QA-AIST safe issue probe for Gitea issue #{issue_id}: no repro command was provided')\""
+    run = command or f"python3 -c \"print('AI Quality Pilot safe issue probe for Gitea issue #{issue_id}: no repro command was provided')\""
     policy = policy_pack()
     return {
         "case_id": case_id,
@@ -843,7 +843,7 @@ def draft_contract_for_issue(item: dict[str, Any]) -> dict[str, Any]:
             "issue_id": issue_id,
             "issue_url": item.get("url") or "",
         },
-        "qa_aist": {
+        "quality_pilot": {
             "draft": bool(questions),
             "questions": questions,
             "review_required_before_run": False,
@@ -905,7 +905,7 @@ def draft_contract_for_redmine_issue(config: ProjectConfig, issue: dict[str, Any
         "feature": f"Redmine #{issue['id']}",
         "priority": "P1",
         "contract_version": 1,
-        "qa_aist": {
+        "quality_pilot": {
             "draft": False,
             "generation_mode": "redmine_issues",
             "review_required_before_run": False,
@@ -968,7 +968,7 @@ def draft_contract_from_scratch(
         "feature": feature,
         "priority": _priority_for_spec(str(spec["key"])),
         "contract_version": 1,
-        "qa_aist": {
+        "quality_pilot": {
             "draft": False,
             "generation_mode": "from_scratch",
             "review_required_before_run": False,
@@ -1034,8 +1034,8 @@ def scan_repo_inventory(config: ProjectConfig) -> dict[str, Any]:
         ".git",
         ".hg",
         ".svn",
-        ".qa-aist",
-        ".qa-aist-project",
+        ".quality-pilot",
+        ".quality-pilot-project",
         ".qa-project",
         "__pycache__",
         ".pytest_cache",
@@ -1084,7 +1084,7 @@ def scan_repo_inventory(config: ProjectConfig) -> dict[str, Any]:
         "setup.cfg",
         "Makefile",
     }
-    ignored_files = {".qa-aist.yaml"}
+    ignored_files = {".quality-pilot.yaml"}
     ext_counts: dict[str, int] = {}
     root_counts: dict[str, int] = {}
     package_files: list[dict[str, Any]] = []
@@ -1131,11 +1131,11 @@ def init_missing_inputs(context: dict[str, Any]) -> list[str]:
     existing_runners = context.get("existing_runners")
     if suggested_command:
         missing.append(
-            f"QA-AIST 建議先用 `{suggested_command}` 作為 read-only/dry-run 初始測試入口；若這不是正確入口，請提供要使用的 runner 或 command。"
+            f"AI Quality Pilot 建議先用 `{suggested_command}` 作為 read-only/dry-run 初始測試入口；若這不是正確入口，請提供要使用的 runner 或 command。"
         )
     elif existing_runners:
         missing.append(
-            "QA-AIST 找到既有 runner；請確認哪一個 runner 作為初始測試入口，或回覆可由 QA-AIST 依 profile 選擇。"
+            "AI Quality Pilot 找到既有 runner；請確認哪一個 runner 作為初始測試入口，或回覆可由 AI Quality Pilot 依 profile 選擇。"
         )
     else:
         missing.append(
@@ -1153,8 +1153,8 @@ def growth_missing_inputs(context: dict[str, Any]) -> list[str]:
     scope = ", ".join(seed_types) if seed_types else "repo/latest status"
     return [
         (
-            f"QA-AIST 會依 {scope} 的最新訊號自行擴散測試；若有大分類優先順序或不可碰範圍，請一次列出。"
-            "若沒有，回覆「由 QA-AIST 依風險排序」。"
+            f"AI Quality Pilot 會依 {scope} 的最新訊號自行擴散測試；若有大分類優先順序或不可碰範圍，請一次列出。"
+            "若沒有，回覆「由 AI Quality Pilot 依風險排序」。"
         ),
         (
             "若 growth 測試需要共用 fixture、lab target、輸入檔或 credential env 名稱，請一次列出分類；"
@@ -1177,7 +1177,7 @@ def fast_mode_assumptions(context: dict[str, Any]) -> list[str]:
 
 def extract_repro_command(body: str) -> str | None:
     patterns = [
-        r"(?im)^\s*(?:qa-aist\s+)?(?:test[_ -]?command|repro(?:duction)? command|command)\s*:\s*(.+?)\s*$",
+        r"(?im)^\s*(?:quality-pilot\s+)?(?:test[_ -]?command|repro(?:duction)? command|command)\s*:\s*(.+?)\s*$",
         r"(?im)^\s*actual command\s*:\s*(.+?)\s*$",
     ]
     for pattern in patterns:
@@ -1545,7 +1545,7 @@ def _safe_probe_command(config: ProjectConfig, *, candidate: dict[str, Any], con
         package = go_cli["package"]
         command_name = go_cli["name"]
         if dimensions & {"negative", "invalid_input"}:
-            return _shell_command(f"go run {shlex.quote(package)} __qa_aist_invalid_command__ >/dev/null 2>&1; test $? -ne 0")
+            return _shell_command(f"go run {shlex.quote(package)} __quality_pilot_invalid_command__ >/dev/null 2>&1; test $? -ne 0")
         if "stress_timeout_risk" in dimensions:
             return _shell_command(f"for i in 1 2 3; do go run {shlex.quote(package)} --help >/dev/null || exit 1; done")
         if "sibling_surface" in dimensions:
@@ -1568,15 +1568,15 @@ def _safe_probe_command(config: ProjectConfig, *, candidate: dict[str, Any], con
     seed = candidate.get("init_seed") if isinstance(candidate.get("init_seed"), dict) else candidate.get("growth_seed")
     surface = str(seed.get("surface") or "") if isinstance(seed, dict) else ""
     if surface and (config.root / surface).exists():
-        code = f"from pathlib import Path; assert Path({surface!r}).exists(); print('QA-AIST safe probe: {surface}')"
+        code = f"from pathlib import Path; assert Path({surface!r}).exists(); print('AI Quality Pilot safe probe: {surface}')"
         return "python3 -c " + shlex.quote(code)
 
-    repo_probe_targets = ["README.md", "README.rst", "README.txt", "go.mod", "pyproject.toml", "package.json", ".qa-aist.yaml"]
+    repo_probe_targets = ["README.md", "README.rst", "README.txt", "go.mod", "pyproject.toml", "package.json", ".quality-pilot.yaml"]
     code = (
         "from pathlib import Path; "
         f"targets={repo_probe_targets!r}; "
         "assert any(Path(item).exists() for item in targets); "
-        "print('QA-AIST safe repo probe ok')"
+        "print('AI Quality Pilot safe repo probe ok')"
     )
     return "python3 -c " + shlex.quote(code)
 
@@ -1608,7 +1608,7 @@ def _readme_help_subcommands(config: ProjectConfig, command_name: str) -> list[s
 
 
 def _python_compile_targets(config: ProjectConfig) -> list[str]:
-    ignored = {".git", ".qa-aist", ".qa-aist-project", ".qa-project", "__pycache__", ".venv", "venv", "node_modules"}
+    ignored = {".git", ".quality-pilot", ".quality-pilot-project", ".qa-project", "__pycache__", ".venv", "venv", "node_modules"}
     targets: list[str] = []
     for child in sorted(config.root.iterdir()):
         if child.name in ignored or child.name.startswith("."):
@@ -1629,7 +1629,7 @@ def _shell_command(script: str) -> str:
 def _draft_blocker_command(case_id: str) -> str:
     return (
         "python3 -c \"import sys; "
-        f"sys.stderr.write('QA-AIST draft {case_id} requires cases review before execution\\\\n'); "
+        f"sys.stderr.write('AI Quality Pilot draft {case_id} requires cases review before execution\\\\n'); "
         "sys.exit(2)\""
     )
 

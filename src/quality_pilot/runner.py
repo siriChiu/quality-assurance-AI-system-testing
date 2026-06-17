@@ -55,7 +55,7 @@ def run_case(contract: CaseContract, context: RunContext, *, dry_run: bool = Fal
 
 
 def _review_required_before_run(contract: CaseContract) -> bool:
-    qa = contract.raw.get("qa_aist") if isinstance(contract.raw.get("qa_aist"), dict) else {}
+    qa = contract.raw.get("quality_pilot") if isinstance(contract.raw.get("quality_pilot"), dict) else {}
     return bool(qa.get("review_required_before_run"))
 
 

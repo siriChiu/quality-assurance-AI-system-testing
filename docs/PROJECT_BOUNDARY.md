@@ -4,7 +4,7 @@ status: active
 
 ## Rule
 
-QA-AIST is a product repository. It is not a host-project workspace.
+AI Quality Pilot is a product repository. It is not a host-project workspace.
 
 ## Commit here
 
@@ -14,7 +14,7 @@ allowed:
   - generic docs
   - generic schemas
   - starter templates with placeholder values only
-  - unit tests for QA-AIST itself
+  - unit tests for AI Quality Pilot itself
 ```
 
 ## Do not commit here
@@ -32,16 +32,16 @@ forbidden:
 
 ## Host-project overlay
 
-Target repositories should store project-owned assets outside the QA-AIST tool checkout. Recommended default:
+Target repositories should store project-owned assets outside the AI Quality Pilot tool checkout. Recommended default:
 
 ```text
-.qa-aist.yaml
-.qa-aist-project/cases/
-.qa-aist-project/runners/
-.qa-aist-project/rules/
-.qa-aist-project/state/      # usually ignored
-.qa-aist-project/evidence/   # ignored
-.qa-aist-project/reports/    # generated
+.quality-pilot.yaml
+.quality-pilot-project/cases/
+.quality-pilot-project/runners/
+.quality-pilot-project/rules/
+.quality-pilot-project/state/      # usually ignored
+.quality-pilot-project/evidence/   # ignored
+.quality-pilot-project/reports/    # generated
 ```
 
 ## Review checklist before commit

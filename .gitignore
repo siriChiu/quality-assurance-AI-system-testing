@@ -15,8 +15,8 @@ build/
 dist/
 
 # Project overlays generated in host repositories; do not commit them here.
-.qa-aist/
-.qa-aist.yaml
-.qa-aist.local.yaml
-.qa-aist.secret.yaml
-.qa-aist.cache/
+.quality-pilot/
+.quality-pilot.yaml
+.quality-pilot.local.yaml
+.quality-pilot.secret.yaml
+.quality-pilot.cache/

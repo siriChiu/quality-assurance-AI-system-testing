@@ -1,9 +1,9 @@
 # SWQA test-design knowledge
 
 status: reusable
-scope: generic QA-AIST test design
+scope: generic AI Quality Pilot test design
 
-QA-AIST must model how an experienced SWQA engineer expands one confirmed bug into a reusable test pattern. The goal is not only to prove the exact fix; it is to expose sibling failures that share the same parser, validator, state transition, transport path, or safety boundary.
+AI Quality Pilot must model how an experienced SWQA engineer expands one confirmed bug into a reusable test pattern. The goal is not only to prove the exact fix; it is to expose sibling failures that share the same parser, validator, state transition, transport path, or safety boundary.
 
 ## Core principle
 
@@ -49,11 +49,11 @@ bug_pattern_card:
 
 ## Init and growing case generation
 
-`/qa-aist cases generate` requires an explicit mode so users do not confuse first-time test design with incremental growth.
+`/quality-pilot cases generate` requires an explicit mode so users do not confuse first-time test design with incremental growth.
 
-`/qa-aist cases generate --init` is the first-time full-repo SWQA map. It scans README, code inventory, package metadata, existing runners, existing cases, and project rules, then creates executable safe-probe cases for functional, positive, negative, boundary, side-effect-safe, and stress/timeout-risk coverage.
+`/quality-pilot cases generate --init` is the first-time full-repo SWQA map. It scans README, code inventory, package metadata, existing runners, existing cases, and project rules, then creates executable safe-probe cases for functional, positive, negative, boundary, side-effect-safe, and stress/timeout-risk coverage.
 
-`/qa-aist cases generate --growing` is the follow-up mode. It is not limited to issue-to-case conversion; it observes repo metadata, current issue mirrors, PR references, latest run state, reports, existing cases/runners, and project rules, then creates executable safe-probe cases from fresh signals.
+`/quality-pilot cases generate --growing` is the follow-up mode. It is not limited to issue-to-case conversion; it observes repo metadata, current issue mirrors, PR references, latest run state, reports, existing cases/runners, and project rules, then creates executable safe-probe cases from fresh signals.
 
 ```yaml
 growth_generation:
@@ -102,9 +102,9 @@ growth_generation:
     - side_effect_boundary
 ```
 
-Do not invent a destructive or credentialed command when only the testing idea is known. QA-AIST must still generate a runnable side-effect-safe probe, such as CLI help/parser, repo compile/build, invalid-command rejection, dry-run/no-op, or bounded baseline checks. Lab runners can replace or extend the safe probe after the user provides fixture, credential env names, and side-effect boundaries.
+Do not invent a destructive or credentialed command when only the testing idea is known. AI Quality Pilot must still generate a runnable side-effect-safe probe, such as CLI help/parser, repo compile/build, invalid-command rejection, dry-run/no-op, or bounded baseline checks. Lab runners can replace or extend the safe probe after the user provides fixture, credential env names, and side-effect boundaries.
 
-Hermes may use a separate growth session or agent for broader analysis, but that session may only produce candidate JSON. QA-AIST remains the sole writer of case YAML and must validate schema, dedupe fingerprints, raw-secret leakage, internal prompt leakage, dangerous `.qa` runtime paths, and command fields before writing any contract.
+Hermes may use a separate growth session or agent for broader analysis, but that session may only produce candidate JSON. AI Quality Pilot remains the sole writer of case YAML and must validate schema, dedupe fingerprints, raw-secret leakage, internal prompt leakage, dangerous `.qa` runtime paths, and command fields before writing any contract.
 
 ## CLI parser and flag-order matrix
 
@@ -216,4 +216,4 @@ pass_gate:
       - parser_accepts_dangerous_invalid_values
 ```
 
-This document is generic QA-AIST knowledge. Project-specific commands, hosts, credentials, tracker IDs, issue mirrors, and evidence must stay in the host-project overlay, not in the QA-AIST tool repository.
+This document is generic AI Quality Pilot knowledge. Project-specific commands, hosts, credentials, tracker IDs, issue mirrors, and evidence must stay in the host-project overlay, not in the AI Quality Pilot tool repository.

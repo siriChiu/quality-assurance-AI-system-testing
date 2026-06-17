@@ -11,9 +11,9 @@ try:
 except ImportError:  # pragma: no cover - exercised only in minimal installs
     yaml = None
 
-DEFAULT_PROJECT_WORKSPACE = ".qa-aist-project"
-LEGACY_PROJECT_WORKSPACE = ".qa-aist"
-CONFIG_FILE = ".qa-aist.yaml"
+DEFAULT_PROJECT_WORKSPACE = ".quality-pilot-project"
+LEGACY_PROJECT_WORKSPACE = ".quality-pilot"
+CONFIG_FILE = ".quality-pilot.yaml"
 
 REQUIRED_CONFIG_PATHS = ["workspace", "cases", "runners", "rules", "state", "evidence", "reports"]
 OPTIONAL_CONFIG_PATHS = ["issues"]
@@ -77,8 +77,8 @@ def default_config(
     gitea_token_env: str = "",
 ) -> str:
     _ = (gitea_backend, gitea_base_url, gitea_repo, gitea_token_env)
-    return f"""# QA-AIST project configuration
-# This file belongs to the host project, not to the QA-AIST tool repository.
+    return f"""# AI Quality Pilot project configuration
+# This file belongs to the host project, not to the AI Quality Pilot tool repository.
 project:
   name: {_yaml_string(project_name)}
   default_branch: {_yaml_string(default_branch)}
@@ -147,14 +147,14 @@ def project_paths(root: Path, workspace: str | Path = DEFAULT_PROJECT_WORKSPACE)
     )
 
 
-def is_qa_aist_source_checkout(path: Path) -> bool:
+def is_quality_pilot_source_checkout(path: Path) -> bool:
     if not path.is_dir():
         return False
-    package_dir = path / "src" / "qa_aist"
+    package_dir = path / "src" / "quality_pilot"
     pyproject = path / "pyproject.toml"
     if package_dir.is_dir() and pyproject.exists():
         try:
-            if 'name = "qa-aist"' in pyproject.read_text(encoding="utf-8"):
+            if 'name = "quality-pilot"' in pyproject.read_text(encoding="utf-8"):
                 return True
         except OSError:
             return False
@@ -185,7 +185,7 @@ def load_yaml(path: Path) -> dict[str, Any]:
 
 
 def _load_simple_yaml(text: str) -> dict[str, Any]:
-    """Small fallback parser for QA-AIST's generated config shape."""
+    """Small fallback parser for AI Quality Pilot's generated config shape."""
     data: dict[str, Any] = {}
     current: dict[str, Any] | None = None
     for raw in text.splitlines():
@@ -263,7 +263,7 @@ def _is_allowed_secret_reference(key: str, value: str) -> bool:
         return True
     if key.endswith("_env") or key.endswith("-env") or key.lower() in {"api_token_env", "api_key_env"}:
         return bool(ENV_NAME_RE.match(value))
-    if ENV_NAME_RE.match(value) and ("ENV" in key.upper() or value.startswith("QA_AIST_")):
+    if ENV_NAME_RE.match(value) and ("ENV" in key.upper() or value.startswith("QUALITY_PILOT_")):
         return True
     return False
 

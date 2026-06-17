@@ -1,29 +1,33 @@
-# QA-AIST
+<p align="center">
+  <img src="docs/assets/quality-pilot-logo.svg" alt="AI Quality Pilot logo: Hermes-inspired wing, lobster claw, and QA check mark" width="760">
+</p>
+
+# AI Quality Pilot
 
 ![Status](https://img.shields.io/badge/status-Gitea--first%20lifecycle-green)
 ![Python](https://img.shields.io/badge/python-%3E%3D3.10-blue)
 ![Hermes](https://img.shields.io/badge/hermes-dynamic%20skill-purple)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-QA-AIST 是給 Hermes 使用的開源 SWQA lifecycle agent/plugin。使用者在 Hermes 聊天室輸入 `/qa-aist ...`，Hermes 依 `SKILL.md` 呼叫 deterministic QA-AIST engine，完成 issue sync、test case generation、test execution、evidence/report、Wiki status sync、write gate 與產品修復 PR handoff。
+AI Quality Pilot 是給 Hermes 使用的開源 SWQA lifecycle agent/plugin。使用者在 Hermes 聊天室輸入 `/quality-pilot ...`，Hermes 依 `SKILL.md` 呼叫 deterministic AI Quality Pilot engine，完成 issue sync、test case generation、test execution、evidence/report、Wiki status sync、write gate 與產品修復 PR handoff。
 
-English summary: QA-AIST is a Hermes-first deterministic SWQA lifecycle engine for Gitea issue sync, executable test-case generation, evidence-based test execution, gated Wiki status sync, and product repair PR workflows.
+English summary: AI Quality Pilot is a Hermes-first deterministic SWQA lifecycle engine for Gitea issue sync, executable test-case generation, evidence-based test execution, gated Wiki status sync, and product repair PR workflows.
 
-## What Is QA-AIST?
+## What Is AI Quality Pilot?
 
-QA-AIST 不是單純的 test runner，也不是讓 Hermes 任意拼 Gitea API 的捷徑。它把 SWQA lifecycle 收斂成少數 workflow commands：`issues`、`cases`、`publish wiki`、`close-loop`、`report`、`tracker`。
+AI Quality Pilot 不是單純的 test runner，也不是讓 Hermes 任意拼 Gitea API 的捷徑。它把 SWQA lifecycle 收斂成少數 workflow commands：`issues`、`cases`、`publish wiki`、`close-loop`、`report`、`tracker`。
 
-Hermes 可以協助讀 MCP、問少量問題、修 code、呈現選單；但 sync、dedupe、case contract、evidence、write gate、Wiki/PR 發布決策，都必須回到 QA-AIST engine。
+Hermes 可以協助讀 MCP、問少量問題、修 code、呈現選單；但 sync、dedupe、case contract、evidence、write gate、Wiki/PR 發布決策，都必須回到 AI Quality Pilot engine。
 
 ## Lifecycle
 
 ```mermaid
 flowchart LR
-  U["User<br/>Hermes chat"] --> H["/qa-aist ..."]
+  U["User<br/>Hermes chat"] --> H["/quality-pilot ..."]
   H --> S["Hermes SKILL.md"]
-  S --> E["QA-AIST engine"]
-  E --> C[".qa-aist.yaml"]
-  E --> W[".qa-aist-project"]
+  S --> E["AI Quality Pilot engine"]
+  E --> C[".quality-pilot.yaml"]
+  E --> W[".quality-pilot-project"]
   W --> I["issues mirror"]
   W --> T["case contracts"]
   W --> V["evidence + reports"]
@@ -53,61 +57,61 @@ Observe -> Normalize -> Execute -> Triage -> Publish -> Evolve -> Prune
 
 ## Quick Start
 
-1. Install Hermes skill from a QA-AIST checkout:
+1. Install Hermes skill from a AI Quality Pilot checkout:
 
 ```bash
-cd /root/repo/QA-AIST
-PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes install-skill --force \
-  --runner-command "/usr/bin/env PYTHONPATH=/root/repo/QA-AIST/src python3 -m qa_aist.hermes"
+cd /root/repo/AI Quality Pilot
+PYTHONPATH=/root/repo/AI Quality Pilot/src python3 -m quality_pilot.hermes install-skill --force \
+  --runner-command "/usr/bin/env PYTHONPATH=/root/repo/AI Quality Pilot/src python3 -m quality_pilot.hermes"
 ```
 
 2. In Hermes chat:
 
 ```text
 /reload-skills
-/qa-aist help
+/quality-pilot help
 ```
 
 3. In the product repo session:
 
 ```text
-/qa-aist setup
-/qa-aist doctor
-/qa-aist issues sync
-/qa-aist cases generate --init
-/qa-aist cases validate
-/qa-aist cases list
-/qa-aist cases run <case_id>
-/qa-aist publish wiki status
+/quality-pilot setup
+/quality-pilot doctor
+/quality-pilot issues sync
+/quality-pilot cases generate --init
+/quality-pilot cases validate
+/quality-pilot cases list
+/quality-pilot cases run <case_id>
+/quality-pilot publish wiki status
 ```
 
 4. Run all cases when the first case is healthy:
 
 ```text
-/qa-aist cases run
-/qa-aist publish wiki apply
-/qa-aist report status
+/quality-pilot cases run
+/quality-pilot publish wiki apply
+/quality-pilot report status
 ```
 
-`cases generate --init` is the first-time full-repo SWQA map. It is already fast/high-standard autonomous mode: QA-AIST scans README, code, package metadata, existing runners/cases/rules, then creates executable side-effect-safe probes across functional, positive, negative, boundary, invalid-input, side-effect-safe, and stress/timeout-risk dimensions. It should not ask you to approve cases one by one.
+`cases generate --init` is the first-time full-repo SWQA map. It is already fast/high-standard autonomous mode: AI Quality Pilot scans README, code, package metadata, existing runners/cases/rules, then creates executable side-effect-safe probes across functional, positive, negative, boundary, invalid-input, side-effect-safe, and stress/timeout-risk dimensions. It should not ask you to approve cases one by one.
 
 Use `--count` only when you intentionally want a smaller first batch:
 
 ```text
-/qa-aist cases generate --init --count 5
+/quality-pilot cases generate --init --count 5
 ```
 
 For follow-up expansion after issues, PRs, latest runs, or reports changed:
 
 ```text
-/qa-aist cases generate --growing
+/quality-pilot cases generate --growing
 ```
 
 For Redmine issue IDs:
 
 ```text
-/qa-aist issues sync --redmine-issues 144780 144693
-/qa-aist cases generate --redmine-issues 144780 144693
+/quality-pilot issues sync --redmine-issues 144780 144693
+/quality-pilot cases generate --redmine-issues 144780 144693
 ```
 
 `144780 144693` are examples only. Replace them with any Redmine issue IDs; multiple IDs are supported.
@@ -115,74 +119,74 @@ For Redmine issue IDs:
 ## Public Commands
 
 ```text
-/qa-aist help
-/qa-aist setup
-/qa-aist doctor
+/quality-pilot help
+/quality-pilot setup
+/quality-pilot doctor
 
-/qa-aist issues sync
-/qa-aist issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]
-/qa-aist issues status
-/qa-aist issues show <issue_id>
-/qa-aist issues fix --all
-/qa-aist issues fix --issue <id>
-/qa-aist issues fix --issue <id> --push-pr
+/quality-pilot issues sync
+/quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]
+/quality-pilot issues status
+/quality-pilot issues show <issue_id>
+/quality-pilot issues fix --all
+/quality-pilot issues fix --issue <id>
+/quality-pilot issues fix --issue <id> --push-pr
 
-/qa-aist cases generate --init
-/qa-aist cases generate --init --count 5
-/qa-aist cases generate --growing
-/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]
-/qa-aist cases review
-/qa-aist cases validate
-/qa-aist cases list
-/qa-aist cases run
-/qa-aist cases run <case_id>
-/qa-aist cases push-pr
-/qa-aist cases push-pr <case_id>
+/quality-pilot cases generate --init
+/quality-pilot cases generate --init --count 5
+/quality-pilot cases generate --growing
+/quality-pilot cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]
+/quality-pilot cases review
+/quality-pilot cases validate
+/quality-pilot cases list
+/quality-pilot cases run
+/quality-pilot cases run <case_id>
+/quality-pilot cases push-pr
+/quality-pilot cases push-pr <case_id>
 
-/qa-aist publish wiki status
-/qa-aist publish wiki plan
-/qa-aist publish wiki apply
+/quality-pilot publish wiki status
+/quality-pilot publish wiki plan
+/quality-pilot publish wiki apply
 
-/qa-aist close-loop status
-/qa-aist close-loop run-once
+/quality-pilot close-loop status
+/quality-pilot close-loop run-once
 
-/qa-aist report status
-/qa-aist report json
-/qa-aist tracker plan-write
+/quality-pilot report status
+/quality-pilot report json
+/quality-pilot tracker plan-write
 ```
 
-`/qa-aist help` 顯示完整中文手冊與新手路徑。子分類 help 已移除。
+`/quality-pilot help` 顯示完整中文手冊與新手路徑。子分類 help 已移除。
 
 ## Command Guide
 
 | 你想做的事 | Command |
 |---|---|
-| 初始化產品 repo | `/qa-aist setup` |
-| 檢查 config、Gitea/Redmine MCP、Wiki readiness | `/qa-aist doctor` |
-| 同步 issues，內建 dedupe/prune | `/qa-aist issues sync` |
-| 從 Redmine IDs 同步本地 mirrors 並經 gate 建立 Gitea issues | `/qa-aist issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]` |
-| 看 issue sync、duplicate、fix queue、PR handoff | `/qa-aist issues status` |
-| 首次產生全 repo SWQA cases | `/qa-aist cases generate --init` |
-| 限制初始 case 數量 | `/qa-aist cases generate --init --count 5` |
-| 依最新狀態擴散 cases | `/qa-aist cases generate --growing` |
-| 從 Redmine IDs 直接產生 linked cases | `/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]` |
-| 驗證 case contracts | `/qa-aist cases validate` |
-| 列出 cases | `/qa-aist cases list` |
-| 跑單一 case | `/qa-aist cases run <case_id>` |
-| 跑全部 cases | `/qa-aist cases run` |
-| 查看 Wiki 狀態 | `/qa-aist publish wiki status` |
-| 產生 Wiki 草稿 | `/qa-aist publish wiki plan` |
-| 套用 Wiki 更新 | `/qa-aist publish wiki apply` |
-| 查看 closed-loop component health | `/qa-aist close-loop status` |
-| 跑一輪 closed-loop | `/qa-aist close-loop run-once` |
-| 產生報告 | `/qa-aist report status` |
+| 初始化產品 repo | `/quality-pilot setup` |
+| 檢查 config、Gitea/Redmine MCP、Wiki readiness | `/quality-pilot doctor` |
+| 同步 issues，內建 dedupe/prune | `/quality-pilot issues sync` |
+| 從 Redmine IDs 同步本地 mirrors 並經 gate 建立 Gitea issues | `/quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]` |
+| 看 issue sync、duplicate、fix queue、PR handoff | `/quality-pilot issues status` |
+| 首次產生全 repo SWQA cases | `/quality-pilot cases generate --init` |
+| 限制初始 case 數量 | `/quality-pilot cases generate --init --count 5` |
+| 依最新狀態擴散 cases | `/quality-pilot cases generate --growing` |
+| 從 Redmine IDs 直接產生 linked cases | `/quality-pilot cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]` |
+| 驗證 case contracts | `/quality-pilot cases validate` |
+| 列出 cases | `/quality-pilot cases list` |
+| 跑單一 case | `/quality-pilot cases run <case_id>` |
+| 跑全部 cases | `/quality-pilot cases run` |
+| 查看 Wiki 狀態 | `/quality-pilot publish wiki status` |
+| 產生 Wiki 草稿 | `/quality-pilot publish wiki plan` |
+| 套用 Wiki 更新 | `/quality-pilot publish wiki apply` |
+| 查看 closed-loop component health | `/quality-pilot close-loop status` |
+| 跑一輪 closed-loop | `/quality-pilot close-loop run-once` |
+| 產生報告 | `/quality-pilot report status` |
 
 ## Project Layout
 
 ```text
 your-product/
-  .qa-aist.yaml
-  .qa-aist-project/
+  .quality-pilot.yaml
+  .quality-pilot-project/
     issues/       # Gitea/Redmine local mirrors
     cases/        # YAML case contracts
     runners/      # project-owned runner scripts
@@ -192,7 +196,7 @@ your-product/
     reports/      # Markdown/JSON reports
 ```
 
-`.qa-aist` 是工具本體；`.qa-aist-project` 是 host project runtime data。不要把 token、password、lab credentials、customer data 寫進 tool source 或 tracked config。
+`.quality-pilot` 是工具本體；`.quality-pilot-project` 是 host project runtime data。不要把 token、password、lab credentials、customer data 寫進 tool source 或 tracked config。
 
 ## Case Contract
 
@@ -203,7 +207,7 @@ case_id: INIT-CLI-HELP
 title: CLI help returns successfully
 source:
   type: init
-qa_aist:
+quality_pilot:
   draft: false
   review_required_before_run: false
 swqa_dimensions:
@@ -221,7 +225,7 @@ risk_controls:
   requires_credentials: false
 ```
 
-Every runnable case must have `commands[].run`. If a lab-only target, fixture, or credential is missing, QA-AIST should still generate a safe executable probe first and record stronger lab checks as follow-up metadata.
+Every runnable case must have `commands[].run`. If a lab-only target, fixture, or credential is missing, AI Quality Pilot should still generate a safe executable probe first and record stronger lab checks as follow-up metadata.
 
 ## Reports And Evidence
 
@@ -249,7 +253,7 @@ Normalized result includes:
 }
 ```
 
-Reports live under `.qa-aist-project/reports/`; evidence lives under `.qa-aist-project/evidence/`.
+Reports live under `.quality-pilot-project/reports/`; evidence lives under `.quality-pilot-project/evidence/`.
 
 ## Wiki Status
 
@@ -276,11 +280,11 @@ Wiki page structure:
 
 `publish wiki apply` is Wiki-only. It never creates issue comments, new issues, or PRs.
 
-QA-AIST does not write Gitea through its own token. `publish wiki apply` returns a gated MCP request; Hermes uses its configured Gitea MCP server to update the exact Wiki page in the same user flow, writes the MCP result JSON path requested by QA-AIST, then reports the result. There is no public second completion command.
+AI Quality Pilot does not write Gitea through its own token. `publish wiki apply` returns a gated MCP request; Hermes uses its configured Gitea MCP server to update the exact Wiki page in the same user flow, writes the MCP result JSON path requested by AI Quality Pilot, then reports the result. There is no public second completion command.
 
 ## Gitea And Redmine MCP
 
-`/qa-aist setup` writes MCP-only config. It does not store Gitea repo URLs, repo names, or token env names:
+`/quality-pilot setup` writes MCP-only config. It does not store Gitea repo URLs, repo names, or token env names:
 
 ```yaml
 tracker:
@@ -290,22 +294,22 @@ tracker:
     required_servers:
       - gitea
       - redmine
-    status_json: .qa-aist-project/state/hermes-mcp/status.json
-    gitea_issues_json: .qa-aist-project/state/gitea-mcp/issues.json
-    redmine_issues_json: .qa-aist-project/state/redmine-mcp/issues.json
-    wiki_write_request_json: .qa-aist-project/state/gitea-mcp/wiki-write-request.json
-    wiki_write_result_json: .qa-aist-project/state/gitea-mcp/wiki-write-result.json
+    status_json: .quality-pilot-project/state/hermes-mcp/status.json
+    gitea_issues_json: .quality-pilot-project/state/gitea-mcp/issues.json
+    redmine_issues_json: .quality-pilot-project/state/redmine-mcp/issues.json
+    wiki_write_request_json: .quality-pilot-project/state/gitea-mcp/wiki-write-request.json
+    wiki_write_result_json: .quality-pilot-project/state/gitea-mcp/wiki-write-result.json
 ```
 
-Hermes must expose its available MCP servers to QA-AIST before `doctor` can call remote readiness ready. Either set `QA_AIST_HERMES_MCP_SERVERS=gitea,redmine` for the dispatcher process, or write `.qa-aist-project/state/hermes-mcp/status.json` with a server list. If Gitea or Redmine MCP is missing, `/qa-aist doctor` shows it at the beginning.
+Hermes must expose its available MCP servers to AI Quality Pilot before `doctor` can call remote readiness ready. Either set `QUALITY_PILOT_HERMES_MCP_SERVERS=gitea,redmine` for the dispatcher process, or write `.quality-pilot-project/state/hermes-mcp/status.json` with a server list. If Gitea or Redmine MCP is missing, `/quality-pilot doctor` shows it at the beginning.
 
 Hermes MCP usage is narrow:
 
-- Gitea MCP may read issues before `/qa-aist issues sync`.
-- Gitea MCP may create new Gitea issues only after `/qa-aist issues sync --redmine-issues ...` returns a gated `mcp_issue_write_request`.
-- Gitea MCP may update only the configured Wiki page after `/qa-aist publish wiki apply` returns a gated request.
-- Redmine MCP may read requested issues before `/qa-aist issues sync --redmine-issues ...` or `/qa-aist cases generate --redmine-issues ...`.
-- MCP must not create comments, edit/close/reopen issues, create PRs, write arbitrary Wiki pages, or bypass QA-AIST write gate. New issue creation is allowed only through `/qa-aist issues sync --redmine-issues ...` gated requests.
+- Gitea MCP may read issues before `/quality-pilot issues sync`.
+- Gitea MCP may create new Gitea issues only after `/quality-pilot issues sync --redmine-issues ...` returns a gated `mcp_issue_write_request`.
+- Gitea MCP may update only the configured Wiki page after `/quality-pilot publish wiki apply` returns a gated request.
+- Redmine MCP may read requested issues before `/quality-pilot issues sync --redmine-issues ...` or `/quality-pilot cases generate --redmine-issues ...`.
+- MCP must not create comments, edit/close/reopen issues, create PRs, write arbitrary Wiki pages, or bypass AI Quality Pilot write gate. New issue creation is allowed only through `/quality-pilot issues sync --redmine-issues ...` gated requests.
 
 ## Removed Commands
 
@@ -315,31 +319,31 @@ High-level replacements:
 
 | Old concept | New command |
 |---|---|
-| config/status checks | `/qa-aist doctor` |
-| test listing/running | `/qa-aist cases list`, `/qa-aist cases run [case_id]` |
-| issue dedupe | `/qa-aist issues sync` |
-| issue repair/PR | `/qa-aist issues fix ...` |
-| mixed publish | `/qa-aist publish wiki ...` |
-| Gitea sync aliases | `/qa-aist issues sync` |
-| issue-growth aliases | `/qa-aist cases generate --growing` |
+| config/status checks | `/quality-pilot doctor` |
+| test listing/running | `/quality-pilot cases list`, `/quality-pilot cases run [case_id]` |
+| issue dedupe | `/quality-pilot issues sync` |
+| issue repair/PR | `/quality-pilot issues fix ...` |
+| mixed publish | `/quality-pilot publish wiki ...` |
+| Gitea sync aliases | `/quality-pilot issues sync` |
+| issue-growth aliases | `/quality-pilot cases generate --growing` |
 
 ## Developer / CI Usage
 
 From an installed package:
 
 ```bash
-qa-aist doctor --root /path/to/product
-qa-aist issues sync --root /path/to/product
-qa-aist cases generate --root /path/to/product --init
-qa-aist cases run --root /path/to/product CASE-001
-qa-aist publish wiki plan --root /path/to/product
+quality-pilot doctor --root /path/to/product
+quality-pilot issues sync --root /path/to/product
+quality-pilot cases generate --root /path/to/product --init
+quality-pilot cases run --root /path/to/product CASE-001
+quality-pilot publish wiki plan --root /path/to/product
 ```
 
 From a source checkout:
 
 ```bash
-PYTHONPATH=src python3 -m qa_aist.cli doctor --root /path/to/product
-PYTHONPATH=src python3 -m qa_aist.cli cases run --root /path/to/product CASE-001
+PYTHONPATH=src python3 -m quality_pilot.cli doctor --root /path/to/product
+PYTHONPATH=src python3 -m quality_pilot.cli cases run --root /path/to/product CASE-001
 ```
 
 Run tests:
@@ -360,24 +364,24 @@ Contributions should preserve these invariants:
 - Product PR creation stays behind explicit `issues fix --issue <id> --push-pr` or `cases push-pr <case_id>`.
 - Secrets are referenced by env var names, never stored raw.
 
-Security issues: do not paste tokens or credentials into issues or examples. QA-AIST config should reference Hermes MCP handoff paths, not tracker tokens.
+Security issues: do not paste tokens or credentials into issues or examples. AI Quality Pilot config should reference Hermes MCP handoff paths, not tracker tokens.
 
 License: MIT.
 
 ## FAQ
 
-### Why does bare `/qa-aist cases generate` not run?
+### Why does bare `/quality-pilot cases generate` not run?
 
 Because generation has two very different meanings. Use `--init` for first-time full repo SWQA mapping, or `--growing` for follow-up expansion from latest state.
 
 ### Do I need to review every generated testcase?
 
-No. `--init` and `--growing` should generate executable side-effect-safe probes. Hermes should only ask category-level blocking questions when QA-AIST returns `hermes_needs_input`.
+No. `--init` and `--growing` should generate executable side-effect-safe probes. Hermes should only ask category-level blocking questions when AI Quality Pilot returns `hermes_needs_input`.
 
 ### Can Gitea MCP write Wiki?
 
-Yes, but only the configured Wiki page and only after `/qa-aist publish wiki apply` returns a gated MCP write request. For issues, Gitea MCP may create new issues only from the gated request returned by `/qa-aist issues sync --redmine-issues ...`; it must not comment, edit, close/reopen issues, create PRs, or write arbitrary pages.
+Yes, but only the configured Wiki page and only after `/quality-pilot publish wiki apply` returns a gated MCP write request. For issues, Gitea MCP may create new issues only from the gated request returned by `/quality-pilot issues sync --redmine-issues ...`; it must not comment, edit, close/reopen issues, create PRs, or write arbitrary pages.
 
 ### Where do Redmine issues enter?
 
-Hermes Redmine MCP reads requested IDs and writes snapshot JSON. Use `/qa-aist issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]` when you want QA-AIST to mirror those tickets and create gated Gitea issues. Use `/qa-aist cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]` when you want linked testcase contracts directly; this command does not create a Gitea plan.
+Hermes Redmine MCP reads requested IDs and writes snapshot JSON. Use `/quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]` when you want AI Quality Pilot to mirror those tickets and create gated Gitea issues. Use `/quality-pilot cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]` when you want linked testcase contracts directly; this command does not create a Gitea plan.

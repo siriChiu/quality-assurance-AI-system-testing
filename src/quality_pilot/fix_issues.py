@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -13,6 +13,8 @@ from .issues import dedupe_issues, load_issue_snapshot
 FIX_PLAN_NAME = "fix-plan.json"
 FIX_RUN_NAME = "fix-run-handoff.json"
 FIX_PR_NAME = "fix-pr-result.json"
+MAX_PR_TITLE_LEN = 120
+REDMINE_REF_RE = re.compile(r"\bRedmine\s*#\s*(\d+)\b", re.IGNORECASE)
 
 
 class FixIssueError(RuntimeError):
@@ -36,7 +38,7 @@ def plan_fix_issue(config: ProjectConfig, *, issue_id: int) -> dict[str, Any]:
         blockers.append("duplicate_issue_candidates")
 
     plan = {
-        "schema": "qa-aist.fix-plan.v1",
+        "schema": "quality-pilot.fix-plan.v1",
         "status": "blocked" if blockers else "ready",
         "issue_id": issue_id,
         "issue": issue,
@@ -46,10 +48,10 @@ def plan_fix_issue(config: ProjectConfig, *, issue_id: int) -> dict[str, Any]:
         "blockers": blockers,
         "duplicate_issue_ids": duplicate_issue_ids,
         "preflight": [
-            "/qa-aist issues sync",
-            f"/qa-aist qa-test run-one {case_ids[0]}" if case_ids else "/qa-aist cases generate --growing",
-            "/qa-aist publish wiki status",
-            "/qa-aist publish plan",
+            "/quality-pilot issues sync",
+            f"/quality-pilot cases run {case_ids[0]}" if case_ids else "/quality-pilot cases generate --growing",
+            "/quality-pilot publish wiki status",
+            "/quality-pilot publish wiki plan",
         ],
         "handoff": "Hermes may perform the minimal code change only after this plan is ready.",
     }
@@ -64,7 +66,7 @@ def run_fix_issue(config: ProjectConfig, *, issue_id: int) -> dict[str, Any]:
     if plan["status"] != "ready":
         return {"status": "blocked", "error": "fix_plan_blocked", "plan": plan}
     payload = {
-        "schema": "qa-aist.fix-run-handoff.v1",
+        "schema": "quality-pilot.fix-run-handoff.v1",
         "status": "handoff",
         "issue_id": issue_id,
         "branch": plan["branch"],
@@ -72,9 +74,9 @@ def run_fix_issue(config: ProjectConfig, *, issue_id: int) -> dict[str, Any]:
         "instructions": [
             "Create or switch to the planned branch.",
             "Make the minimal product code change needed for the synced open issue.",
-            "Run the linked QA-AIST case contracts.",
-            "Check /qa-aist publish wiki status, then run /qa-aist publish plan before any issue remote write.",
-            "Run /qa-aist fix-issues submit-pr --issue <id> only after tests and gate pass.",
+            "Run the linked AI Quality Pilot case contracts.",
+            "Check /quality-pilot publish wiki status, then run /quality-pilot publish wiki plan before any issue remote write.",
+            "Run /quality-pilot issues fix --issue <id> --push-pr only after tests and gate pass.",
         ],
     }
     path = config.paths.state / FIX_RUN_NAME
@@ -87,7 +89,7 @@ def submit_fix_pr(config: ProjectConfig, *, issue_id: int, dry_run: bool = False
     if plan["status"] != "ready":
         return {"status": "blocked", "error": "fix_plan_blocked", "plan": plan}
     latest_report = config.paths.reports / "status.md"
-    title = f"Fix Gitea issue #{issue_id}"
+    title = render_pr_title(plan)
     body = render_pr_body(plan, latest_report)
     payload = {
         "title": title,
@@ -105,7 +107,7 @@ def submit_fix_pr(config: ProjectConfig, *, issue_id: int, dry_run: bool = False
         return {
             "status": "blocked",
             "error": "gitea_mcp_write_not_supported",
-            "message": "tracker.gitea.backend: mcp supports issue sync and gated Wiki-only handoff. Configure HTTP backend with token_env before /qa-aist fix-issues submit-pr creates a pull request.",
+            "message": "tracker.gitea.backend: mcp supports issue sync and gated Wiki-only handoff. Configure HTTP backend with token_env before /quality-pilot fix-issues submit-pr creates a pull request.",
             "backend": gitea_cfg.backend,
         }
     _push_branch(config.root, plan["branch"])
@@ -130,20 +132,30 @@ def fix_status(config: ProjectConfig) -> dict[str, Any]:
 
 
 def render_pr_body(plan: dict[str, Any], report_path: Path) -> str:
-    case_lines = [f"- {case_id}" for case_id in plan.get("case_ids", [])] or ["- No linked case IDs found; see QA-AIST plan."]
+    case_lines = [f"- {case_id}" for case_id in plan.get("case_ids", [])] or ["- No linked case IDs found; see AI Quality Pilot plan."]
     return "\n".join(
         [
             f"Fixes Gitea issue #{plan.get('issue_id')}.",
             "",
-            "## QA-AIST verification",
+            "## AI Quality Pilot verification",
             "",
             *case_lines,
             "",
             f"Report: {report_path}",
             "",
-            "This PR was prepared through QA-AIST fix-issues submit-pr after issue sync and duplicate checks.",
+            "This PR was prepared through AI Quality Pilot fix-issues submit-pr after issue sync and duplicate checks.",
         ]
     )
+
+
+def render_pr_title(plan: dict[str, Any]) -> str:
+    issue = plan.get("issue") if isinstance(plan.get("issue"), dict) else {}
+    refs = _issue_refs(plan, issue)
+    case_suffix = _case_suffix(plan.get("case_ids", []))
+    prefix = f"Fix {' / '.join(refs)}: "
+    summary_limit = max(24, MAX_PR_TITLE_LEN - len(prefix) - len(case_suffix))
+    summary = _ellipsize(_clean_summary(issue.get("title")), summary_limit)
+    return f"{prefix}{summary}{case_suffix}"
 
 
 def fix_plan_path(config: ProjectConfig) -> Path:
@@ -171,6 +183,40 @@ def _duplicate_issue_ids(duplicates: dict[str, Any], issue_id: int) -> list[int]
         if issue_id in ids:
             out.extend([item for item in ids if item != issue_id])
     return sorted(set(out))
+
+
+def _issue_refs(plan: dict[str, Any], issue: dict[str, Any]) -> list[str]:
+    issue_id = plan.get("issue_id")
+    refs = [f"Gitea #{issue_id}" if issue_id is not None else "Gitea issue"]
+    haystack = "\n".join(str(issue.get(key) or "") for key in ("title", "body", "url"))
+    for redmine_id in REDMINE_REF_RE.findall(haystack):
+        ref = f"Redmine #{redmine_id}"
+        if ref not in refs:
+            refs.append(ref)
+    return refs
+
+
+def _case_suffix(case_ids: Any) -> str:
+    if not isinstance(case_ids, list) or not case_ids:
+        return ""
+    ids = [str(case_id) for case_id in case_ids[:3]]
+    if len(case_ids) > 3:
+        ids.append("...")
+    return f" (cases: {', '.join(ids)})"
+
+
+def _clean_summary(value: Any) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip(" -:|")
+    text = re.sub(r"(?i)\b(token|password|secret|api[_-]?key)\s*[:=]\s*\S+", r"\1=[REDACTED]", text)
+    return text or "linked product issue"
+
+
+def _ellipsize(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    if limit <= 3:
+        return value[:limit]
+    return value[: limit - 3].rstrip() + "..."
 
 
 def _push_branch(root: Path, branch: str) -> None:

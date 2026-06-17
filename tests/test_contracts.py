@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from qa_aist.contracts import ContractError, load_contract
+from quality_pilot.contracts import ContractError, load_contract
 
 
 class ContractsTest(unittest.TestCase):

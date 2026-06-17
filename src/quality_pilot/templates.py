@@ -23,7 +23,7 @@ set -euo pipefail
 python3 --version
 """
 
-WIKI_CATEGORIES_RULE = """# QA-AIST Wiki category seed
+WIKI_CATEGORIES_RULE = """# AI Quality Pilot Wiki category seed
 # Edit this file in the host project to map cases into your product domains.
 fallback: Uncategorized
 categories:
@@ -59,7 +59,7 @@ categories:
 
 SWQA_TEST_DESIGN_RULE = """# SWQA test-design rule
 
-QA-AIST treats each confirmed bug as a reusable failure pattern, not as a
+AI Quality Pilot treats each confirmed bug as a reusable failure pattern, not as a
 single reproduction command. A fix is not complete until deterministic tests
 prove the original failure, adjacent inputs, invalid inputs, and safe no-op
 smoke paths.

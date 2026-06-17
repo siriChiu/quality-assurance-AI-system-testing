@@ -7,10 +7,11 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
-from qa_aist import hermes
-from qa_aist.cli import main
-from qa_aist.config import load_yaml
-from qa_aist.policy_pack import policy_pack
+from quality_pilot import hermes
+from quality_pilot.cli import main
+from quality_pilot.config import load_project_config, load_yaml
+from quality_pilot.fix_issues import submit_fix_pr
+from quality_pilot.policy_pack import policy_pack
 
 
 class LifecycleTest(unittest.TestCase):
@@ -30,7 +31,7 @@ class LifecycleTest(unittest.TestCase):
         return self.init_gitea_project(tmp)
 
     def write_hermes_mcp_status(self, root: Path, servers: list[str] | None = None) -> None:
-        status_path = root / ".qa-aist-project" / "state" / "hermes-mcp" / "status.json"
+        status_path = root / ".quality-pilot-project" / "state" / "hermes-mcp" / "status.json"
         status_path.parent.mkdir(parents=True, exist_ok=True)
         status_path.write_text(json.dumps({"servers": servers or ["gitea", "redmine"]}), encoding="utf-8")
 
@@ -97,13 +98,13 @@ class LifecycleTest(unittest.TestCase):
                 "url": "https://redmine.example.test/issues/144693",
             },
         ]
-        path = root / ".qa-aist-project" / "state" / "redmine-mcp" / "issues.json"
+        path = root / ".quality-pilot-project" / "state" / "redmine-mcp" / "issues.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"content": [{"type": "text", "text": json.dumps({"issues": issues})}]}), encoding="utf-8")
         return path
 
     def write_issue_case(self, root: Path) -> None:
-        case = root / ".qa-aist-project" / "cases" / "ISSUE-1.yaml"
+        case = root / ".quality-pilot-project" / "cases" / "ISSUE-1.yaml"
         case.write_text(
             """case_id: ISSUE-1
 title: Gitea #1: CLI help command fails
@@ -123,7 +124,7 @@ expected: CLI help path remains callable.
     def test_issues_sync_removes_closed_mirror_and_writes_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self.init_gitea_project(tmp)
-            stale = root / ".qa-aist-project" / "issues" / "2.md"
+            stale = root / ".quality-pilot-project" / "issues" / "2.md"
             stale.write_text("stale closed mirror", encoding="utf-8")
             issues_json = self.write_issues(root)
 
@@ -134,17 +135,17 @@ expected: CLI help path remains callable.
             self.assertEqual(payload["open_active_issue_ids"], [1])
             self.assertEqual(payload["closed_issue_ids"], [2])
             self.assertEqual(payload["removed_mirror_ids"], [2])
-            self.assertTrue((root / ".qa-aist-project" / "issues" / "1.md").exists())
+            self.assertTrue((root / ".quality-pilot-project" / "issues" / "1.md").exists())
             self.assertFalse(stale.exists())
-            snapshot = json.loads((root / ".qa-aist-project" / "state" / "issues-snapshot.json").read_text(encoding="utf-8"))
+            snapshot = json.loads((root / ".quality-pilot-project" / "state" / "issues-snapshot.json").read_text(encoding="utf-8"))
             self.assertEqual(snapshot["items"][0]["issue_id"], 1)
 
     def test_issues_sync_reads_gitea_mcp_snapshot_without_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self.init_gitea_mcp_project(tmp)
-            stale = root / ".qa-aist-project" / "issues" / "2.md"
+            stale = root / ".quality-pilot-project" / "issues" / "2.md"
             stale.write_text("stale closed mirror", encoding="utf-8")
-            mcp_path = root / ".qa-aist-project" / "state" / "gitea-mcp" / "issues.json"
+            mcp_path = root / ".quality-pilot-project" / "state" / "gitea-mcp" / "issues.json"
             mcp_path.parent.mkdir(parents=True, exist_ok=True)
             issues = json.loads(self.write_issues(root).read_text(encoding="utf-8"))
             mcp_path.write_text(json.dumps({"content": [{"type": "text", "text": json.dumps({"issues": issues})}]}), encoding="utf-8")
@@ -154,10 +155,10 @@ expected: CLI help path remains callable.
             self.assertEqual(code, 0)
             self.assertEqual(payload["status"], "ok")
             self.assertEqual(payload["source"], "mcp")
-            self.assertEqual(payload["mcp_issues_json"], ".qa-aist-project/state/gitea-mcp/issues.json")
+            self.assertEqual(payload["mcp_issues_json"], ".quality-pilot-project/state/gitea-mcp/issues.json")
             self.assertEqual(payload["open_active_issue_ids"], [1])
             self.assertEqual(payload["removed_mirror_ids"], [2])
-            self.assertTrue((root / ".qa-aist-project" / "issues" / "1.md").exists())
+            self.assertTrue((root / ".quality-pilot-project" / "issues" / "1.md").exists())
             self.assertFalse(stale.exists())
 
     def test_issues_sync_mcp_backend_missing_snapshot_is_actionable(self) -> None:
@@ -169,8 +170,8 @@ expected: CLI help path remains callable.
             self.assertEqual(code, 2)
             self.assertEqual(payload["error"], "IssueSyncError")
             self.assertIn("gitea_mcp_snapshot_missing", payload["message"])
-            self.assertIn("QA_AIST_GITEA_MCP_ISSUES_JSON", payload["message"])
-            self.assertNotIn("QA_AIST_" + "TRACKER_TOKEN", payload["message"])
+            self.assertIn("QUALITY_PILOT_GITEA_MCP_ISSUES_JSON", payload["message"])
+            self.assertNotIn("QUALITY_PILOT_" + "TRACKER_TOKEN", payload["message"])
 
     def test_issues_sync_redmine_issues_writes_local_mirrors_and_gitea_create_request(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -196,18 +197,18 @@ expected: CLI help path remains callable.
             self.assertEqual(payload["gitea_issue_candidate_count"], 2)
             self.assertEqual(payload["remote_write"], "needs_mcp_apply")
             self.assertEqual(payload["blocked_by_gate"], 0)
-            self.assertTrue((root / ".qa-aist-project" / "issues" / "redmine-144780.md").exists())
-            self.assertTrue((root / ".qa-aist-project" / "issues" / "gitea-candidates" / "redmine-144780.md").exists())
-            self.assertTrue((root / ".qa-aist-project" / "state" / "redmine-import.json").exists())
-            state = json.loads((root / ".qa-aist-project" / "state" / "redmine-gitea-sync-state.json").read_text(encoding="utf-8"))
-            self.assertEqual(state["schema"], "qa-aist.redmine-gitea-sync-state.v1")
+            self.assertTrue((root / ".quality-pilot-project" / "issues" / "redmine-144780.md").exists())
+            self.assertTrue((root / ".quality-pilot-project" / "issues" / "gitea-candidates" / "redmine-144780.md").exists())
+            self.assertTrue((root / ".quality-pilot-project" / "state" / "redmine-import.json").exists())
+            state = json.loads((root / ".quality-pilot-project" / "state" / "redmine-gitea-sync-state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["schema"], "quality-pilot.redmine-gitea-sync-state.v1")
             self.assertEqual(state["issue_candidates"][0]["action"], "create_gitea_issue_candidate")
             self.assertTrue(state["issue_candidates"][0]["write_gate_result"]["allowed"])
             self.assertIn("Redmine #144780", state["issue_candidates"][0]["body"])
             self.assertIn("Full journal note: cold boot reproduces after AC cycle; do not shorten this text.", state["issue_candidates"][0]["body"])
             self.assertIn("irctool sensors --login lab.yaml", state["issue_candidates"][0]["body"])
             self.assertIn("cold-boot-sensors.log", state["issue_candidates"][0]["body"])
-            mirror_text = (root / ".qa-aist-project" / "issues" / "redmine-144780.md").read_text(encoding="utf-8")
+            mirror_text = (root / ".quality-pilot-project" / "issues" / "redmine-144780.md").read_text(encoding="utf-8")
             self.assertIn("## Full Redmine Message", mirror_text)
             self.assertIn("### Raw Redmine JSON", mirror_text)
             self.assertIn("Full journal note: cold boot reproduces after AC cycle; do not shorten this text.", mirror_text)
@@ -215,13 +216,13 @@ expected: CLI help path remains callable.
             request_path = root / payload["mcp_issue_write_request_path"]
             self.assertTrue(request_path.exists())
             request = json.loads(request_path.read_text(encoding="utf-8"))
-            self.assertEqual(request["schema"], "qa-aist.gitea-mcp-issue-write-request.v1")
+            self.assertEqual(request["schema"], "quality-pilot.gitea-mcp-issue-write-request.v1")
             self.assertEqual(request["operation"], "gitea.issue.sync_from_redmine")
             self.assertEqual(request["safety"]["allowed_targets"], ["issues"])
             self.assertEqual(request["actions"][0]["operation"], "gitea.issue.create")
             self.assertEqual(request["actions"][0]["redmine_issue_id"], 144780)
             self.assertIn("Full journal note: cold boot reproduces after AC cycle; do not shorten this text.", request["actions"][0]["body"])
-            self.assertFalse((root / ".qa-aist-project" / "cases" / "REDMINE-144780.yaml").exists())
+            self.assertFalse((root / ".quality-pilot-project" / "cases" / "REDMINE-144780.yaml").exists())
 
     def test_cases_generate_redmine_issues_uses_multiple_ids_directly_without_gitea_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -248,9 +249,9 @@ expected: CLI help path remains callable.
             self.assertNotIn("gitea_sync_plan_path", payload)
             self.assertNotIn("gitea_sync_state_path", payload)
             self.assertNotIn("gitea_issue_candidates", payload)
-            self.assertTrue((root / ".qa-aist-project" / "cases" / "REDMINE-144780.yaml").exists())
-            self.assertTrue((root / ".qa-aist-project" / "cases" / "REDMINE-144693.yaml").exists())
-            case_yaml = load_yaml(root / ".qa-aist-project" / "cases" / "REDMINE-144780.yaml")
+            self.assertTrue((root / ".quality-pilot-project" / "cases" / "REDMINE-144780.yaml").exists())
+            self.assertTrue((root / ".quality-pilot-project" / "cases" / "REDMINE-144693.yaml").exists())
+            case_yaml = load_yaml(root / ".quality-pilot-project" / "cases" / "REDMINE-144780.yaml")
             self.assertEqual(case_yaml["source"]["redmine_issue_id"], 144780)
             self.assertIn("Full journal note: cold boot reproduces after AC cycle; do not shorten this text.", case_yaml["source"]["redmine_message"])
             self.assertIn("irctool sensors --login lab.yaml", case_yaml["source"]["redmine_message"])
@@ -258,6 +259,18 @@ expected: CLI help path remains callable.
             self.assertIn("### Raw Redmine JSON", case_yaml["source"]["redmine_message"])
             self.assertNotIn("gitea_sync_plan", case_yaml["source"])
             self.assertEqual(case_yaml["commands"][0]["id"], "safe_probe")
+
+    def test_submit_fix_pr_title_includes_purpose_summary_and_issue_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.init_gitea_project(tmp)
+            issues_json = self.write_issues(root)
+            self.run_cli(["issues", "sync", "--root", tmp, "--issues-json", str(issues_json)])
+            self.write_issue_case(root)
+
+            payload = submit_fix_pr(load_project_config(root), issue_id=1, dry_run=True)
+
+            self.assertEqual(payload["status"], "dry_run")
+            self.assertEqual(payload["pr_payload"]["title"], "Fix Gitea #1: CLI help command fails (cases: ISSUE-1)")
 
     def test_cases_generate_growing_review_validate_and_runs_safe_probe(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -271,7 +284,7 @@ expected: CLI help path remains callable.
             self.assertEqual(generated["source"], "growth")
             self.assertEqual(generated["mode"], "growing")
             self.assertGreaterEqual(generated["growth_seed_count"], 1)
-            self.assertTrue((root / ".qa-aist-project" / "state" / "growth-context.json").exists())
+            self.assertTrue((root / ".quality-pilot-project" / "state" / "growth-context.json").exists())
             self.assertEqual(generated["interaction_scope"], "autonomous")
             self.assertEqual(generated["generated"][0]["question_count"], 0)
             self.assertEqual(generated["missing_input_count"], 0)
@@ -279,13 +292,13 @@ expected: CLI help path remains callable.
             first_case = generated["generated"][0]["case_id"]
             first_yaml = load_yaml(root / generated["generated"][0]["path"])
             self.assertEqual(first_yaml["source"]["type"], "growth")
-            self.assertFalse(first_yaml["qa_aist"]["review_required_before_run"])
+            self.assertFalse(first_yaml["quality_pilot"]["review_required_before_run"])
             self.assertEqual(first_yaml["commands"][0]["id"], "safe_probe")
             self.assertIn("six_hats", first_yaml)
             self.assertIn("growth_seed", first_yaml)
             self.assertIn("growth_reason", first_yaml)
-            context = json.loads((root / ".qa-aist-project" / "state" / "growth-context.json").read_text(encoding="utf-8"))
-            self.assertEqual(context["schema"], "qa-aist.growth-context.v1")
+            context = json.loads((root / ".quality-pilot-project" / "state" / "growth-context.json").read_text(encoding="utf-8"))
+            self.assertEqual(context["schema"], "quality-pilot.growth-context.v1")
             self.assertEqual(context["issue_snapshot"]["open_count"], 1)
             self.assertIn("existing_cases", context)
             self.assertIn("existing_runners", context)
@@ -312,8 +325,8 @@ expected: CLI help path remains callable.
             self.assertEqual(code, 2)
             self.assertEqual(payload["status"], "error")
             self.assertEqual(payload["error"], "explicit_generation_mode_required")
-            self.assertIn("/qa-aist cases generate --init", payload["choices"])
-            self.assertIn("/qa-aist cases generate --growing", payload["choices"])
+            self.assertIn("/quality-pilot cases generate --init", payload["choices"])
+            self.assertIn("/quality-pilot cases generate --growing", payload["choices"])
 
     def test_cases_generate_init_analyzes_repo_and_dedupes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -367,7 +380,7 @@ democtl = "demo.cli:main"
             self.assertEqual(generated["interaction_scope"], "autonomous")
             self.assertEqual(generated["resolved_profile"], "cli")
             self.assertGreaterEqual(generated["analyzed_files_count"], 2)
-            self.assertTrue((root / ".qa-aist-project" / "state" / "init-context.json").exists())
+            self.assertTrue((root / ".quality-pilot-project" / "state" / "init-context.json").exists())
             self.assertEqual(len(generated["generated"]), 5)
             all_dimensions = {dimension for item in generated["generated"] for dimension in item["swqa_dimensions"]}
             for dimension in ["functional", "positive", "negative", "boundary", "invalid_input", "side_effect_safe", "stress_timeout_risk"]:
@@ -377,9 +390,9 @@ democtl = "demo.cli:main"
             first_yaml = load_yaml(first_path)
             self.assertEqual(first_yaml["source"]["type"], "init")
             self.assertEqual(first_yaml["source"]["method"], "full_repo_swqa_init")
-            self.assertFalse(first_yaml["qa_aist"]["review_required_before_run"])
-            self.assertTrue(first_yaml["qa_aist"]["executable"])
-            self.assertEqual(first_yaml["qa_aist"]["questions"], [])
+            self.assertFalse(first_yaml["quality_pilot"]["review_required_before_run"])
+            self.assertTrue(first_yaml["quality_pilot"]["executable"])
+            self.assertEqual(first_yaml["quality_pilot"]["questions"], [])
             self.assertEqual(first_yaml["commands"][0]["id"], "safe_probe")
             self.assertIn("risk_controls", first_yaml)
             self.assertIn("init_seed", first_yaml)
@@ -395,7 +408,7 @@ democtl = "demo.cli:main"
             code, removed_dry_run = self.run_cli(["qa-test", "dry-run", "--root", tmp, "--case-id", first_case, "--json"])
             self.assertEqual(code, 2)
             self.assertEqual(removed_dry_run["error"], "command_removed")
-            self.assertEqual(removed_dry_run["replacement"], "/qa-aist cases run")
+            self.assertEqual(removed_dry_run["replacement"], "/quality-pilot cases run")
 
             code, run_one = self.run_cli(["cases", "run", "--root", tmp, "--json", first_case])
             self.assertEqual(code, 0)
@@ -503,7 +516,7 @@ democtl = "demo.cli:main"
             self.assertEqual(code, 2)
             self.assertEqual(payload["status"], "error")
             self.assertEqual(payload["error"], "command_removed")
-            self.assertEqual(payload["replacement"], "/qa-aist cases generate --growing")
+            self.assertEqual(payload["replacement"], "/quality-pilot cases generate --growing")
 
     def test_cases_generate_candidate_json_is_removed_public_option(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -528,7 +541,7 @@ democtl = "demo.cli:main"
             self.assertEqual(code, 2)
             self.assertEqual(payload["status"], "error")
             self.assertEqual(payload["error"], "command_removed")
-            self.assertEqual(payload["replacement"], "/qa-aist cases generate --growing")
+            self.assertEqual(payload["replacement"], "/quality-pilot cases generate --growing")
 
     def test_policy_pack_is_generic_closed_loop_swqa(self) -> None:
         payload = policy_pack()
@@ -550,19 +563,19 @@ democtl = "demo.cli:main"
             code, removed_publish = self.run_cli(["publish", "plan", "--root", tmp, "--json"])
             self.assertEqual(code, 2)
             self.assertEqual(removed_publish["error"], "command_removed")
-            self.assertEqual(removed_publish["replacement"], "/qa-aist publish wiki plan")
+            self.assertEqual(removed_publish["replacement"], "/quality-pilot publish wiki plan")
 
             code, plan = self.run_cli(["publish", "wiki", "plan", "--root", tmp, "--event", "test_result", "--json"])
             self.assertEqual(code, 0)
             self.assertEqual(plan["status"], "ready")
             self.assertEqual(plan["blocked_by_gate"], 0)
             self.assertEqual(plan["blocked_reasons"], [])
-            self.assertTrue((root / ".qa-aist-project" / "state" / "wiki-plan.json").exists())
+            self.assertTrue((root / ".quality-pilot-project" / "state" / "wiki-plan.json").exists())
 
             code, apply_result = self.run_cli(["publish", "apply", "--root", tmp, "--json"])
             self.assertEqual(code, 2)
             self.assertEqual(apply_result["error"], "command_removed")
-            self.assertEqual(apply_result["replacement"], "/qa-aist publish wiki apply")
+            self.assertEqual(apply_result["replacement"], "/quality-pilot publish wiki apply")
 
             code, fix_plan = self.run_cli(["issues", "fix", "--root", tmp, "--issue", "1", "--json"])
             self.assertEqual(code, 0)
@@ -572,7 +585,7 @@ democtl = "demo.cli:main"
             code, removed_fix = self.run_cli(["fix-issues", "plan", "--root", tmp, "--issue", "1", "--json"])
             self.assertEqual(code, 2)
             self.assertEqual(removed_fix["error"], "command_removed")
-            self.assertEqual(removed_fix["replacement"], "/qa-aist issues fix --issue <id>")
+            self.assertEqual(removed_fix["replacement"], "/quality-pilot issues fix --issue <id>")
 
     def test_publish_wiki_render_uses_fixed_sections_and_dynamic_categories(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -583,7 +596,7 @@ democtl = "demo.cli:main"
 
             self.assertEqual(code, 0)
             self.assertEqual(payload["page"], "Test status (Siri)")
-            report = (root / ".qa-aist-project" / "reports" / "wiki-status.md").read_text(encoding="utf-8")
+            report = (root / ".quality-pilot-project" / "reports" / "wiki-status.md").read_text(encoding="utf-8")
             for heading in [
                 "# Test status (Siri)",
                 "## 總覽",
@@ -595,7 +608,7 @@ democtl = "demo.cli:main"
             ]:
                 self.assertIn(heading, report)
             self.assertIn("### CLI Smoke", report)
-            self.assertTrue((root / ".qa-aist-project" / "rules" / "wiki-categories.yaml").exists())
+            self.assertTrue((root / ".quality-pilot-project" / "rules" / "wiki-categories.yaml").exists())
 
     def test_cases_generate_init_auto_plans_wiki_without_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -607,8 +620,8 @@ democtl = "demo.cli:main"
             self.assertEqual(code, 0)
             self.assertEqual(payload["wiki"]["auto_sync"]["event"], "case_generation")
             self.assertEqual(payload["wiki"]["auto_sync"]["status"], "blocked")
-            self.assertTrue((root / ".qa-aist-project" / "state" / "wiki-plan.json").exists())
-            report = (root / ".qa-aist-project" / "reports" / "wiki-status.md").read_text(encoding="utf-8")
+            self.assertTrue((root / ".quality-pilot-project" / "state" / "wiki-plan.json").exists())
+            report = (root / ".quality-pilot-project" / "reports" / "wiki-status.md").read_text(encoding="utf-8")
             self.assertIn("NOT_RUN", report)
             self.assertNotIn("PASS：1", report)
 
@@ -622,9 +635,9 @@ democtl = "demo.cli:main"
             self.assertEqual(code, 0)
             self.assertEqual(payload["status"], "PASS")
             self.assertEqual(payload["wiki"]["auto_sync"]["event"], "test_result")
-            self.assertTrue((root / ".qa-aist-project" / "state" / "latest-run.json").exists())
-            self.assertTrue((root / ".qa-aist-project" / "state" / "wiki-plan.json").exists())
-            report = (root / ".qa-aist-project" / "reports" / "wiki-status.md").read_text(encoding="utf-8")
+            self.assertTrue((root / ".quality-pilot-project" / "state" / "latest-run.json").exists())
+            self.assertTrue((root / ".quality-pilot-project" / "state" / "wiki-plan.json").exists())
+            report = (root / ".quality-pilot-project" / "reports" / "wiki-status.md").read_text(encoding="utf-8")
             self.assertIn("| EXAMPLE-001 | CLI Smoke | PASS |", report)
 
     def test_publish_wiki_apply_mcp_backend_creates_gated_handoff(self) -> None:
@@ -647,7 +660,7 @@ democtl = "demo.cli:main"
             request_path = root / apply_result["mcp_write_request_path"]
             self.assertTrue(request_path.exists())
             request = json.loads(request_path.read_text(encoding="utf-8"))
-            self.assertEqual(request["schema"], "qa-aist.gitea-mcp-wiki-write-request.v1")
+            self.assertEqual(request["schema"], "quality-pilot.gitea-mcp-wiki-write-request.v1")
             self.assertEqual(request["operation"], "gitea.wiki.update_page")
             self.assertIsNone(request["repo"])
             self.assertEqual(request["repo_source"], "hermes_session")
@@ -673,7 +686,7 @@ democtl = "demo.cli:main"
             self.assertEqual(code, 2)
             self.assertEqual(completed["status"], "error")
             self.assertEqual(completed["error"], "command_removed")
-            self.assertEqual(completed["replacement"], "/qa-aist publish wiki apply")
+            self.assertEqual(completed["replacement"], "/quality-pilot publish wiki apply")
 
     def test_publish_wiki_apply_uses_mcp_handoff_not_internal_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -698,29 +711,29 @@ democtl = "demo.cli:main"
             root = self.init_gitea_project(tmp)
             issues_json = self.write_issues(root)
 
-            help_result = hermes.dispatch_chat_command("/qa-aist qa-test", root=root)
+            help_result = hermes.dispatch_chat_command("/quality-pilot qa-test", root=root)
             self.assertEqual(help_result["status"], "error")
             self.assertEqual(help_result["payload"]["error"], "command_removed")
-            self.assertEqual(help_result["payload"]["replacement"], "/qa-aist cases run")
+            self.assertEqual(help_result["payload"]["replacement"], "/quality-pilot cases run")
             self.assertIn("下一步可以選", help_result["chat_response"])
             self.assertTrue(help_result["payload"]["next_actions"])
 
-            sync = hermes.dispatch_chat_command(f"/qa-aist issues sync --issues-json {issues_json}", root=root)
+            sync = hermes.dispatch_chat_command(f"/quality-pilot issues sync --issues-json {issues_json}", root=root)
             self.assertEqual(sync["status"], "ok")
             self.assertEqual(sync["payload"]["open_count"], 1)
-            self.assertEqual(sync["payload"]["next_actions"][0]["command"], "/qa-aist cases generate --growing")
+            self.assertEqual(sync["payload"]["next_actions"][0]["command"], "/quality-pilot cases generate --growing")
 
-            renamed = hermes.dispatch_chat_command("/qa-aist cases generate --from-issues", root=root)
+            renamed = hermes.dispatch_chat_command("/quality-pilot cases generate --from-issues", root=root)
             self.assertEqual(renamed["status"], "error")
             self.assertEqual(renamed["payload"]["error"], "command_removed")
-            self.assertEqual(renamed["payload"]["replacement"], "/qa-aist cases generate --growing")
+            self.assertEqual(renamed["payload"]["replacement"], "/quality-pilot cases generate --growing")
 
-            mode_required = hermes.dispatch_chat_command("/qa-aist cases generate", root=root)
+            mode_required = hermes.dispatch_chat_command("/quality-pilot cases generate", root=root)
             self.assertEqual(mode_required["status"], "error")
             self.assertEqual(mode_required["payload"]["error"], "explicit_generation_mode_required")
-            self.assertEqual(mode_required["payload"]["next_actions"][0]["command"], "/qa-aist cases generate --init")
+            self.assertEqual(mode_required["payload"]["next_actions"][0]["command"], "/quality-pilot cases generate --init")
 
-            init = hermes.dispatch_chat_command('/qa-aist cases generate --init --feature "CLI help" --profile cli --count 2', root=root)
+            init = hermes.dispatch_chat_command('/quality-pilot cases generate --init --feature "CLI help" --profile cli --count 2', root=root)
             self.assertEqual(init["status"], "ok")
             self.assertEqual(init["payload"]["source"], "init")
             self.assertIn("init_context:", init["chat_response"])
@@ -730,35 +743,35 @@ democtl = "demo.cli:main"
             self.assertNotIn("hermes_needs_input", init["payload"])
             self.assertNotIn("Hermes needs your input", init["chat_response"])
             self.assertNotIn("需要補充資訊", init["chat_response"])
-            self.assertTrue(any(action.get("command") == "/qa-aist cases validate" for action in init["payload"]["next_actions"]))
+            self.assertTrue(any(action.get("command") == "/quality-pilot cases validate" for action in init["payload"]["next_actions"]))
 
-            fast = hermes.dispatch_chat_command('/qa-aist cases generate --init --feature "CLI help" --profile cli --fast --count 1', root=root)
+            fast = hermes.dispatch_chat_command('/quality-pilot cases generate --init --feature "CLI help" --profile cli --fast --count 1', root=root)
             self.assertEqual(fast["status"], "error")
             self.assertEqual(fast["payload"]["error"], "command_removed")
-            self.assertEqual(fast["payload"]["replacement"], "/qa-aist cases generate --init")
+            self.assertEqual(fast["payload"]["replacement"], "/quality-pilot cases generate --init")
 
     def test_hermes_mcp_snapshot_error_guides_next_action(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self.init_gitea_mcp_project(tmp)
 
-            result = hermes.dispatch_chat_command("/qa-aist issues sync", root=root)
+            result = hermes.dispatch_chat_command("/quality-pilot issues sync", root=root)
 
             self.assertEqual(result["status"], "error")
             self.assertIn("gitea_mcp_snapshot_missing", result["chat_response"])
             self.assertIn("下一步可以選", result["chat_response"])
-            self.assertEqual(result["payload"]["next_actions"][0]["command"], "/qa-aist issues sync")
+            self.assertEqual(result["payload"]["next_actions"][0]["command"], "/quality-pilot issues sync")
             self.assertTrue(result["payload"]["next_actions"][0]["requires_confirmation"])
 
     def test_status_and_doctor_detect_missing_gitea_mcp_snapshot_early(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             self.init_gitea_mcp_project(tmp)
 
-            status = hermes.dispatch_chat_command("/qa-aist status", root=tmp)
+            status = hermes.dispatch_chat_command("/quality-pilot status", root=tmp)
             self.assertEqual(status["status"], "error")
             self.assertEqual(status["payload"]["error"], "command_removed")
-            self.assertEqual(status["payload"]["replacement"], "/qa-aist doctor")
+            self.assertEqual(status["payload"]["replacement"], "/quality-pilot doctor")
 
-            doctor = hermes.dispatch_chat_command("/qa-aist doctor", root=tmp)
+            doctor = hermes.dispatch_chat_command("/quality-pilot doctor", root=tmp)
             self.assertEqual(doctor["status"].lower(), "warn")
             self.assertFalse(doctor["payload"]["issue_sync"]["issue_sync_ready"])
             self.assertIn("gitea_mcp_snapshot_missing", doctor["chat_response"])
