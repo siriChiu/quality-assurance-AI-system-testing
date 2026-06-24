@@ -9,6 +9,7 @@ from .config import ProjectConfig, json_dumps
 from .contracts import load_contracts
 from .gitea import GiteaClient, gitea_config_from_project
 from .issues import dedupe_issues, load_issue_snapshot
+from .subagents import text_generation_handoff
 
 FIX_PLAN_NAME = "fix-plan.json"
 FIX_RUN_NAME = "fix-run-handoff.json"
@@ -29,6 +30,7 @@ def plan_fix_issue(config: ProjectConfig, *, issue_id: int) -> dict[str, Any]:
     gitea = gitea_config_from_project(config.data)
     branch = f"{gitea.branch_prefix}{issue_id}"
     case_ids = _case_ids_for_issue(config, issue_id, issue)
+    recovered_case_ids = _recoverable_case_ids(config, issue_id, issue)
     blockers: list[str] = []
     if not snapshot.get("synced_at"):
         blockers.append("issue_sync_required")
@@ -36,6 +38,8 @@ def plan_fix_issue(config: ProjectConfig, *, issue_id: int) -> dict[str, Any]:
         blockers.append("issue_not_open_or_not_synced")
     if duplicate_issue_ids:
         blockers.append("duplicate_issue_candidates")
+    if issue is not None and not case_ids:
+        blockers.append("handoff_case_id_not_runnable")
 
     plan = {
         "schema": "quality-pilot.fix-plan.v1",
@@ -43,6 +47,7 @@ def plan_fix_issue(config: ProjectConfig, *, issue_id: int) -> dict[str, Any]:
         "issue_id": issue_id,
         "issue": issue,
         "case_ids": case_ids,
+        "recovered_case_ids": recovered_case_ids,
         "branch": branch,
         "base_branch": config.data.get("project", {}).get("default_branch", "main"),
         "blockers": blockers,
@@ -64,6 +69,15 @@ def plan_fix_issue(config: ProjectConfig, *, issue_id: int) -> dict[str, Any]:
 def run_fix_issue(config: ProjectConfig, *, issue_id: int) -> dict[str, Any]:
     plan = plan_fix_issue(config, issue_id=issue_id)
     if plan["status"] != "ready":
+        if "handoff_case_id_not_runnable" in plan.get("blockers", []):
+            return {
+                "status": "handoff_blocked",
+                "error": "handoff_case_id_not_runnable",
+                "issue_id": issue_id,
+                "case_ids": plan.get("case_ids", []),
+                "recovered_case_ids": plan.get("recovered_case_ids", []),
+                "plan": plan,
+            }
         return {"status": "blocked", "error": "fix_plan_blocked", "plan": plan}
     payload = {
         "schema": "quality-pilot.fix-run-handoff.v1",
@@ -98,7 +112,7 @@ def submit_fix_pr(config: ProjectConfig, *, issue_id: int, dry_run: bool = False
         "base": plan["base_branch"],
     }
     if dry_run:
-        return {"status": "dry_run", "issue_id": issue_id, "pr_payload": payload}
+        return {"status": "dry_run", "issue_id": issue_id, "pr_payload": payload, "text_generation": text_generation_handoff(config, "pull_request_body")}
 
     gitea_cfg = gitea_config_from_project(config.data)
     if not gitea_cfg.configured:
@@ -112,7 +126,7 @@ def submit_fix_pr(config: ProjectConfig, *, issue_id: int, dry_run: bool = False
         }
     _push_branch(config.root, plan["branch"])
     response = GiteaClient(gitea_cfg).create_pull_request(**payload)
-    result = {"status": "ok", "issue_id": issue_id, "pr_payload": payload, "response": response}
+    result = {"status": "ok", "issue_id": issue_id, "pr_payload": payload, "text_generation": text_generation_handoff(config, "pull_request_body"), "response": response}
     path = config.paths.state / FIX_PR_NAME
     path.write_text(json_dumps(result) + "\n", encoding="utf-8")
     return {**result, "pr_result_path": _relative_or_str(path, config.root)}
@@ -132,18 +146,41 @@ def fix_status(config: ProjectConfig) -> dict[str, Any]:
 
 
 def render_pr_body(plan: dict[str, Any], report_path: Path) -> str:
-    case_lines = [f"- {case_id}" for case_id in plan.get("case_ids", [])] or ["- No linked case IDs found; see AI Quality Pilot plan."]
+    issue = plan.get("issue") if isinstance(plan.get("issue"), dict) else {}
+    refs = _issue_refs(plan, issue)
+    case_lines = [f"- {case_id}" for case_id in plan.get("case_ids", [])] or [
+        "- No linked case IDs were found; add manual verification steps before merging."
+    ]
     return "\n".join(
         [
             f"Fixes Gitea issue #{plan.get('issue_id')}.",
             "",
-            "## AI Quality Pilot verification",
+            "## Summary",
+            "",
+            f"Addresses: {_clean_summary(issue.get('title'))}",
+            "",
+            "## Problem",
+            "",
+            _issue_problem_text(issue),
+            "",
+            "## How to Reproduce",
+            "",
+            _issue_reproduction_text(issue),
+            "",
+            "## Linked Tickets",
+            "",
+            *[f"- {ref}" for ref in refs],
+            "",
+            "## Verification",
             "",
             *case_lines,
             "",
-            f"Report: {report_path}",
+            f"- Latest report: {report_path}",
             "",
-            "This PR was prepared through AI Quality Pilot fix-issues submit-pr after issue sync and duplicate checks.",
+            "## Reviewer Notes",
+            "",
+            "- Confirm the reproduction path is covered by the linked case or by a manual check.",
+            "- Close the linked issue only after the fix is verified in the target environment.",
         ]
     )
 
@@ -151,11 +188,68 @@ def render_pr_body(plan: dict[str, Any], report_path: Path) -> str:
 def render_pr_title(plan: dict[str, Any]) -> str:
     issue = plan.get("issue") if isinstance(plan.get("issue"), dict) else {}
     refs = _issue_refs(plan, issue)
-    case_suffix = _case_suffix(plan.get("case_ids", []))
     prefix = f"Fix {' / '.join(refs)}: "
-    summary_limit = max(24, MAX_PR_TITLE_LEN - len(prefix) - len(case_suffix))
+    summary_limit = max(24, MAX_PR_TITLE_LEN - len(prefix))
     summary = _ellipsize(_clean_summary(issue.get("title")), summary_limit)
-    return f"{prefix}{summary}{case_suffix}"
+    return f"{prefix}{summary}"
+
+
+def _issue_problem_text(issue: dict[str, Any]) -> str:
+    title = _clean_summary(issue.get("title"))
+    body = _strip_tooling_noise(issue.get("body"))
+    if body:
+        return f"{title}\n\n{_ellipsize_block(body, 3000)}"
+    return title
+
+
+def _issue_reproduction_text(issue: dict[str, Any]) -> str:
+    body = _strip_tooling_noise(issue.get("body"))
+    signal_lines: list[str] = []
+    for line in body.splitlines():
+        lowered = line.lower()
+        if any(token in lowered for token in ("command:", "steps", "reproduce", "expected", "actual", "observed", "run:", "failure")):
+            signal_lines.append(line)
+    if signal_lines:
+        return "\n".join(signal_lines).strip()
+    if body:
+        return "Use the problem description above as the starting reproduction context; confirm exact steps with the reporter if the failure is not reproducible."
+    return "No reproduction detail was available in the synced issue. Add manual reproduction steps before merging."
+
+
+def _strip_tooling_noise(value: Any) -> str:
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return ""
+    skipped_phrases = (
+        "ai quality pilot",
+        "/quality-pilot",
+        ".quality-pilot-project",
+        "write gate",
+        "gitea write gate",
+    )
+    lines: list[str] = []
+    skip_section = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        lowered = stripped.lower()
+        is_heading = stripped.startswith("#")
+        if is_heading and any(phrase in lowered for phrase in ("ai quality pilot", "raw redmine json")):
+            skip_section = True
+            continue
+        if skip_section and is_heading:
+            skip_section = False
+        if skip_section:
+            continue
+        if any(phrase in lowered for phrase in skipped_phrases):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def _ellipsize_block(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 3)].rstrip() + "..."
 
 
 def fix_plan_path(config: ProjectConfig) -> Path:
@@ -164,16 +258,56 @@ def fix_plan_path(config: ProjectConfig) -> Path:
 
 def _case_ids_for_issue(config: ProjectConfig, issue_id: int, issue: dict[str, Any] | None) -> list[str]:
     case_ids: list[str] = []
-    if issue and issue.get("case_id"):
+    available = _available_case_ids(config)
+    if issue and issue.get("case_id") and str(issue["case_id"]) in available:
         case_ids.append(str(issue["case_id"]))
     try:
         for contract in load_contracts(config.paths.cases):
             source = contract.raw.get("source") if isinstance(contract.raw.get("source"), dict) else {}
-            if int(source.get("issue_id", -1)) == issue_id:
+            if int(source.get("issue_id", -1)) == issue_id or int(source.get("gitea_issue_id", -1)) == issue_id:
                 case_ids.append(contract.case_id)
+            for redmine_id in _redmine_refs(issue):
+                if int(source.get("redmine_issue_id", -1)) == redmine_id:
+                    case_ids.append(contract.case_id)
     except Exception:
         pass
     return sorted(set(case_ids))
+
+
+def _recoverable_case_ids(config: ProjectConfig, issue_id: int, issue: dict[str, Any] | None) -> list[str]:
+    recovered: list[str] = []
+    available = _available_case_ids(config)
+    if issue and issue.get("case_id") and str(issue["case_id"]) in available:
+        recovered.append(str(issue["case_id"]))
+    for redmine_id in _redmine_refs(issue):
+        exact = f"REDMINE-{redmine_id}"
+        if exact in available:
+            recovered.append(exact)
+    try:
+        for contract in load_contracts(config.paths.cases):
+            source = contract.raw.get("source") if isinstance(contract.raw.get("source"), dict) else {}
+            if int(source.get("issue_id", -1)) == issue_id or int(source.get("gitea_issue_id", -1)) == issue_id:
+                recovered.append(contract.case_id)
+            for redmine_id in _redmine_refs(issue):
+                if int(source.get("redmine_issue_id", -1)) == redmine_id:
+                    recovered.append(contract.case_id)
+    except Exception:
+        pass
+    return sorted(set(recovered))
+
+
+def _available_case_ids(config: ProjectConfig) -> set[str]:
+    try:
+        return {contract.case_id for contract in load_contracts(config.paths.cases)}
+    except Exception:
+        return set()
+
+
+def _redmine_refs(issue: dict[str, Any] | None) -> list[int]:
+    if not isinstance(issue, dict):
+        return []
+    text = "\n".join(str(issue.get(key) or "") for key in ("title", "body", "url"))
+    return sorted({int(match) for match in REDMINE_REF_RE.findall(text)})
 
 
 def _duplicate_issue_ids(duplicates: dict[str, Any], issue_id: int) -> list[int]:

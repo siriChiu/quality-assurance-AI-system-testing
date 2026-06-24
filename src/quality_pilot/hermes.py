@@ -26,6 +26,7 @@ ROOT_COMMANDS = {
     "close-loop",
     "report",
     "tracker",
+    "subagent",
 }
 AGENT_MANIFEST_NAME = "quality-pilot.agent.json"
 AGENT_WRAPPER_NAME = "quality-pilot-agent.sh"
@@ -137,6 +138,19 @@ def render_chat_response(payload: dict[str, Any], *, exit_code: int = 0) -> str:
     status = str(payload.get("status") or ("ok" if exit_code == 0 else "error"))
     lines = [f"quality-pilot> {status.upper()}"]
 
+    if isinstance(payload.get("readiness"), dict):
+        readiness = payload["readiness"]
+        lines.append(f"         readiness: {readiness.get('mode', 'UNKNOWN')}")
+        blockers = readiness.get("blockers")
+        if isinstance(blockers, list) and blockers:
+            lines.append(f"         readiness.blockers: {', '.join(map(str, blockers[:5]))}")
+    if isinstance(payload.get("ux_recovery"), dict):
+        recovery = payload["ux_recovery"]
+        lines.append(f"         recovery: {recovery.get('problem_class')}")
+        if recovery.get("root_cause"):
+            lines.append(f"         root_cause: {recovery.get('root_cause')}")
+        if recovery.get("recommended_command"):
+            lines.append(f"         recommended: {recovery.get('recommended_command')}")
     if payload.get("error"):
         lines.append(f"         error: {payload.get('error')}")
     if payload.get("message"):
@@ -178,6 +192,16 @@ def render_chat_response(payload: dict[str, Any], *, exit_code: int = 0) -> str:
     if isinstance(payload.get("tracker_writes"), dict):
         blocked = payload["tracker_writes"].get("blocked_by_gate")
         lines.append(f"         tracker_writes.blocked_by_gate: {blocked}")
+    if isinstance(payload.get("subagents"), dict):
+        subagents = payload["subagents"]
+        if isinstance(subagents.get("subagents"), dict):
+            subagents = subagents["subagents"]
+        lines.append(f"         subagent: {subagents.get('provider', '-')}/{subagents.get('default_profile', '-')}")
+        if subagents.get("endpoint"):
+            lines.append(f"         subagent.endpoint: {subagents.get('endpoint')}")
+        missing = subagents.get("missing_user_fields")
+        if isinstance(missing, list) and missing:
+            lines.append(f"         subagent.user_content_missing: {len(missing)} field(s)")
     if isinstance(payload.get("write_gate_result"), dict):
         lines.append(f"         write_gate: {payload['write_gate_result'].get('reason')}")
     if "open_count" in payload:
@@ -216,6 +240,14 @@ def render_chat_response(payload: dict[str, Any], *, exit_code: int = 0) -> str:
         lines.append("         setup_required: true")
     if isinstance(payload.get("issue_sync"), dict):
         lines.extend(_issue_sync_lines(payload["issue_sync"]))
+    label_resolution = payload.get("label_resolution")
+    if isinstance(label_resolution, list) and label_resolution:
+        unresolved = [
+            item for item in label_resolution
+            if isinstance(item, dict) and item.get("unmatched_labels")
+        ]
+        if unresolved:
+            lines.append(f"         labels.unmatched: {len(unresolved)} action(s)")
     if isinstance(payload.get("checks"), list):
         attention = _attention_check_lines(payload["checks"])
         if attention:
@@ -444,6 +476,26 @@ def suggest_next_actions(payload: dict[str, Any], engine_argv: list[str], exit_c
     issue_sync = payload.get("issue_sync") if isinstance(payload.get("issue_sync"), dict) else {}
     blockers = set(issue_sync.get("blockers", [])) if isinstance(issue_sync.get("blockers"), list) else set()
 
+    recovery_actions = _recovery_next_actions(payload)
+    if recovery_actions:
+        normal_actions = [
+            action for action in _suggest_next_actions_without_recovery(payload, engine_argv, exit_code)
+            if action.get("command") not in {item.get("command") for item in recovery_actions}
+        ]
+        return _avoid_early_push_pr([*recovery_actions, *normal_actions])
+    return _suggest_next_actions_without_recovery(payload, engine_argv, exit_code)
+
+
+def _suggest_next_actions_without_recovery(payload: dict[str, Any], engine_argv: list[str], exit_code: int = 0) -> list[dict[str, Any]]:
+    args = _positional_args(engine_argv)
+    current = " ".join(args[:2]) if len(args) >= 2 else (args[0] if args else "")
+    current3 = " ".join(args[:3]) if len(args) >= 3 else current
+    status = str(payload.get("status") or "").lower()
+    error = str(payload.get("error") or "")
+    message = str(payload.get("message") or "")
+    issue_sync = payload.get("issue_sync") if isinstance(payload.get("issue_sync"), dict) else {}
+    blockers = set(issue_sync.get("blockers", [])) if isinstance(issue_sync.get("blockers"), list) else set()
+
     if error == "command_removed":
         replacement = payload.get("replacement")
         return [_next("改用新的正式指令", str(replacement), confirm=True)] if replacement else [_next("查看正式指令", "/quality-pilot help")]
@@ -598,6 +650,12 @@ def suggest_next_actions(payload: dict[str, Any], engine_argv: list[str], exit_c
                 _next("套用 Wiki 更新", "/quality-pilot publish wiki apply", confirm=True, destructive=True),
                 _next("查看 Wiki 狀態", "/quality-pilot publish wiki status"),
             ]
+        readiness = payload.get("readiness") if isinstance(payload.get("readiness"), dict) else {}
+        if readiness.get("mode") in {"WRITE_BLOCKED_MCP", "SYNC_BLOCKED"}:
+            return [
+                _next("執行 MCP/readiness 健康檢查", "/quality-pilot doctor"),
+                _next("查看 Wiki 狀態", "/quality-pilot publish wiki status"),
+            ]
         return [
             _next("查看 Wiki 狀態", "/quality-pilot publish wiki status"),
             _next("執行 doctor 檢查 token/backend/gate", "/quality-pilot doctor"),
@@ -626,6 +684,90 @@ def suggest_next_actions(payload: dict[str, Any], engine_argv: list[str], exit_c
             _next("重建 Wiki plan", "/quality-pilot publish wiki plan", confirm=True),
         ]
     return []
+
+
+def _recovery_next_actions(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    recovery = payload.get("ux_recovery") if isinstance(payload.get("ux_recovery"), dict) else {}
+    if not recovery:
+        return []
+    problem_class = str(recovery.get("problem_class") or "")
+    command = str(recovery.get("recommended_command") or "").strip()
+    confirm = bool(recovery.get("recommended_command_requires_confirmation"))
+    actions: list[dict[str, Any]] = []
+    if command:
+        actions.append(_next(_recovery_action_label(problem_class, command), command, confirm=confirm))
+    if problem_class == "case_not_found":
+        for case_id in _recovered_case_ids(payload):
+            actions.append(_next(f"執行可用 case {case_id}", f"/quality-pilot cases run {case_id}", confirm=True))
+        actions.append(_next("列出目前可跑 cases", "/quality-pilot cases list"))
+    elif problem_class == "id_domain_mismatch":
+        mapped = _mapped_fix_command(payload)
+        actions.append(_next("查看 issue mapping 狀態", "/quality-pilot issues status"))
+        if mapped:
+            actions.append(_next("用已解析 issue 重新修復", mapped, confirm=True))
+    elif problem_class == "removed_command" and command:
+        actions.append(_next("查看正式指令", "/quality-pilot help"))
+    elif problem_class == "mcp_not_ready":
+        actions.append(_next("檢查 Hermes MCP readiness", "/quality-pilot doctor"))
+        actions.append(_next("查看 Wiki 狀態", "/quality-pilot publish wiki status"))
+    elif problem_class == "handoff_inconsistent":
+        for case_id in _recovered_case_ids(payload):
+            actions.append(_next(f"執行可用 case {case_id}", f"/quality-pilot cases run {case_id}", confirm=True))
+        actions.append(_next("查看 issue/fix 狀態", "/quality-pilot issues status"))
+    elif problem_class == "write_gate_blocked":
+        actions.append(_next("查看 Wiki 狀態", "/quality-pilot publish wiki status"))
+        actions.append(_next("執行健康檢查", "/quality-pilot doctor"))
+    return _dedupe_actions(_avoid_early_push_pr(actions))
+
+
+def _recovery_action_label(problem_class: str, command: str) -> str:
+    if problem_class == "mcp_not_ready":
+        if "issues sync --redmine-issues" in command:
+            return "用 Hermes Redmine MCP 讀取指定 issues，寫入 snapshot 後重跑 sync"
+        if "cases generate --redmine-issues" in command:
+            return "用 Hermes Redmine MCP 讀取指定 issues，寫入 snapshot 後重跑 generate"
+        if command == "/quality-pilot issues sync":
+            return "用 Hermes Gitea MCP 讀取 issues，寫入 snapshot 後重跑 sync"
+    if problem_class == "removed_command":
+        return "改用新的正式指令"
+    return "先執行建議復原指令"
+
+
+def _recovered_case_ids(payload: dict[str, Any]) -> list[str]:
+    recovered = payload.get("recovered_case_ids")
+    if isinstance(recovered, list):
+        return [str(item) for item in recovered if item]
+    id_resolution = payload.get("id_resolution") if isinstance(payload.get("id_resolution"), dict) else {}
+    case_id = id_resolution.get("resolved_case_id")
+    return [str(case_id)] if case_id else []
+
+
+def _mapped_fix_command(payload: dict[str, Any]) -> str | None:
+    id_resolution = payload.get("id_resolution") if isinstance(payload.get("id_resolution"), dict) else {}
+    issue_id = id_resolution.get("resolved_gitea_issue_id")
+    if issue_id:
+        return f"/quality-pilot issues fix --issue {issue_id}"
+    return None
+
+
+def _dedupe_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[str, str]] = set()
+    out: list[dict[str, Any]] = []
+    for action in actions:
+        key = (str(action.get("command") or ""), str(action.get("label") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(action)
+    return out
+
+
+def _avoid_early_push_pr(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    early = actions[:3]
+    late = actions[3:]
+    filtered_early = [action for action in early if "push-pr" not in str(action.get("command") or "")]
+    pushed_late = [action for action in actions if "push-pr" in str(action.get("command") or "")]
+    return _dedupe_actions([*filtered_early, *late, *pushed_late])
 
 
 def _next(label: str, command: str, *, confirm: bool = False, destructive: bool = False) -> dict[str, Any]:
@@ -889,6 +1031,8 @@ Only these `/quality-pilot` commands are public:
 - `/quality-pilot report status`
 - `/quality-pilot report json`
 - `/quality-pilot tracker plan-write`
+- `/quality-pilot subagent status`
+- `/quality-pilot subagent configure`
 
 Removed commands must not be run. If the user asks for `qa-test`, `fix-issues`, `issues dedupe`, `config`, legacy `publish plan/apply/status`, `sync-gitea`, `find-new-issues`, or `help <topic>`, run the dispatcher and report its `command_removed` replacement. Do not silently translate and execute old commands.
 
@@ -902,8 +1046,10 @@ When the user invokes `/quality-pilot <arguments>`, you must:
 4. Read the returned JSON.
 5. Reply primarily with the JSON `chat_response` field.
 6. If `payload.hermes_needs_input.status == "required"` or `payload.input_required == true`, call Hermes `clarify` for the category-level blocking inputs in `payload.hermes_needs_input.questions[]`; do not downgrade it to a normal next-action menu.
-7. If `chat_response` is missing, summarize `status`, `payload.status`, `payload.error`, `payload.message`, `latest_run_json`, `report_path`, and evidence paths.
-8. Preserve failures. If the dispatcher exits non-zero or emits invalid JSON, tell the user the exit code and useful stderr/stdout details.
+7. If `payload.ux_recovery.recommended_command` exists, present it before any normal menu item and ask for confirmation when `recommended_command_requires_confirmation` is true.
+8. Treat `payload.readiness.mode` as the single readiness summary. Do not suggest remote writes when it is `WRITE_BLOCKED_MCP` or `SYNC_BLOCKED`.
+9. If `chat_response` is missing, summarize `status`, `payload.status`, `payload.error`, `payload.message`, `latest_run_json`, `report_path`, and evidence paths.
+10. Preserve failures. If the dispatcher exits non-zero or emits invalid JSON, tell the user the exit code and useful stderr/stdout details.
 
 Hermes MCP rule: AI Quality Pilot does not store Gitea/Redmine URLs, repo names, or token environment variables in `.quality-pilot.yaml`. It relies on the user's Hermes session to provide MCP servers. At the start of setup/doctor, make the available server list visible to AI Quality Pilot through `QUALITY_PILOT_HERMES_MCP_SERVERS=gitea,redmine` or the configured `.quality-pilot-project/state/hermes-mcp/status.json`. If Gitea or Redmine MCP is missing or unknown, tell the user immediately and do not pretend remote sync/write is ready.
 
@@ -937,6 +1083,8 @@ Redmine MCP rule: AI Quality Pilot V1 reads Redmine only through a Hermes Redmin
 Reference: see `references/gitea-mcp-snapshot.md` for the MCP snapshot pitfall and recommended JSON shape.
 
 Setup rule: `/quality-pilot setup` always writes `tracker.provider: hermes_mcp` plus `tracker.mcp.*` local handoff paths. It may report the detected git remote in JSON for human context, but it must not write Gitea repo URL, repo name, token env, or HTTP credentials into `.quality-pilot.yaml`.
+
+Subagent text generation rule: AI Quality Pilot may delegate long human-facing draft text to a configured subagent, but the subagent is candidate-only. Use `/quality-pilot subagent status` to inspect the active profile. Use `/quality-pilot subagent configure` to write the default Open WebUI profile with endpoint `https://172.17.20.220/`. User-owned content fields such as model, system prompt, task prompts, and review notes are intentionally blank; ask the user to fill them instead of inventing content. The subagent may draft Gitea issue bodies, PR bodies, Wiki summaries, Redmine summaries, case candidate analysis, and reviewer notes. It must not write files, create issues, edit Wiki pages, open PRs, close issues, or bypass AI Quality Pilot validation/write gates.
 
 ## Interactive Guidance Model
 
@@ -1025,6 +1173,8 @@ Examples:
 {runner_command} --root "$PWD" /quality-pilot publish wiki apply
 {runner_command} --root "$PWD" /quality-pilot close-loop run-once
 {runner_command} --root "$PWD" /quality-pilot report status
+{runner_command} --root "$PWD" /quality-pilot subagent status
+{runner_command} --root "$PWD" /quality-pilot subagent configure
 ```
 
 ## Safety Rules
@@ -1039,6 +1189,7 @@ Examples:
 - Do not bypass `write_gate`, issue sync, duplicate checks, or case contracts, even if the user asks you to write tracker output directly.
 - `/quality-pilot cases generate --init` and `--growing` should produce executable side-effect-safe probes. If they return `payload.hermes_needs_input`, call `clarify` for category-level blocking inputs in Traditional Chinese. Do not force the user to approve test cases one by one.
 - If you open a separate growth session/agent, it may only produce candidate analysis for AI Quality Pilot to validate; it must not directly edit case YAML, tracker, wiki, PRs, or reports.
+- If you open a text-generation subagent, use the configured `/quality-pilot subagent status` profile. The subagent may only return candidate text/JSON for the requested task; AI Quality Pilot remains the writer and validator.
 - If the user types a removed command, report `command_removed` and its replacement.
 
 ## Expected Human Reply
@@ -1223,6 +1374,8 @@ def _overview_help_payload() -> dict[str, Any]:
         {"command": "/quality-pilot report status", "purpose": "產生 Markdown report"},
         {"command": "/quality-pilot report json", "purpose": "輸出 latest run JSON"},
         {"command": "/quality-pilot tracker plan-write", "purpose": "相容舊版：只檢查單一 tracker write gate"},
+        {"command": "/quality-pilot subagent status", "purpose": "查看文字生成 subagent handoff 設定"},
+        {"command": "/quality-pilot subagent configure", "purpose": "寫入預設 Open WebUI subagent profile；prompt/model 內容由使用者自行填寫"},
     ]
     return {
         "status": "ok",
@@ -1254,6 +1407,7 @@ def _overview_help_text(commands: list[dict[str, str]]) -> str:
             "7. `/quality-pilot cases run <case_id>`：先跑一個 case，再決定是否跑全部。",
             "8. 測試或產生 cases 後，AI Quality Pilot 會自動更新本地 Wiki plan；查看 `/quality-pilot publish wiki status`。",
             "9. 若需要手動更新遠端 Wiki，跑 `/quality-pilot publish wiki plan` 再確認 `/quality-pilot publish wiki apply`。",
+            "10. 若要讓長文字候選稿走 subagent，先跑 `/quality-pilot subagent status`；需要補設定時跑 `/quality-pilot subagent configure`。",
             "   若 backend 是 MCP，`apply` 會產生 gated MCP write request，由 Hermes 在同一流程呼叫 Gitea MCP。",
             "",
             "常用指令：",
@@ -1291,12 +1445,14 @@ def _positional_args(argv: list[str]) -> list[str]:
         "--generated-count",
         "--expected-contract-hash",
         "--event",
+        "--endpoint",
         "--feature",
         "--issue",
         "--issues-json",
         "--latest-run",
         "--plan",
         "--profile",
+        "--provider",
         "--result",
         "--result-json",
         "--root",

@@ -72,6 +72,8 @@ The policy pack is intentionally generic. It defines stable dimensions such as e
 
 Hermes may use a separate growth session to analyze the context, but that session may only produce candidate JSON. AI Quality Pilot validates candidate schema, dedupe fingerprints, secret leakage, internal prompt leakage, dangerous `.qa` runtime paths, and command fields before writing YAML.
 
+Long human-facing text can also be delegated to a configured subagent as candidate-only generation. The default profile is Open WebUI at `https://172.17.20.220/`, with model and prompt content intentionally left blank for the user to fill. Subagents may draft Gitea issue bodies, PR bodies, Wiki summaries, Redmine summaries, case candidate analysis, and reviewer notes; they must not write files, create tracker records, update Wiki pages, open PRs, or bypass validation/write gates.
+
 ## Invariants
 
 ```yaml

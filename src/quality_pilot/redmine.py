@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
+import re
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +11,7 @@ from .config import ProjectConfig, json_dumps
 from .hermes_mcp import hermes_mcp_readiness, mcp_server_is_available
 from .issues import issue_fingerprint, load_issue_snapshot
 from .runner import utc_now
+from .subagents import text_generation_handoff
 from .write_gate import evaluate_write_gate
 
 REDMINE_MCP_ENV = "QUALITY_PILOT_REDMINE_MCP_ISSUES_JSON"
@@ -18,6 +21,33 @@ REDMINE_GITEA_CANDIDATES_DIR = "gitea-candidates"
 GITEA_ISSUE_WRITE_REQUEST_NAME = "issue-write-request.json"
 GITEA_ISSUE_WRITE_RESULT_NAME = "issue-write-result.json"
 GITEA_ISSUE_WRITE_REQUEST_SCHEMA = "quality-pilot.gitea-mcp-issue-write-request.v1"
+REDMINE_DESCRIPTION_KEYS = (
+    "description",
+    "description_text",
+    "descriptionText",
+    "description_raw",
+    "descriptionRaw",
+    "raw_description",
+    "rawDescription",
+    "full_description",
+    "fullDescription",
+    "body",
+    "text",
+    "notes",
+    "content",
+)
+REDMINE_TEXT_KEYS = (
+    "text",
+    "value",
+    "content",
+    "body",
+    "description",
+    "notes",
+    "markdown",
+    "plain_text",
+    "plainText",
+    "raw",
+)
 
 
 class RedmineError(RuntimeError):
@@ -147,6 +177,7 @@ def sync_redmine_issues(
         "gitea_sync_state_path": _relative_or_str(sync_state_path, config.root),
         "gitea_issue_candidates": plan["issue_candidates"],
         "gitea_issue_candidate_count": len(plan["issue_candidates"]),
+        "label_resolution": _label_resolution(write_request),
         "remote_write": write_request["status"],
         "blocked_by_gate": write_request["blocked_by_gate"],
         "mcp_issue_write_request": write_request if write_request["actions"] else None,
@@ -211,7 +242,7 @@ def normalize_redmine_issue(raw: dict[str, Any]) -> dict[str, Any]:
     except (TypeError, ValueError) as exc:
         raise RedmineError(f"redmine issue has no numeric id: {raw!r}") from exc
     subject = str(raw.get("subject") or raw.get("title") or f"Redmine issue {issue_id}")
-    description = str(raw.get("description") or raw.get("body") or "")
+    description, description_sources = _redmine_description(raw)
     status = raw.get("status") if isinstance(raw.get("status"), dict) else {}
     tracker = raw.get("tracker") if isinstance(raw.get("tracker"), dict) else {}
     project = raw.get("project") if isinstance(raw.get("project"), dict) else {}
@@ -219,6 +250,7 @@ def normalize_redmine_issue(raw: dict[str, Any]) -> dict[str, Any]:
         "id": issue_id,
         "subject": subject,
         "description": description,
+        "description_source_fields": description_sources,
         "status": status.get("name") or raw.get("status") or "unknown",
         "tracker": tracker.get("name") or raw.get("tracker") or "",
         "project": project.get("name") or raw.get("project") or "",
@@ -244,10 +276,10 @@ def render_redmine_mirror(issue: dict[str, Any]) -> str:
             "",
             issue.get("full_message") or issue.get("description") or "_No Redmine message synced._",
             "",
-            "## AI Quality Pilot Notes",
+            "## Local Sync Notes",
             "",
             "- Imported through Hermes Redmine MCP.",
-            "- AI Quality Pilot may generate Gitea issue candidates and case contracts from this mirror.",
+            "- Keep this mirror as the local source copy for later verification and traceability.",
             "",
         ]
     )
@@ -277,6 +309,80 @@ def render_full_redmine_message(raw: dict[str, Any], *, issue_id: int, subject: 
         ]
     )
     return "\n".join(lines).strip()
+
+
+def _redmine_description(raw: dict[str, Any]) -> tuple[str, list[str]]:
+    chunks: list[str] = []
+    sources: list[str] = []
+    for key in REDMINE_DESCRIPTION_KEYS:
+        if key not in raw:
+            continue
+        field_chunks = _redmine_text_chunks(raw.get(key))
+        if not field_chunks:
+            continue
+        chunks.extend(field_chunks)
+        sources.append(key)
+    for container_key in ("issue", "redmine_issue", "ticket"):
+        nested = raw.get(container_key)
+        if not isinstance(nested, dict):
+            continue
+        for key in REDMINE_DESCRIPTION_KEYS:
+            if key not in nested:
+                continue
+            field_chunks = _redmine_text_chunks(nested.get(key))
+            if not field_chunks:
+                continue
+            chunks.extend(field_chunks)
+            sources.append(f"{container_key}.{key}")
+    return _join_unique_text(chunks), _unique_strings(sources)
+
+
+def _redmine_text_chunks(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+        return [text] if text else []
+    if isinstance(value, (int, float, bool)):
+        return [str(value)]
+    if isinstance(value, list):
+        chunks: list[str] = []
+        for item in value:
+            chunks.extend(_redmine_text_chunks(item))
+        return chunks
+    if isinstance(value, dict):
+        chunks = []
+        for key in REDMINE_TEXT_KEYS:
+            if key in value:
+                chunks.extend(_redmine_text_chunks(value.get(key)))
+        if chunks:
+            return chunks
+        return [json_dumps(value)]
+    return [str(value).strip()]
+
+
+def _join_unique_text(chunks: list[str]) -> str:
+    out: list[str] = []
+    seen: set[str] = set()
+    for chunk in chunks:
+        text = str(chunk).replace("\r\n", "\n").replace("\r", "\n").strip()
+        key = re.sub(r"\s+", " ", text).strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(text)
+    return "\n\n".join(out).strip()
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
 
 
 def _render_named_values_section(title: str, value: Any) -> list[str]:
@@ -311,6 +417,7 @@ def _render_journal_section(raw: dict[str, Any]) -> list[str]:
             user_text = user or journal.get("author") or "-"
         timestamp = journal.get("created_on") or journal.get("created_at") or journal.get("updated_on") or journal.get("updated_at") or "-"
         notes = journal.get("notes") if "notes" in journal else journal.get("body", "")
+        notes_text = _render_redmine_text_value(notes) or "_No notes._"
         lines.extend(
             [
                 f"#### Entry {index}",
@@ -318,7 +425,7 @@ def _render_journal_section(raw: dict[str, Any]) -> list[str]:
                 f"- User: {user_text}",
                 f"- Time: {timestamp}",
                 "",
-                str(notes or "_No notes._"),
+                notes_text,
             ]
         )
         details = journal.get("details")
@@ -334,14 +441,23 @@ def _render_redmine_value(value: Any) -> str:
     return str(value)
 
 
+def _render_redmine_text_value(value: Any) -> str:
+    text = _join_unique_text(_redmine_text_chunks(value))
+    if text:
+        return text
+    return _render_redmine_value(value)
+
+
 def build_redmine_gitea_sync_plan(config: ProjectConfig, issues: list[dict[str, Any]]) -> dict[str, Any]:
     snapshot_items = [item for item in load_issue_snapshot(config).get("items", []) if isinstance(item, dict)]
+    write_result_items = _load_issue_write_result_items(config)
     candidates = []
     for issue in issues:
         title = f"[Redmine #{issue['id']}] {issue['subject']}"
         body = render_gitea_candidate_body(issue)
         fingerprint = issue_fingerprint(issue["subject"], issue.get("description", ""))
-        existing = _find_existing_gitea_issue(issue, fingerprint, snapshot_items)
+        existing = _find_existing_gitea_issue(issue, fingerprint, snapshot_items, write_result_items)
+        labels = ["redmine", "needs-triage", "needs-reproduction"]
         candidates.append(
             {
                 "id": f"redmine-{issue['id']}",
@@ -349,8 +465,10 @@ def build_redmine_gitea_sync_plan(config: ProjectConfig, issues: list[dict[str, 
                 "redmine_issue_id": issue["id"],
                 "title": title,
                 "body": body,
-                "labels": ["redmine", "quality-pilot", "needs-triage"],
+                "labels": labels,
+                "text_generation": text_generation_handoff(config, "gitea_issue_body"),
                 "dedupe_fingerprint": fingerprint,
+                "idempotency_key": _issue_create_idempotency_key(issue["id"], fingerprint),
                 "action": "link_existing_gitea_issue" if existing else "create_gitea_issue_candidate",
                 "existing_gitea_issue_id": existing.get("issue_id") if existing else None,
                 "existing_gitea_issue_url": existing.get("url") if existing else None,
@@ -419,6 +537,11 @@ def build_gitea_issue_write_request(config: ProjectConfig, plan: dict[str, Any])
                     "redmine_issue_id": candidate.get("redmine_issue_id"),
                     "reason": "existing_gitea_issue_linked",
                     "existing_gitea_issue_id": candidate.get("existing_gitea_issue_id"),
+                    "idempotency_key": candidate.get("idempotency_key"),
+                    "requested_labels": candidate.get("labels", []),
+                    "applied_labels": [],
+                    "unmatched_labels": candidate.get("labels", []),
+                    "label_resolution_note": "skipped_existing_issue_labels_not_modified",
                 }
             )
             continue
@@ -428,9 +551,15 @@ def build_gitea_issue_write_request(config: ProjectConfig, plan: dict[str, Any])
                     "id": candidate.get("id"),
                     "redmine_issue_id": candidate.get("redmine_issue_id"),
                     "reason_codes": gate.get("reason_codes", []),
+                    "idempotency_key": candidate.get("idempotency_key"),
+                    "requested_labels": candidate.get("labels", []),
+                    "applied_labels": [],
+                    "unmatched_labels": candidate.get("labels", []),
+                    "label_resolution_note": "blocked_before_mcp_apply",
                 }
             )
             continue
+        labels = list(candidate.get("labels", []))
         actions.append(
             {
                 "id": candidate.get("id"),
@@ -438,8 +567,14 @@ def build_gitea_issue_write_request(config: ProjectConfig, plan: dict[str, Any])
                 "redmine_issue_id": candidate.get("redmine_issue_id"),
                 "title": candidate.get("title"),
                 "body": candidate.get("body"),
-                "labels": candidate.get("labels", []),
+                "labels": labels,
+                "text_generation": candidate.get("text_generation"),
+                "requested_labels": labels,
+                "applied_labels": [],
+                "unmatched_labels": labels,
+                "label_resolution_note": "pending_mcp_apply",
                 "dedupe_fingerprint": candidate.get("dedupe_fingerprint"),
+                "idempotency_key": candidate.get("idempotency_key"),
                 "write_gate_result": gate,
             }
         )
@@ -520,10 +655,15 @@ def _redmine_sync_message(write_request: dict[str, Any], *, dry_run: bool) -> st
 
 
 def render_gitea_candidate_body(issue: dict[str, Any]) -> str:
+    description = str(issue.get("description") or "").strip()
     lines = [
-        f"Imported from Redmine #{issue['id']}.",
+        "## Problem",
         "",
-        "## Redmine Ticket",
+        f"Redmine #{issue['id']} reports: {issue.get('subject') or 'Untitled issue'}",
+        "",
+        _first_paragraph(description) or "The Redmine ticket did not include a separate description paragraph.",
+        "",
+        "## Source Redmine Ticket",
         "",
         f"- Redmine issue: #{issue['id']}",
         f"- Status: {issue.get('status') or '-'}",
@@ -532,17 +672,208 @@ def render_gitea_candidate_body(issue: dict[str, Any]) -> str:
         f"- Updated at: {issue.get('updated_at') or '-'}",
         f"- URL: {issue.get('url') or '-'}",
         "",
-        "## Full Redmine Message",
+        "## Full Description From Redmine",
         "",
-        issue.get("full_message") or issue.get("description") or "_No Redmine message synced._",
+        description or "_No Redmine description was provided._",
         "",
-        "## AI Quality Pilot Traceability",
+        "## Steps to Reproduce",
         "",
-        "- Local source mirror: `.quality-pilot-project/issues/redmine-{id}.md`".format(id=issue["id"]),
-        "- Generated by `/quality-pilot issues sync --redmine-issues` from Hermes Redmine MCP snapshot.",
-        "- Gitea write gate must pass before this candidate is created or linked remotely.",
+        _render_reproduction_details(issue),
+        "",
+        "## Observed Result",
+        "",
+        _render_observed_result(issue),
+        "",
+        "## Expected Result",
+        "",
+        _render_expected_result(issue),
+        "",
+        "## Redmine Fields, Comments, and Attachments",
+        "",
+        _render_human_redmine_context(issue),
     ]
     return "\n".join(lines) + "\n"
+
+
+def _render_reproduction_details(issue: dict[str, Any]) -> str:
+    entries = _matching_custom_fields(
+        issue,
+        ("repro", "reproduce", "step", "command", "scenario", "procedure", "environment", "model", "platform"),
+    )
+    description_steps = _description_lines_matching(
+        issue,
+        ("steps to reproduce", "reproduce:", "1.", "2.", "3.", "run ", "run `"),
+    )
+    if entries:
+        lines = ["Use these Redmine-provided details first:"]
+        lines.extend(_format_field_bullets(entries))
+        if description_steps:
+            lines.append("")
+            lines.append("Description step hints:")
+            lines.extend(description_steps)
+        lines.append("")
+        lines.append("If this does not reproduce, use the comments and attachments below to confirm the missing environment detail with the reporter.")
+        return "\n".join(lines).strip()
+    if description_steps:
+        return "\n".join(description_steps)
+    return (
+        "No dedicated reproduction command or step list was synced from Redmine. "
+        "Start from the full description and Redmine comments below, then confirm exact steps with the reporter before changing behavior."
+    )
+
+
+def _render_observed_result(issue: dict[str, Any]) -> str:
+    entries = _matching_custom_fields(issue, ("actual", "observed", "failure", "symptom", "result"))
+    if entries:
+        return "\n".join(_format_field_bullets(entries))
+    observed_lines = _description_lines_matching(issue, ("observed:", "actual:", "failure:", "symptom:"))
+    if observed_lines:
+        return "\n".join(observed_lines)
+    description = str(issue.get("description") or "").strip()
+    return _first_paragraph(description) or str(issue.get("subject") or "The Redmine issue describes the observed failure.")
+
+
+def _render_expected_result(issue: dict[str, Any]) -> str:
+    entries = _matching_custom_fields(issue, ("expected", "acceptance", "target", "should"))
+    if entries:
+        return "\n".join(_format_field_bullets(entries))
+    expected_lines = _description_lines_matching(issue, ("expected:", "expected result:", "should "))
+    if expected_lines:
+        return "\n".join(expected_lines)
+    return (
+        "The fix is acceptable when the reproduction path no longer shows the observed failure "
+        "and related behavior in the same environment does not regress."
+    )
+
+
+def _render_human_redmine_context(issue: dict[str, Any]) -> str:
+    raw = issue.get("raw") if isinstance(issue.get("raw"), dict) else {}
+    sections: list[str] = []
+    custom_fields = _custom_field_entries(raw)
+    if custom_fields:
+        sections.extend(["### Custom Fields", "", *_format_field_bullets(custom_fields), ""])
+    journals = _human_journal_lines(raw)
+    if journals:
+        sections.extend(["### Redmine Comments", "", *journals, ""])
+    attachments = _human_attachment_lines(raw)
+    if attachments:
+        sections.extend(["### Attachments", "", *attachments, ""])
+    if not sections:
+        return "_No custom fields, comments, or attachments were synced from Redmine._"
+    return "\n".join(sections).strip()
+
+
+def _custom_field_entries(raw: dict[str, Any]) -> list[tuple[str, str]]:
+    fields = raw.get("custom_fields")
+    if not isinstance(fields, list):
+        return []
+    entries: list[tuple[str, str]] = []
+    for index, item in enumerate(fields, start=1):
+        if isinstance(item, dict):
+            name = str(item.get("name") or item.get("id") or f"field {index}")
+            value = _render_redmine_text_value(item.get("value") if "value" in item else item)
+        else:
+            name = f"field {index}"
+            value = _render_redmine_text_value(item)
+        if value.strip():
+            entries.append((name, value.strip()))
+    return entries
+
+
+def _matching_custom_fields(issue: dict[str, Any], hints: tuple[str, ...]) -> list[tuple[str, str]]:
+    raw = issue.get("raw") if isinstance(issue.get("raw"), dict) else {}
+    matches: list[tuple[str, str]] = []
+    for name, value in _custom_field_entries(raw):
+        haystack = f"{name}\n{value}".lower()
+        if any(hint in haystack for hint in hints):
+            matches.append((name, value))
+    return matches
+
+
+def _description_lines_matching(issue: dict[str, Any], hints: tuple[str, ...]) -> list[str]:
+    description = str(issue.get("description") or "")
+    lines: list[str] = []
+    for line in description.splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        lowered = text.lower()
+        if any(hint in lowered for hint in hints):
+            lines.append(f"- {text}")
+    return lines
+
+
+def _format_field_bullets(entries: list[tuple[str, str]]) -> list[str]:
+    lines: list[str] = []
+    for name, value in entries:
+        lines.append(f"- {name}: {_indent_continuation(value)}")
+    return lines
+
+
+def _human_journal_lines(raw: dict[str, Any]) -> list[str]:
+    journals = raw.get("journals")
+    if not isinstance(journals, list) or not journals:
+        journals = raw.get("comments")
+    if not isinstance(journals, list) or not journals:
+        return []
+    lines: list[str] = []
+    for index, journal in enumerate(journals, start=1):
+        if not isinstance(journal, dict):
+            lines.extend([f"#### Comment {index}", "", _render_redmine_text_value(journal), ""])
+            continue
+        user = journal.get("user")
+        if isinstance(user, dict):
+            user_text = user.get("name") or user.get("login") or user.get("id") or "-"
+        else:
+            user_text = user or journal.get("author") or "-"
+        timestamp = journal.get("created_on") or journal.get("created_at") or journal.get("updated_on") or journal.get("updated_at") or "-"
+        notes = journal.get("notes") if "notes" in journal else journal.get("body", "")
+        lines.extend(
+            [
+                f"#### Comment {index}",
+                "",
+                f"- Author: {user_text}",
+                f"- Time: {timestamp}",
+                "",
+                _render_redmine_text_value(notes) or "_No comment text._",
+                "",
+            ]
+        )
+    return lines
+
+
+def _human_attachment_lines(raw: dict[str, Any]) -> list[str]:
+    attachments = raw.get("attachments")
+    if not isinstance(attachments, list) or not attachments:
+        return []
+    lines: list[str] = []
+    for index, attachment in enumerate(attachments, start=1):
+        if not isinstance(attachment, dict):
+            lines.append(f"- {_render_redmine_text_value(attachment)}")
+            continue
+        filename = attachment.get("filename") or attachment.get("name") or f"attachment {index}"
+        size = attachment.get("filesize") or attachment.get("size")
+        url = attachment.get("content_url") or attachment.get("url") or attachment.get("download_url")
+        suffix = []
+        if size:
+            suffix.append(f"{size} bytes")
+        if url:
+            suffix.append(str(url))
+        detail = f" ({'; '.join(suffix)})" if suffix else ""
+        lines.append(f"- {filename}{detail}")
+    return lines
+
+
+def _indent_continuation(value: str) -> str:
+    return str(value).replace("\n", "\n  ")
+
+
+def _first_paragraph(value: str) -> str:
+    for paragraph in re.split(r"\n\s*\n", value.strip()):
+        text = paragraph.strip()
+        if text:
+            return text
+    return ""
 
 
 def render_gitea_candidate_mirror(candidate: dict[str, Any]) -> str:
@@ -590,7 +921,43 @@ def _write_gitea_candidate_mirrors(config: ProjectConfig, plan: dict[str, Any], 
     return paths
 
 
-def _find_existing_gitea_issue(issue: dict[str, Any], fingerprint: str, snapshot_items: list[dict[str, Any]]) -> dict[str, Any] | None:
+def _label_resolution(write_request: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for bucket in ("actions", "blocked", "skipped"):
+        for item in write_request.get(bucket, []):
+            if not isinstance(item, dict):
+                continue
+            rows.append(
+                {
+                    "id": item.get("id"),
+                    "redmine_issue_id": item.get("redmine_issue_id"),
+                    "requested_labels": item.get("requested_labels", item.get("labels", [])),
+                    "applied_labels": item.get("applied_labels", []),
+                    "unmatched_labels": item.get("unmatched_labels", []),
+                    "label_resolution_note": item.get("label_resolution_note", bucket),
+                }
+            )
+    return rows
+
+
+def _find_existing_gitea_issue(
+    issue: dict[str, Any],
+    fingerprint: str,
+    snapshot_items: list[dict[str, Any]],
+    write_result_items: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    for item in write_result_items:
+        if _int_or_none(item.get("redmine_issue_id")) != int(issue["id"]):
+            continue
+        issue_id = _int_or_none(
+            item.get("issue_id")
+            or item.get("gitea_issue_id")
+            or item.get("number")
+            or item.get("index")
+            or item.get("id")
+        )
+        if issue_id is not None:
+            return {"issue_id": issue_id, "url": item.get("url") or item.get("html_url")}
     redmine_marker = f"redmine #{issue['id']}".lower()
     for item in snapshot_items:
         title = str(item.get("title") or "")
@@ -601,6 +968,41 @@ def _find_existing_gitea_issue(issue: dict[str, Any], fingerprint: str, snapshot
         if fingerprint and str(item.get("fingerprint") or "") == fingerprint:
             return item
     return None
+
+
+def _load_issue_write_result_items(config: ProjectConfig) -> list[dict[str, Any]]:
+    path = gitea_issue_write_result_path(config)
+    if not path.exists():
+        return []
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    return _walk_dicts(loaded)
+
+
+def _walk_dicts(value: Any) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        out.append(value)
+        for item in value.values():
+            out.extend(_walk_dicts(item))
+    elif isinstance(value, list):
+        for item in value:
+            out.extend(_walk_dicts(item))
+    return out
+
+
+def _issue_create_idempotency_key(redmine_issue_id: int, fingerprint: str) -> str:
+    digest = hashlib.sha256(f"redmine:{redmine_issue_id}:{fingerprint}".encode("utf-8")).hexdigest()[:16]
+    return f"redmine-{redmine_issue_id}-{digest}"
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _extract_issue_list(loaded: Any) -> list[dict[str, Any]]:

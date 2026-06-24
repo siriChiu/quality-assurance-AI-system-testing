@@ -403,11 +403,53 @@ def render_wiki_body(
         f"- DRAFT/NEEDS_INPUT：{counts.get('DRAFT', 0) + counts.get('NEEDS_INPUT', 0)}",
         f"- Active Gitea issues：{len(open_issues)}",
         "",
+        "## Coverage Matrix",
+        "",
+        "| Feature | Cases | SWQA dimensions |",
+        "|---|---:|---|",
+    ]
+    coverage = _coverage_matrix(cases)
+    if coverage:
+        for row in coverage:
+            lines.append(f"| {_md(row.get('feature'))} | {row.get('case_count')} | {_md(', '.join(row.get('dimensions', [])))} |")
+    else:
+        lines.append("| - | 0 | - |")
+
+    lines.extend(["", "## Risk Register", "", "| Risk | Status | Evidence |", "|---|---|---|"])
+    risks = _risk_register(cases, latest_run)
+    if risks:
+        for risk in risks:
+            lines.append(f"| {_md(risk.get('risk'))} | {_md(risk.get('status'))} | {_md(risk.get('evidence'))} |")
+    else:
+        lines.append("| No active execution risk | GREEN | Latest known cases have no FAIL/BLOCK/NEEDS_INPUT/DRAFT signal |")
+
+    trend = _trend_summary(latest_run)
+    lines.extend(
+        [
+            "",
+            "## Trend",
+            "",
+            f"- Latest run：{trend.get('latest_status')}",
+            f"- Last green：{trend.get('last_green')}",
+            f"- Result count：{trend.get('result_count')}",
+            "",
+            "## Flaky Signal",
+            "",
+            f"- Signal：{_flaky_signal(latest_run)}",
+            "",
+            "## Release Readiness",
+            "",
+            f"- Status：{_release_readiness(counts, cases, latest_run)}",
+            "",
+        ]
+    )
+
+    lines.extend([
         "## 測試結果明細",
         "",
         "| Case | Category | Status | Feature | Title |",
         "|---|---|---|---|---|",
-    ]
+    ])
     if cases:
         for case in cases:
             lines.append(
@@ -688,6 +730,89 @@ def _count_statuses(cases: list[dict[str, Any]]) -> dict[str, int]:
         status = str(case.get("status") or "NOT_RUN")
         counts[status] = counts.get(status, 0) + 1
     return counts
+
+
+def _coverage_matrix(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for case in cases:
+        feature = str(case.get("feature") or case.get("category") or "Uncategorized")
+        row = grouped.setdefault(feature, {"feature": feature, "case_count": 0, "dimensions": set()})
+        row["case_count"] += 1
+        for dimension in case.get("swqa_dimensions", []) if isinstance(case.get("swqa_dimensions"), list) else []:
+            row["dimensions"].add(str(dimension))
+    return [
+        {"feature": row["feature"], "case_count": row["case_count"], "dimensions": sorted(row["dimensions"])}
+        for row in sorted(grouped.values(), key=lambda item: str(item["feature"]))
+    ]
+
+
+def _risk_register(cases: list[dict[str, Any]], latest_run: dict[str, Any] | None) -> list[dict[str, Any]]:
+    risks: list[dict[str, Any]] = []
+    for case in cases:
+        status = str(case.get("status") or "NOT_RUN")
+        if status in {"FAIL", "BLOCK", "NEEDS_INPUT", "DRAFT"}:
+            risks.append(
+                {
+                    "risk": f"{case.get('case_id')}: {case.get('title')}",
+                    "status": status,
+                    "evidence": _case_evidence(case, latest_run),
+                }
+            )
+    return risks[:20]
+
+
+def _case_evidence(case: dict[str, Any], latest_run: dict[str, Any] | None) -> str:
+    case_id = str(case.get("case_id") or "")
+    if isinstance(latest_run, dict):
+        for result in latest_run.get("results", []):
+            if isinstance(result, dict) and str(result.get("case_id") or "") == case_id:
+                evidence = result.get("evidence")
+                if isinstance(evidence, list) and evidence:
+                    return ", ".join(str(item) for item in evidence[:3])
+                return str(result.get("blocked_reason") or result.get("status") or "-")
+    if case.get("question_count"):
+        return "missing input"
+    if case.get("review_required_before_run"):
+        return "review required before run"
+    return "-"
+
+
+def _trend_summary(latest_run: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(latest_run, dict):
+        return {"latest_status": "NO_RUN", "last_green": "unknown", "result_count": 0}
+    status = str(latest_run.get("status") or "UNKNOWN")
+    return {
+        "latest_status": status,
+        "last_green": latest_run.get("run_id") if status == "PASS" else "unknown",
+        "result_count": len(latest_run.get("results", [])) if isinstance(latest_run.get("results"), list) else 0,
+    }
+
+
+def _flaky_signal(latest_run: dict[str, Any] | None) -> str:
+    if not isinstance(latest_run, dict):
+        return "insufficient_history"
+    results = [item for item in latest_run.get("results", []) if isinstance(item, dict)]
+    by_case: dict[str, set[str]] = {}
+    for result in results:
+        case_id = str(result.get("case_id") or "")
+        if case_id:
+            by_case.setdefault(case_id, set()).add(str(result.get("status") or "UNKNOWN"))
+    flaky = sorted(case_id for case_id, statuses in by_case.items() if len(statuses) > 1)
+    return ", ".join(flaky) if flaky else "no_flaky_signal_in_latest_run"
+
+
+def _release_readiness(counts: dict[str, int], cases: list[dict[str, Any]], latest_run: dict[str, Any] | None) -> str:
+    if not cases:
+        return "NO_CASES"
+    if counts.get("FAIL", 0) or counts.get("BLOCK", 0):
+        return "NOT_READY_EXECUTION_RISK"
+    if counts.get("DRAFT", 0) or counts.get("NEEDS_INPUT", 0):
+        return "NOT_READY_INPUT_REQUIRED"
+    if not isinstance(latest_run, dict):
+        return "NOT_READY_NO_CURRENT_RUN"
+    if str(latest_run.get("status") or "") == "PASS":
+        return "READY"
+    return "REVIEW_REQUIRED"
 
 
 def _gate_result_for_event(

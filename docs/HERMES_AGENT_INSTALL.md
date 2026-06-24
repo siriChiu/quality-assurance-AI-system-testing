@@ -104,6 +104,8 @@ PYTHONPATH=/root/repo/AI Quality Pilot/src python3 -m quality_pilot.hermes skill
 /quality-pilot report status
 /quality-pilot report json
 /quality-pilot tracker plan-write
+/quality-pilot subagent status
+/quality-pilot subagent configure
 ```
 
 被移除的舊命令必須由 dispatcher 回 `command_removed`，Hermes 不可偷偷轉址執行。
@@ -234,6 +236,7 @@ Hermes agent 收到 `/quality-pilot ...` 時必須：
 4. 把 `payload.next_actions` 呈現成繁中選單。
 5. 若 `payload.hermes_needs_input.status == "required"`，呼叫 `clarify`，只問大分類阻擋問題，不逐一審每個 testcase。
 6. 寫檔、跑測試、讀 MCP、寫 Wiki、push branch、建立 PR 前先取得使用者確認。
+7. 長文字候選稿可透過 `/quality-pilot subagent status` 所設定的 subagent 產生；預設 Open WebUI endpoint 是 `https://172.17.20.220/`，model/prompt/instructions 等內容由使用者自行填寫。Subagent 只能回 candidate text/JSON，不可直接寫檔、建立 issue、更新 Wiki 或開 PR。
 
 Dispatcher command shape:
 
@@ -246,6 +249,7 @@ Dispatcher command shape:
 ```bash
 /usr/bin/env PYTHONPATH=/root/repo/AI Quality Pilot/src python3 -m quality_pilot.hermes --root "$PWD" /quality-pilot doctor
 /usr/bin/env PYTHONPATH=/root/repo/AI Quality Pilot/src python3 -m quality_pilot.hermes --root "$PWD" /quality-pilot cases run CASE-001
+/usr/bin/env PYTHONPATH=/root/repo/AI Quality Pilot/src python3 -m quality_pilot.hermes --root "$PWD" /quality-pilot subagent status
 ```
 
 ## Troubleshooting

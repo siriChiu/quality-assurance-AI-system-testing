@@ -34,6 +34,37 @@ tracker:
     wiki_write_request_json: .quality-pilot-project/state/gitea-mcp/wiki-write-request.json
     wiki_write_result_json: .quality-pilot-project/state/gitea-mcp/wiki-write-result.json
 
+subagents:
+  enabled: true
+  default_profile: open-webui
+  profiles:
+    open-webui:
+      provider: open_webui
+      endpoint: "https://172.17.20.220/"
+      model: ""
+      api_key_env: ""
+      workspace: ""
+      system_prompt: ""
+      user_instructions: ""
+      review_notes: ""
+  text_generation:
+    mode: subagent_handoff
+    review_required: true
+    tasks:
+      gitea_issue_body: open-webui
+      pull_request_body: open-webui
+      wiki_status_summary: open-webui
+      case_candidate_analysis: open-webui
+      redmine_issue_summary: open-webui
+      reviewer_notes: open-webui
+    task_prompts:
+      gitea_issue_body: ""
+      pull_request_body: ""
+      wiki_status_summary: ""
+      case_candidate_analysis: ""
+      redmine_issue_summary: ""
+      reviewer_notes: ""
+
 policy:
   deterministic_first: true
   require_write_gate: true
@@ -106,6 +137,25 @@ Hermes then uses Gitea MCP to update only the requested Wiki page and writes the
 ```
 
 AI Quality Pilot must not use MCP to create issue comments, create issues, create PRs, or write arbitrary Wiki pages.
+
+## Subagent Text Generation
+
+`subagents` configures candidate-only text generation. The default profile is Open WebUI:
+
+```text
+https://172.17.20.220/
+```
+
+AI Quality Pilot writes the endpoint and routing defaults, but leaves model, prompt, task prompt, workspace, and review note fields blank for the user to fill. This keeps project wording and reviewer expectations user-owned.
+
+Use:
+
+```text
+/quality-pilot subagent status
+/quality-pilot subagent configure
+```
+
+Configured subagents may draft candidate text for Gitea issue bodies, PR bodies, Wiki summaries, Redmine summaries, case candidate analysis, and reviewer notes. They must not write files, create issues, edit Wiki pages, open PRs, close issues, or bypass AI Quality Pilot validation/write gates.
 
 ## Policy Fields
 

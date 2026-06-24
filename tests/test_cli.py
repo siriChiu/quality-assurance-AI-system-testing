@@ -42,6 +42,11 @@ class CliTest(unittest.TestCase):
             self.assertNotIn("api_token_env", config)
             self.assertNotIn("token_env", config)
             self.assertNotIn("  gitea:", config)
+            self.assertIn("subagents:", config)
+            self.assertIn("provider: open_webui", config)
+            self.assertIn('endpoint: "https://172.17.20.220/"', config)
+            self.assertIn("gitea_issue_body: open-webui", config)
+            self.assertIn('user_instructions: ""', config)
 
     def test_setup_auto_configures_gitea_mcp_from_git_remote(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -132,6 +137,30 @@ class CliTest(unittest.TestCase):
             self.assertTrue(any(check["name"] == "config" for check in payload["checks"]))
             self.assertIn("hermes_mcp", payload)
             self.assertIn("issue_sync", payload)
+            self.assertEqual(payload["subagents"]["endpoint"], "https://172.17.20.220/")
+
+    def test_subagent_status_and_configure_use_open_webui_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.run_cli(["setup", "--root", tmp])
+
+            code, status = self.run_cli(["subagent", "status", "--root", tmp, "--json"])
+            self.assertEqual(code, 0)
+            self.assertEqual(status["subagents"]["provider"], "open_webui")
+            self.assertEqual(status["subagents"]["endpoint"], "https://172.17.20.220/")
+            self.assertIn("gitea_issue_body", status["subagents"]["tasks"])
+            self.assertIn("user_instructions", status["subagents"]["missing_user_fields"])
+
+            config_path = Path(tmp) / ".quality-pilot.yaml"
+            config_text = config_path.read_text(encoding="utf-8")
+            config_path.write_text(config_text.split("\nsubagents:", 1)[0] + "\npolicy:" + config_text.split("\npolicy:", 1)[1], encoding="utf-8")
+
+            code, configured = self.run_cli(["subagent", "configure", "--root", tmp, "--json"])
+            self.assertEqual(code, 0)
+            self.assertEqual(configured["subagents"]["provider"], "open_webui")
+            self.assertEqual(configured["subagents"]["endpoint"], "https://172.17.20.220/")
+            updated = config_path.read_text(encoding="utf-8")
+            self.assertIn("subagents:", updated)
+            self.assertIn("system_prompt: ''", updated)
 
     def test_removed_status_and_config_commands_return_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,0 +1,203 @@
+from __future__ import annotations
+
+from copy import deepcopy
+from pathlib import Path
+from typing import Any
+
+from . import config as config_module
+from .config import ProjectConfig, QAConfigError, load_yaml
+
+DEFAULT_SUBAGENT_PROFILE = "open-webui"
+DEFAULT_SUBAGENT_PROVIDER = "open_webui"
+DEFAULT_OPEN_WEBUI_ENDPOINT = "https://172.17.20.220/"
+SUBAGENT_TASKS = [
+    "gitea_issue_body",
+    "pull_request_body",
+    "wiki_status_summary",
+    "case_candidate_analysis",
+    "redmine_issue_summary",
+    "reviewer_notes",
+]
+USER_OWNED_PROFILE_FIELDS = ["model", "workspace", "system_prompt", "user_instructions", "review_notes"]
+
+
+class SubagentConfigError(RuntimeError):
+    pass
+
+
+def default_subagent_config() -> dict[str, Any]:
+    return {
+        "enabled": True,
+        "default_profile": DEFAULT_SUBAGENT_PROFILE,
+        "profiles": {
+            DEFAULT_SUBAGENT_PROFILE: {
+                "provider": DEFAULT_SUBAGENT_PROVIDER,
+                "endpoint": DEFAULT_OPEN_WEBUI_ENDPOINT,
+                "model": "",
+                "api_key_env": "",
+                "workspace": "",
+                "system_prompt": "",
+                "user_instructions": "",
+                "review_notes": "",
+            }
+        },
+        "text_generation": {
+            "mode": "subagent_handoff",
+            "review_required": True,
+            "tasks": {task: DEFAULT_SUBAGENT_PROFILE for task in SUBAGENT_TASKS},
+            "task_prompts": {task: "" for task in SUBAGENT_TASKS},
+        },
+    }
+
+
+def merged_subagent_config(config: ProjectConfig) -> dict[str, Any]:
+    defaults = default_subagent_config()
+    raw = config.data.get("subagents")
+    if not isinstance(raw, dict):
+        return defaults
+    return _deep_merge(defaults, raw)
+
+
+def subagent_status(config: ProjectConfig) -> dict[str, Any]:
+    configured = isinstance(config.data.get("subagents"), dict)
+    settings = merged_subagent_config(config)
+    profile_name = str(settings.get("default_profile") or DEFAULT_SUBAGENT_PROFILE)
+    profiles = settings.get("profiles") if isinstance(settings.get("profiles"), dict) else {}
+    profile = profiles.get(profile_name) if isinstance(profiles.get(profile_name), dict) else {}
+    endpoint = str(profile.get("endpoint") or "")
+    provider = str(profile.get("provider") or "")
+    missing_user_fields = [field for field in USER_OWNED_PROFILE_FIELDS if not str(profile.get(field) or "").strip()]
+    task_prompts = settings.get("text_generation", {}).get("task_prompts") if isinstance(settings.get("text_generation"), dict) else {}
+    missing_task_prompts = [task for task in SUBAGENT_TASKS if not str((task_prompts or {}).get(task) or "").strip()]
+    checks = [
+        {
+            "name": "subagent.config",
+            "status": "PASS" if configured else "WARN",
+            "message": "Subagent config exists." if configured else "Run /quality-pilot subagent configure to write the default Open WebUI profile.",
+        },
+        {
+            "name": "subagent.default_profile",
+            "status": "PASS" if profile else "FAIL",
+            "profile": profile_name,
+        },
+        {
+            "name": "subagent.endpoint",
+            "status": "PASS" if endpoint else "WARN",
+            "provider": provider or DEFAULT_SUBAGENT_PROVIDER,
+            "endpoint": endpoint or DEFAULT_OPEN_WEBUI_ENDPOINT,
+        },
+        {
+            "name": "subagent.user_content",
+            "status": "WARN" if missing_user_fields or missing_task_prompts else "PASS",
+            "message": "User-owned model/instruction/prompt fields are intentionally blank until the user fills them.",
+            "missing_profile_fields": missing_user_fields,
+            "missing_task_prompts": missing_task_prompts,
+        },
+    ]
+    return {
+        "status": "configured" if configured else "default_available",
+        "configured": configured,
+        "enabled": bool(settings.get("enabled", True)),
+        "default_profile": profile_name,
+        "provider": provider or DEFAULT_SUBAGENT_PROVIDER,
+        "endpoint": endpoint or DEFAULT_OPEN_WEBUI_ENDPOINT,
+        "mode": str(settings.get("text_generation", {}).get("mode") or "subagent_handoff") if isinstance(settings.get("text_generation"), dict) else "subagent_handoff",
+        "tasks": list(SUBAGENT_TASKS),
+        "review_required": bool(settings.get("text_generation", {}).get("review_required", True)) if isinstance(settings.get("text_generation"), dict) else True,
+        "user_owned_fields": USER_OWNED_PROFILE_FIELDS,
+        "missing_user_fields": missing_user_fields,
+        "missing_task_prompts": missing_task_prompts,
+        "checks": checks,
+    }
+
+
+def configure_subagent(
+    config: ProjectConfig,
+    *,
+    profile: str = DEFAULT_SUBAGENT_PROFILE,
+    provider: str = DEFAULT_SUBAGENT_PROVIDER,
+    endpoint: str = DEFAULT_OPEN_WEBUI_ENDPOINT,
+    force: bool = False,
+) -> dict[str, Any]:
+    if config_module.yaml is None:
+        raise SubagentConfigError("PyYAML is required to update .quality-pilot.yaml")
+    path = config.path
+    data = load_yaml(path)
+    before = deepcopy(data.get("subagents")) if isinstance(data.get("subagents"), dict) else None
+    subagents = data.get("subagents") if isinstance(data.get("subagents"), dict) else {}
+    defaults = default_subagent_config()
+    merged = _deep_merge(defaults, subagents)
+    merged["enabled"] = True
+    merged["default_profile"] = profile
+    profiles = merged.setdefault("profiles", {})
+    existing_profile = profiles.get(profile) if isinstance(profiles.get(profile), dict) else {}
+    user_owned = {field: existing_profile.get(field, "") for field in USER_OWNED_PROFILE_FIELDS}
+    api_key_env = existing_profile.get("api_key_env", "")
+    profiles[profile] = {
+        "provider": provider,
+        "endpoint": endpoint,
+        "model": "" if force else user_owned["model"],
+        "api_key_env": "" if force else api_key_env,
+        "workspace": "" if force else user_owned["workspace"],
+        "system_prompt": "" if force else user_owned["system_prompt"],
+        "user_instructions": "" if force else user_owned["user_instructions"],
+        "review_notes": "" if force else user_owned["review_notes"],
+    }
+    text_generation = merged.setdefault("text_generation", {})
+    text_generation["mode"] = "subagent_handoff"
+    text_generation["review_required"] = True
+    text_generation["tasks"] = {task: profile for task in SUBAGENT_TASKS}
+    prompts = text_generation.get("task_prompts") if isinstance(text_generation.get("task_prompts"), dict) else {}
+    text_generation["task_prompts"] = {task: "" if force else str(prompts.get(task) or "") for task in SUBAGENT_TASKS}
+    data["subagents"] = merged
+    path.write_text(config_module.yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    updated_config = ProjectConfig(root=config.root, path=config.path, data=data, paths=config.paths)
+    return {
+        "status": "ok",
+        "path": _relative_or_str(path, config.root),
+        "changed": before != data.get("subagents"),
+        "subagents": subagent_status(updated_config),
+        "message": "Subagent profile configured; user-owned content fields remain blank until the user fills them.",
+    }
+
+
+def text_generation_handoff(config: ProjectConfig, task: str) -> dict[str, Any]:
+    settings = merged_subagent_config(config)
+    text_generation = settings.get("text_generation") if isinstance(settings.get("text_generation"), dict) else {}
+    tasks = text_generation.get("tasks") if isinstance(text_generation.get("tasks"), dict) else {}
+    profile_name = str(tasks.get(task) or settings.get("default_profile") or DEFAULT_SUBAGENT_PROFILE)
+    profiles = settings.get("profiles") if isinstance(settings.get("profiles"), dict) else {}
+    profile = profiles.get(profile_name) if isinstance(profiles.get(profile_name), dict) else {}
+    task_prompts = text_generation.get("task_prompts") if isinstance(text_generation.get("task_prompts"), dict) else {}
+    endpoint = str(profile.get("endpoint") or DEFAULT_OPEN_WEBUI_ENDPOINT)
+    return {
+        "mode": str(text_generation.get("mode") or "subagent_handoff"),
+        "task": task,
+        "profile": profile_name,
+        "provider": str(profile.get("provider") or DEFAULT_SUBAGENT_PROVIDER),
+        "endpoint": endpoint,
+        "candidate_only": True,
+        "review_required": bool(text_generation.get("review_required", True)),
+        "user_content_required": [
+            field for field in USER_OWNED_PROFILE_FIELDS if not str(profile.get(field) or "").strip()
+        ],
+        "task_prompt_required": not bool(str(task_prompts.get(task) or "").strip()),
+        "write_policy": "Subagent may draft candidate text only; AI Quality Pilot validates and performs any gated write.",
+    }
+
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = deepcopy(value)
+    return merged
+
+
+def _relative_or_str(path: Path, root: Path) -> str:
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)

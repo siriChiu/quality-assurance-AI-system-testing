@@ -65,6 +65,18 @@ class LifecycleTest(unittest.TestCase):
                 "id": 144780,
                 "subject": "Sensor list fails after cold boot",
                 "description": "After cold boot, sensor collection returns an empty list for one BMC.",
+                "description_text": "\n".join(
+                    [
+                        "Steps to reproduce:",
+                        "1. AC cycle the SIRI-LAB-BMC-01 system.",
+                        "2. Wait for the BMC to finish cold boot.",
+                        "3. Run `irctool sensors --login lab.yaml`.",
+                        "",
+                        "Observed: the command exits successfully but returns an empty sensor inventory.",
+                        "",
+                        "Expected: populated sensor inventory should be returned after cold boot.",
+                    ]
+                ),
                 "status": {"name": "New"},
                 "tracker": {"name": "Bug"},
                 "project": {"name": "IRCTool"},
@@ -204,13 +216,27 @@ expected: CLI help path remains callable.
             self.assertEqual(state["schema"], "quality-pilot.redmine-gitea-sync-state.v1")
             self.assertEqual(state["issue_candidates"][0]["action"], "create_gitea_issue_candidate")
             self.assertTrue(state["issue_candidates"][0]["write_gate_result"]["allowed"])
-            self.assertIn("Redmine #144780", state["issue_candidates"][0]["body"])
-            self.assertIn("Full journal note: cold boot reproduces after AC cycle; do not shorten this text.", state["issue_candidates"][0]["body"])
-            self.assertIn("irctool sensors --login lab.yaml", state["issue_candidates"][0]["body"])
-            self.assertIn("cold-boot-sensors.log", state["issue_candidates"][0]["body"])
+            body = state["issue_candidates"][0]["body"]
+            self.assertIn("## Problem", body)
+            self.assertIn("## Steps to Reproduce", body)
+            self.assertIn("## Expected Result", body)
+            self.assertIn("Redmine #144780", body)
+            self.assertIn("After cold boot, sensor collection returns an empty list for one BMC.", body)
+            self.assertIn("Steps to reproduce:", body)
+            self.assertIn("Expected: populated sensor inventory should be returned after cold boot.", body)
+            self.assertIn("Full journal note: cold boot reproduces after AC cycle; do not shorten this text.", body)
+            self.assertIn("irctool sensors --login lab.yaml", body)
+            self.assertIn("cold-boot-sensors.log", body)
+            self.assertNotIn("AI Quality Pilot", body)
+            self.assertNotIn("/quality-pilot", body)
+            self.assertNotIn(".quality-pilot-project", body)
+            self.assertNotIn("write gate", body.lower())
+            self.assertNotIn("### Raw Redmine JSON", body)
             mirror_text = (root / ".quality-pilot-project" / "issues" / "redmine-144780.md").read_text(encoding="utf-8")
             self.assertIn("## Full Redmine Message", mirror_text)
             self.assertIn("### Raw Redmine JSON", mirror_text)
+            self.assertIn("Steps to reproduce:", mirror_text)
+            self.assertIn("Expected: populated sensor inventory should be returned after cold boot.", mirror_text)
             self.assertIn("Full journal note: cold boot reproduces after AC cycle; do not shorten this text.", mirror_text)
             self.assertIn("cold-boot-sensors.log", mirror_text)
             request_path = root / payload["mcp_issue_write_request_path"]
@@ -222,6 +248,8 @@ expected: CLI help path remains callable.
             self.assertEqual(request["actions"][0]["operation"], "gitea.issue.create")
             self.assertEqual(request["actions"][0]["redmine_issue_id"], 144780)
             self.assertIn("Full journal note: cold boot reproduces after AC cycle; do not shorten this text.", request["actions"][0]["body"])
+            self.assertIn("Steps to reproduce:", request["actions"][0]["body"])
+            self.assertNotIn("AI Quality Pilot", request["actions"][0]["body"])
             self.assertFalse((root / ".quality-pilot-project" / "cases" / "REDMINE-144780.yaml").exists())
 
     def test_cases_generate_redmine_issues_uses_multiple_ids_directly_without_gitea_plan(self) -> None:
@@ -253,6 +281,8 @@ expected: CLI help path remains callable.
             self.assertTrue((root / ".quality-pilot-project" / "cases" / "REDMINE-144693.yaml").exists())
             case_yaml = load_yaml(root / ".quality-pilot-project" / "cases" / "REDMINE-144780.yaml")
             self.assertEqual(case_yaml["source"]["redmine_issue_id"], 144780)
+            self.assertIn("Steps to reproduce:", case_yaml["source"]["redmine_message"])
+            self.assertIn("Expected: populated sensor inventory should be returned after cold boot.", case_yaml["source"]["redmine_message"])
             self.assertIn("Full journal note: cold boot reproduces after AC cycle; do not shorten this text.", case_yaml["source"]["redmine_message"])
             self.assertIn("irctool sensors --login lab.yaml", case_yaml["source"]["redmine_message"])
             self.assertIn("cold-boot-sensors.log", case_yaml["source"]["redmine_message"])
@@ -270,7 +300,18 @@ expected: CLI help path remains callable.
             payload = submit_fix_pr(load_project_config(root), issue_id=1, dry_run=True)
 
             self.assertEqual(payload["status"], "dry_run")
-            self.assertEqual(payload["pr_payload"]["title"], "Fix Gitea #1: CLI help command fails (cases: ISSUE-1)")
+            self.assertEqual(payload["pr_payload"]["title"], "Fix Gitea #1: CLI help command fails")
+            body = payload["pr_payload"]["body"]
+            self.assertIn("## Problem", body)
+            self.assertIn("CLI help command fails", body)
+            self.assertIn("Command: python3 --version", body)
+            self.assertIn("## How to Reproduce", body)
+            self.assertIn("## Linked Tickets", body)
+            self.assertIn("- Gitea #1", body)
+            self.assertIn("## Verification", body)
+            self.assertIn("- ISSUE-1", body)
+            self.assertNotIn("AI Quality Pilot", body)
+            self.assertNotIn("/quality-pilot", body)
 
     def test_cases_generate_growing_review_validate_and_runs_safe_probe(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

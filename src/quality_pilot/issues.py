@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import ProjectConfig, json_dumps
+from .contracts import list_contract_paths, load_contract
 from .gitea import GiteaClient, GiteaError, gitea_config_from_project, issue_number
 from .hermes_mcp import hermes_mcp_readiness, mcp_server_is_available
 from .runner import utc_now
@@ -54,12 +55,15 @@ def sync_issues(
     existing_mirrors = {int(path.stem): path for path in config.paths.issues.glob("*.md") if path.stem.isdigit()}
     removed: list[int] = []
     mirror_paths: list[str] = []
+    closed_archive_paths: list[str] = []
 
     for issue_id in closed_ids:
         path = existing_mirrors.get(issue_id)
         if path and path.exists():
             removed.append(issue_id)
             if not dry_run:
+                archived = archive_closed_issue(config, issue_id=issue_id, mirror_path=path)
+                closed_archive_paths.append(_relative_or_str(archived, config.root))
                 path.unlink()
 
     for issue in open_issues:
@@ -80,6 +84,7 @@ def sync_issues(
         "issues_dir": _relative_or_str(config.paths.issues, config.root),
         "open_active_issue_ids": [issue.issue_id for issue in open_issues],
         "closed_issue_ids": closed_ids,
+        "closed_archive_paths": closed_archive_paths,
         "removed_mirror_ids": removed,
         "mirror_paths": mirror_paths,
         "open_count": len(open_issues),
@@ -101,6 +106,7 @@ def issue_status(config: ProjectConfig) -> dict[str, Any]:
         "open_active_issue_ids": [item.get("issue_id") for item in snapshot.get("items", [])],
         "synced_at": snapshot.get("synced_at"),
         "issue_sync": readiness,
+        "traceability": build_traceability(config, snapshot),
     }
 
 
@@ -350,6 +356,55 @@ def issue_mirror_path(config: ProjectConfig, issue_id: int) -> Path:
     return config.paths.issues / f"{issue_id}.md"
 
 
+def archive_closed_issue(config: ProjectConfig, *, issue_id: int, mirror_path: Path) -> Path:
+    archive_dir = config.paths.issues / "closed"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    archived = archive_dir / f"{issue_id}.md"
+    source = mirror_path.read_text(encoding="utf-8") if mirror_path.exists() else ""
+    archived.write_text(
+        "\n".join(
+            [
+                f"# Closed Gitea issue #{issue_id}",
+                "",
+                f"- Archived at: {utc_now()}",
+                f"- Source mirror: {_relative_or_str(mirror_path, config.root)}",
+                "",
+                "## Last active mirror",
+                "",
+                source,
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return archived
+
+
+def build_traceability(config: ProjectConfig, snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    contracts = _contracts_by_case(config)
+    latest = _latest_results_by_case(config)
+    rows: list[dict[str, Any]] = []
+    for item in snapshot.get("items", []):
+        if not isinstance(item, dict):
+            continue
+        issue_id = item.get("issue_id")
+        case_id = str(item.get("case_id") or "")
+        runnable_case_id = case_id if case_id in contracts else _case_for_issue(contracts, issue_id, item)
+        result = latest.get(runnable_case_id or "")
+        rows.append(
+            {
+                "gitea_issue_id": issue_id,
+                "redmine_issue_ids": _redmine_refs(item),
+                "case_id": runnable_case_id,
+                "snapshot_case_id": case_id or None,
+                "case_runnable": bool(runnable_case_id),
+                "latest_status": result.get("status") if isinstance(result, dict) else None,
+                "latest_evidence": result.get("evidence", []) if isinstance(result, dict) else [],
+                "title": item.get("title"),
+            }
+        )
+    return rows
+
+
 def case_id_for_issue(issue: NormalizedIssue | dict[str, Any]) -> str:
     title = issue.title if isinstance(issue, NormalizedIssue) else str(issue.get("title", ""))
     body = issue.body if isinstance(issue, NormalizedIssue) else str(issue.get("body", ""))
@@ -358,6 +413,57 @@ def case_id_for_issue(issue: NormalizedIssue | dict[str, Any]) -> str:
         return match.group(0)
     issue_id = issue.issue_id if isinstance(issue, NormalizedIssue) else int(issue.get("issue_id", issue.get("number", 0)))
     return f"ISSUE-{issue_id}"
+
+
+def _contracts_by_case(config: ProjectConfig) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for path in list_contract_paths(config.paths.cases):
+        try:
+            contract = load_contract(path)
+        except Exception:
+            continue
+        out[contract.case_id] = contract
+    return out
+
+
+def _latest_results_by_case(config: ProjectConfig) -> dict[str, dict[str, Any]]:
+    path = config.paths.state / "latest-run.json"
+    if not path.exists():
+        return {}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for result in loaded.get("results", []) if isinstance(loaded, dict) else []:
+        if isinstance(result, dict) and result.get("case_id"):
+            out[str(result["case_id"])] = result
+    return out
+
+
+def _case_for_issue(contracts: dict[str, Any], issue_id: Any, issue: dict[str, Any]) -> str | None:
+    redmine_refs = _redmine_refs(issue)
+    for case_id, contract in contracts.items():
+        source = contract.raw.get("source") if isinstance(contract.raw.get("source"), dict) else {}
+        if _int_or_none(source.get("issue_id")) == _int_or_none(issue_id):
+            return case_id
+        if _int_or_none(source.get("gitea_issue_id")) == _int_or_none(issue_id):
+            return case_id
+        if _int_or_none(source.get("redmine_issue_id")) in redmine_refs:
+            return case_id
+    return None
+
+
+def _redmine_refs(issue: dict[str, Any]) -> list[int]:
+    text = "\n".join(str(issue.get(key) or "") for key in ("title", "body", "url"))
+    return sorted({int(match) for match in re.findall(r"(?i)\bredmine\s*#?\s*(\d+)\b", text)})
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def issue_fingerprint(title: str, body: str) -> str:

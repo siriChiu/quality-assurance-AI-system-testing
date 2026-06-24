@@ -141,7 +141,7 @@ class HermesDispatchTest(unittest.TestCase):
             unsupported = hermes.dispatch_chat_command("/quality-pilot rm -rf .", root=root)
             self.assertNotEqual(unsupported["exit_code"], 0)
             self.assertEqual(unsupported["status"], "error")
-            self.assertEqual(unsupported["payload"]["error"], "engine_output_not_json")
+            self.assertEqual(unsupported["payload"]["error"], "argument_error")
 
     def test_console_entrypoint_emits_hermes_dispatch_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -263,6 +263,10 @@ class HermesDispatchTest(unittest.TestCase):
             self.assertIn("/quality-pilot help", text)
             self.assertNotIn("/quality-pilot help qa-test", text)
             self.assertIn("/quality-pilot cases generate --init", text)
+            self.assertIn("/quality-pilot subagent status", text)
+            self.assertIn("/quality-pilot subagent configure", text)
+            self.assertIn("https://172.17.20.220/", text)
+            self.assertIn("candidate-only", text)
             self.assertIn("opinionated SWQA engineer", text)
             self.assertIn("executable safe-probe cases", text)
             self.assertIn("Every INIT case must have `commands[].run`", text)

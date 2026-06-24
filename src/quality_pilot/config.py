@@ -106,6 +106,37 @@ tracker:
     wiki_write_request_json: {workspace}/state/gitea-mcp/wiki-write-request.json
     wiki_write_result_json: {workspace}/state/gitea-mcp/wiki-write-result.json
 
+subagents:
+  enabled: true
+  default_profile: open-webui
+  profiles:
+    open-webui:
+      provider: open_webui
+      endpoint: "https://172.17.20.220/"
+      model: ""
+      api_key_env: ""
+      workspace: ""
+      system_prompt: ""
+      user_instructions: ""
+      review_notes: ""
+  text_generation:
+    mode: subagent_handoff
+    review_required: true
+    tasks:
+      gitea_issue_body: open-webui
+      pull_request_body: open-webui
+      wiki_status_summary: open-webui
+      case_candidate_analysis: open-webui
+      redmine_issue_summary: open-webui
+      reviewer_notes: open-webui
+    task_prompts:
+      gitea_issue_body: ""
+      pull_request_body: ""
+      wiki_status_summary: ""
+      case_candidate_analysis: ""
+      redmine_issue_summary: ""
+      reviewer_notes: ""
+
 policy:
   deterministic_first: true
   require_write_gate: true

@@ -41,7 +41,23 @@ from .publishing import PublishError, apply_publish_plan, plan_publish, publish_
 from .redmine import RedmineError, redmine_readiness, sync_redmine_issues
 from .reports import load_latest_results, render_status_report
 from .runner import RunContext, run_case, utc_now
+from .subagents import (
+    DEFAULT_OPEN_WEBUI_ENDPOINT,
+    DEFAULT_SUBAGENT_PROFILE,
+    DEFAULT_SUBAGENT_PROVIDER,
+    SubagentConfigError,
+    configure_subagent,
+    subagent_status,
+)
 from .templates import EXAMPLE_CONTRACT, EXAMPLE_RUNNER, SWQA_TEST_DESIGN_RULE, WIKI_CATEGORIES_RULE
+from .ux import (
+    attach_readiness,
+    build_readiness,
+    canonical_case_id,
+    canonical_issue_id,
+    resolve_identifier,
+    with_recovery,
+)
 from .write_gate import evaluate_write_gate
 from .wiki import (
     WikiPublishError,
@@ -86,8 +102,21 @@ REMOVED_COMMAND_REPLACEMENTS: dict[tuple[str, ...], str] = {
     ("find-new-issues", "dry-run"): "/quality-pilot cases generate --growing",
 }
 
+_CURRENT_ARGV: list[str] = []
+_CURRENT_ROOT: Path | None = None
+
+
+class CLIArgumentError(ValueError):
+    pass
+
+
+class QualityPilotArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise CLIArgumentError(message)
+
 
 def print_json(payload: dict[str, Any], *, exit_code: int = 0) -> int:
+    payload = with_recovery(payload, argv=_CURRENT_ARGV, exit_code=exit_code, root=_CURRENT_ROOT)
     print(json_dumps(payload))
     return exit_code
 
@@ -123,16 +152,18 @@ def cmd_init_project(args: argparse.Namespace) -> int:
 
     issue_sync = None
     wiki_sync = None
+    subagents = None
     config_error = None
     if paths.config.exists():
         try:
             config = load_project_config(root)
             issue_sync = issue_sync_readiness(config)
             wiki_sync = wiki_readiness(config)
+            subagents = subagent_status(config)
         except QAConfigError as exc:
             config_error = {"error": exc.error, "message": exc.message, **exc.details}
 
-    return print_json({
+    payload = {
         "status": "ok",
         "root": str(root),
         "created": created,
@@ -140,9 +171,11 @@ def cmd_init_project(args: argparse.Namespace) -> int:
         "tracker_setup": tracker_setup["payload"],
         "issue_sync": issue_sync,
         "wiki_sync": wiki_sync,
+        "subagents": subagents,
         "config_error": config_error,
         "embedded_tool_checkout_detected": is_quality_pilot_source_checkout(root / LEGACY_PROJECT_WORKSPACE),
-    })
+    }
+    return print_json(attach_readiness(payload, build_readiness(issue_sync=issue_sync, wiki_sync=wiki_sync)))
 
 
 def cmd_setup(args: argparse.Namespace) -> int:
@@ -256,11 +289,15 @@ def cmd_status(args: argparse.Namespace) -> int:
             config = load_project_config(root)
             issue_sync = issue_sync_readiness(config)
             wiki_sync = wiki_readiness(config)
+            subagents = subagent_status(config)
             if not issue_sync.get("issue_sync_ready"):
                 payload_status = "warn"
         except QAConfigError as exc:
             payload_status = "error"
             config_error = {"error": exc.error, "message": exc.message, **exc.details}
+            subagents = None
+    else:
+        subagents = None
     latest_run = paths.state / "latest-run.json"
     latest_payload = None
     if latest_run.exists():
@@ -270,7 +307,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             latest_payload = {"status": "error", "error": "latest_run_invalid_json"}
     cases = list_contract_paths(paths.cases)
     runners = sorted(paths.runners.glob("*")) if paths.runners.exists() else []
-    return print_json({
+    payload = {
         "status": payload_status,
         "tool": "quality-pilot",
         "root": str(root),
@@ -286,7 +323,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         "latest_run": latest_payload,
         "issue_sync": issue_sync,
         "wiki_sync": wiki_sync,
-    })
+        "subagents": subagents,
+    }
+    return print_json(attach_readiness(payload, build_readiness(issue_sync=issue_sync, wiki_sync=wiki_sync)))
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -305,6 +344,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         checks.extend(readiness.get("checks", []))
         redmine_ready = redmine_readiness(config)
         checks.extend(redmine_ready.get("checks", []))
+        subagents = subagent_status(config)
+        checks.extend(subagents.get("checks", []))
         wiki_ready = wiki_readiness(config)
         if wiki_ready.get("remote_write_ready"):
             checks.append({"name": "wiki.remote_write", "status": "PASS", "page": wiki_ready.get("page")})
@@ -318,7 +359,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         checks = _dedupe_checks(checks)
         statuses = {str(check.get("status")) for check in checks}
         status = "FAIL" if "FAIL" in statuses else ("WARN" if "WARN" in statuses else "PASS")
-        return print_json({"status": status, "tool": "quality-pilot", "checks": checks, "hermes_mcp": hermes_ready, "issue_sync": readiness, "redmine_sync": redmine_ready, "wiki_sync": wiki_ready})
+        payload = {
+            "status": status,
+            "tool": "quality-pilot",
+            "checks": checks,
+            "hermes_mcp": hermes_ready,
+            "issue_sync": readiness,
+            "redmine_sync": redmine_ready,
+            "subagents": subagents,
+            "wiki_sync": wiki_ready,
+        }
+        return print_json(attach_readiness(payload, build_readiness(issue_sync=readiness, wiki_sync=wiki_ready, redmine_sync=redmine_ready, hermes_mcp=hermes_ready)))
     except QAConfigError as exc:
         return print_json({"status": "FAIL", "error": exc.error, "message": exc.message, **exc.details}, exit_code=2)
 
@@ -382,12 +433,20 @@ def cmd_issues_sync(args: argparse.Namespace) -> int:
             payload["duplicates"] = duplicates.get("duplicates", [])
             payload["duplicate_count"] = duplicates.get("duplicate_count", 0)
             payload["remote_duplicate_actions"] = _remote_duplicate_actions(duplicates)
+            payload = attach_readiness(
+                payload,
+                build_readiness(
+                    issue_sync=issue_sync_readiness(config),
+                    redmine_sync=redmine_readiness(config, requested_issue_ids=args.redmine_issues),
+                ),
+            )
         else:
             payload = sync_issues(config, issues_json=args.issues_json, dry_run=args.dry_run)
             duplicates = dedupe_issues(config)
             payload["duplicates"] = duplicates.get("duplicates", [])
             payload["duplicate_count"] = duplicates.get("duplicate_count", 0)
             payload["remote_duplicate_actions"] = _remote_duplicate_actions(duplicates)
+            payload = attach_readiness(payload, build_readiness(issue_sync=issue_sync_readiness(config)))
     except (QAConfigError, IssueSyncError, GiteaError, RedmineError) as exc:
         return _error_payload(exc)
     return print_json(payload)
@@ -401,6 +460,7 @@ def cmd_issues_status(args: argparse.Namespace) -> int:
         payload["duplicate_count"] = duplicates.get("duplicate_count", 0)
         payload["duplicates"] = duplicates.get("duplicates", [])
         payload["fix"] = fix_status(config)
+        payload = attach_readiness(payload, build_readiness(issue_sync=payload.get("issue_sync", {})))
     except (QAConfigError, IssueSyncError) as exc:
         return _error_payload(exc)
     return print_json(payload)
@@ -446,15 +506,27 @@ def cmd_issues_fix(args: argparse.Namespace) -> int:
                 },
                 exit_code=2,
             )
+        id_resolution = resolve_identifier(config, args.issue)
+        issue_id = canonical_issue_id(id_resolution)
+        if issue_id is None:
+            payload = {
+                "status": "error",
+                "error": "id_domain_mismatch",
+                "message": f"Cannot map `{args.issue}` to a synced Gitea issue id.",
+                "id_resolution": id_resolution,
+            }
+            return print_json(payload, exit_code=2)
         if args.push_pr:
-            payload = submit_fix_pr(config, issue_id=args.issue, dry_run=False)
+            payload = submit_fix_pr(config, issue_id=issue_id, dry_run=False)
+            payload["id_resolution"] = id_resolution
             if payload.get("status") == "ok":
                 payload = _with_auto_wiki(config, payload, event="gitea_write_summary")
             return print_json(payload, exit_code=0 if payload.get("status") == "ok" else 4)
-        payload = run_fix_issue(config, issue_id=args.issue)
+        payload = run_fix_issue(config, issue_id=issue_id)
+        payload["id_resolution"] = id_resolution
     except (QAConfigError, FixIssueError, GiteaError, IssueSyncError) as exc:
         return _error_payload(exc)
-    return print_json(payload, exit_code=0 if payload.get("status") != "blocked" else 4)
+    return print_json(payload, exit_code=0 if payload.get("status") not in {"blocked", "handoff_blocked"} else 4)
 
 
 def cmd_cases_generate(args: argparse.Namespace) -> int:
@@ -597,6 +669,7 @@ def cmd_publish_wiki_plan(args: argparse.Namespace) -> int:
     try:
         config = load_project_config(Path(args.root), args.config)
         payload = plan_wiki(config, event=args.event, latest_run=args.latest_run)
+        payload = attach_readiness(payload, build_readiness(wiki_sync=payload.get("remote", {})))
     except (QAConfigError, WikiPublishError, IssueSyncError) as exc:
         return _error_payload(exc)
     return print_json(payload)
@@ -624,6 +697,7 @@ def cmd_publish_wiki_status(args: argparse.Namespace) -> int:
     try:
         config = load_project_config(Path(args.root), args.config)
         payload = wiki_status(config)
+        payload = attach_readiness(payload, build_readiness(wiki_sync=payload.get("remote", {})))
     except (QAConfigError, WikiPublishError) as exc:
         return _error_payload(exc)
     return print_json(payload)
@@ -693,13 +767,30 @@ def cmd_find_new_issues_run(args: argparse.Namespace) -> int:
 
 
 def _run_cases(args: argparse.Namespace, *, dry_run: bool, one: bool) -> int:
+    id_resolution: dict[str, Any] | None = None
     try:
         config = load_project_config(Path(args.root), args.config)
-        contracts = select_contracts(config.paths.cases, args.case_id if one or getattr(args, "case_id", None) else None)
+        requested_case_id = args.case_id if one or getattr(args, "case_id", None) else None
+        if requested_case_id:
+            id_resolution = resolve_identifier(config, requested_case_id)
+            resolved_case_id = canonical_case_id(id_resolution)
+            if resolved_case_id:
+                requested_case_id = resolved_case_id
+        contracts = select_contracts(config.paths.cases, requested_case_id)
         context = RunContext(root=config.root, evidence_dir=config.paths.evidence)
         results = [run_case(contract, context, dry_run=dry_run) for contract in contracts]
-    except (QAConfigError, ContractError) as exc:
+    except QAConfigError as exc:
         return _error_payload(exc)
+    except ContractError as exc:
+        payload = {"status": "error", "error": exc.error, "message": exc.message}
+        if exc.path:
+            payload["path"] = exc.path
+        if id_resolution:
+            payload["id_resolution"] = id_resolution
+            recovered = canonical_case_id(id_resolution)
+            if recovered:
+                payload["recovered_case_ids"] = [recovered]
+        return print_json(payload, exit_code=3)
     status = "PASS"
     if dry_run:
         status = "NOT_RUN"
@@ -709,9 +800,13 @@ def _run_cases(args: argparse.Namespace, *, dry_run: bool, one: bool) -> int:
         status = "BLOCK"
     exit_code = 1 if status == "FAIL" else (2 if status == "BLOCK" else 0)
     payload = {"status": status, "results": results}
+    if id_resolution:
+        payload["id_resolution"] = id_resolution
     if not dry_run:
         run_payload = _persist_qa_test_run(config, status=status, results=results)
         payload = {**run_payload, "results": results}
+        if id_resolution:
+            payload["id_resolution"] = id_resolution
         payload = _with_auto_wiki(config, payload, event="test_result", latest_run=run_payload)
     return print_json(payload, exit_code=exit_code)
 
@@ -795,6 +890,30 @@ def cmd_tracker_plan_write(args: argparse.Namespace) -> int:
     return print_json({"status": "ok", "write_gate_result": gate.as_dict(), "planned_writes": []})
 
 
+def cmd_subagent_status(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        payload = {"status": "ok", "subagents": subagent_status(config)}
+    except (QAConfigError, SubagentConfigError) as exc:
+        return _error_payload(exc)
+    return print_json(payload)
+
+
+def cmd_subagent_configure(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        payload = configure_subagent(
+            config,
+            profile=args.profile,
+            provider=args.provider,
+            endpoint=args.endpoint,
+            force=args.force,
+        )
+    except (QAConfigError, SubagentConfigError) as exc:
+        return _error_payload(exc)
+    return print_json(payload)
+
+
 def _persist_qa_test_run(config: Any, *, status: str, results: list[dict[str, Any]]) -> dict[str, Any]:
     run_id = utc_now().replace(":", "").replace(".", "")
     config.paths.state.mkdir(parents=True, exist_ok=True)
@@ -847,7 +966,7 @@ def _error_payload(exc: Exception) -> int:
         if exc.path:
             payload["path"] = exc.path
         return print_json(payload, exit_code=3)
-    if isinstance(exc, (IssueSyncError, GiteaError, CaseGenerationError, PublishError, FixIssueError, WikiPublishError, RedmineError)):
+    if isinstance(exc, (IssueSyncError, GiteaError, CaseGenerationError, PublishError, FixIssueError, WikiPublishError, RedmineError, SubagentConfigError)):
         return print_json({"status": "error", "error": type(exc).__name__, "message": str(exc)}, exit_code=2)
     return print_json({"status": "error", "error": type(exc).__name__, "message": str(exc)}, exit_code=1)
 
@@ -889,6 +1008,8 @@ PUBLIC_COMMANDS = [
     "/quality-pilot report status",
     "/quality-pilot report json",
     "/quality-pilot tracker plan-write",
+    "/quality-pilot subagent status",
+    "/quality-pilot subagent configure",
 ]
 
 
@@ -923,9 +1044,9 @@ def cmd_help(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="quality-pilot", description="Reusable deterministic-first QA toolkit")
+    parser = QualityPilotArgumentParser(prog="quality-pilot", description="Reusable deterministic-first QA toolkit")
     parser.add_argument("--json", action="store_true", help="Emit JSON output; accepted for stable Hermes scripts")
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command", required=True, parser_class=QualityPilotArgumentParser)
 
     help_cmd = sub.add_parser("help", help="Show all AI Quality Pilot commands")
     help_cmd.add_argument("--json", action="store_true", help="Emit JSON output")
@@ -940,7 +1061,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.set_defaults(func=cmd_doctor)
 
     issues = sub.add_parser("issues", help="Issue sync, status, show, and fix commands")
-    issues_sub = issues.add_subparsers(dest="issues_command", required=True)
+    issues_sub = issues.add_subparsers(dest="issues_command", required=True, parser_class=QualityPilotArgumentParser)
     issues_sync = issues_sub.add_parser("sync", help="Sync local issue mirrors from Gitea, Redmine MCP, or an issues JSON file")
     _add_root_config(issues_sync)
     issues_sync.add_argument("--issues-json", default=None, help="Offline JSON input for tests or manual sync")
@@ -958,12 +1079,12 @@ def build_parser() -> argparse.ArgumentParser:
     _add_root_config(issues_fix)
     scope = issues_fix.add_mutually_exclusive_group(required=True)
     scope.add_argument("--all", action="store_true", help="Fix all synced open issues until blocked")
-    scope.add_argument("--issue", type=int, help="Fix one synced open issue")
+    scope.add_argument("--issue", help="Fix one synced open issue; accepts Gitea issue id, ISSUE-<id>, or redmine-<id> when it can be mapped")
     issues_fix.add_argument("--push-pr", action="store_true", help="Push branch and create a PR after issue fix checks pass")
     issues_fix.set_defaults(func=cmd_issues_fix)
 
     cases = sub.add_parser("cases", help="Generate, review, and validate case contracts")
-    cases_sub = cases.add_subparsers(dest="cases_command", required=True)
+    cases_sub = cases.add_subparsers(dest="cases_command", required=True, parser_class=QualityPilotArgumentParser)
     cases_generate = cases_sub.add_parser("generate", help="Generate case contracts; requires --init, --growing, or --redmine-issues")
     _add_root_config(cases_generate)
     cases_generate.add_argument("--init", action="store_true", help="First-time full-repo SWQA generation from README, code, metadata, runners, and rules")
@@ -993,7 +1114,7 @@ def build_parser() -> argparse.ArgumentParser:
     cases_push_pr.set_defaults(func=cmd_cases_push_pr)
 
     close_loop = sub.add_parser("close-loop", help="Fixed QA close-loop pipeline")
-    close_sub = close_loop.add_subparsers(dest="close_command", required=True)
+    close_sub = close_loop.add_subparsers(dest="close_command", required=True, parser_class=QualityPilotArgumentParser)
     close_status = close_sub.add_parser("status", help="Show pipeline order and latest run")
     _add_root_config(close_status)
     close_status.set_defaults(func=cmd_close_loop_status)
@@ -1004,7 +1125,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_once.set_defaults(func=cmd_close_loop_run_once)
 
     report = sub.add_parser("report", help="Report commands")
-    report_sub = report.add_subparsers(dest="report_command", required=True)
+    report_sub = report.add_subparsers(dest="report_command", required=True, parser_class=QualityPilotArgumentParser)
     report_status = report_sub.add_parser("status", help="Render markdown status report")
     _add_root_config(report_status)
     report_status.set_defaults(func=cmd_report_status)
@@ -1013,7 +1134,7 @@ def build_parser() -> argparse.ArgumentParser:
     report_json.set_defaults(func=cmd_report_json)
 
     tracker = sub.add_parser("tracker", help="Tracker dry-run planning commands")
-    tracker_sub = tracker.add_subparsers(dest="tracker_command", required=True)
+    tracker_sub = tracker.add_subparsers(dest="tracker_command", required=True, parser_class=QualityPilotArgumentParser)
     plan_write = tracker_sub.add_parser("plan-write", help="Evaluate write gate without writing tracker")
     _add_root_config(plan_write)
     plan_write.add_argument("--result", default=None)
@@ -1021,10 +1142,23 @@ def build_parser() -> argparse.ArgumentParser:
     plan_write.add_argument("--expected-contract-hash", default=None)
     plan_write.set_defaults(func=cmd_tracker_plan_write)
 
+    subagent = sub.add_parser("subagent", help="Configure and inspect text-generation subagent handoff profiles")
+    subagent_sub = subagent.add_subparsers(dest="subagent_command", required=True, parser_class=QualityPilotArgumentParser)
+    subagent_status_cmd = subagent_sub.add_parser("status", help="Show subagent handoff configuration")
+    _add_root_config(subagent_status_cmd)
+    subagent_status_cmd.set_defaults(func=cmd_subagent_status)
+    subagent_configure_cmd = subagent_sub.add_parser("configure", help="Write the default Open WebUI subagent profile into project config")
+    _add_root_config(subagent_configure_cmd)
+    subagent_configure_cmd.add_argument("--profile", default=DEFAULT_SUBAGENT_PROFILE, help="Subagent profile name")
+    subagent_configure_cmd.add_argument("--provider", default=DEFAULT_SUBAGENT_PROVIDER, choices=["open_webui"], help="Subagent provider type")
+    subagent_configure_cmd.add_argument("--endpoint", default=DEFAULT_OPEN_WEBUI_ENDPOINT, help="Open WebUI endpoint for the profile")
+    subagent_configure_cmd.add_argument("--force", action="store_true", help="Reset user-owned subagent content fields to blanks")
+    subagent_configure_cmd.set_defaults(func=cmd_subagent_configure)
+
     publish = sub.add_parser("publish", help="Plan or apply gated Gitea wiki/issues writes")
-    publish_sub = publish.add_subparsers(dest="publish_command", required=True)
+    publish_sub = publish.add_subparsers(dest="publish_command", required=True, parser_class=QualityPilotArgumentParser)
     publish_wiki = publish_sub.add_parser("wiki", help="Plan, apply, or status the Gitea Wiki status page")
-    wiki_sub = publish_wiki.add_subparsers(dest="publish_wiki_command", required=True)
+    wiki_sub = publish_wiki.add_subparsers(dest="publish_wiki_command", required=True, parser_class=QualityPilotArgumentParser)
     wiki_plan = wiki_sub.add_parser("plan", help="Create a gated Wiki-only status plan")
     _add_root_config(wiki_plan)
     wiki_plan.add_argument("--event", default="manual", choices=["manual", "case_generation", "test_result", "gitea_write_summary"])
@@ -1135,6 +1269,8 @@ def _positional_args(argv: list[str]) -> list[str]:
         "--gitea-base-url",
         "--gitea-repo",
         "--gitea-token-env",
+        "--provider",
+        "--endpoint",
         "--feature",
         "--profile",
         "--count",
@@ -1269,13 +1405,35 @@ def _close_loop_components(
 
 
 def main(argv: list[str] | None = None) -> int:
+    global _CURRENT_ARGV, _CURRENT_ROOT
     argv = list(argv if argv is not None else sys.argv[1:])
+    _CURRENT_ARGV = list(argv)
+    _CURRENT_ROOT = _root_from_argv(argv)
     removed = removed_command_payload(argv)
     if removed:
         return print_json(removed, exit_code=2)
     parser = build_parser()
-    args = parser.parse_args(argv)
+    try:
+        args = parser.parse_args(argv)
+    except CLIArgumentError as exc:
+        return print_json(
+            {
+                "status": "error",
+                "error": "argument_error",
+                "message": str(exc),
+            },
+            exit_code=2,
+        )
     return args.func(args)
+
+
+def _root_from_argv(argv: list[str]) -> Path:
+    for index, item in enumerate(argv):
+        if item == "--root" and index + 1 < len(argv):
+            return Path(argv[index + 1]).resolve()
+        if item.startswith("--root="):
+            return Path(item.split("=", 1)[1]).resolve()
+    return Path(".").resolve()
 
 
 if __name__ == "__main__":
