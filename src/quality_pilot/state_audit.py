@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .command_policy import validate_generated_command
 from .config import ProjectConfig
 from .contracts import CaseContract, list_contract_paths, load_contract
 from .hermes_mcp import configured_mcp_json_path, hermes_mcp_status, hermes_mcp_status_path
@@ -26,6 +27,7 @@ def audit_project_state(config: ProjectConfig) -> dict[str, Any]:
     traceability = _audit_issue_traceability(config, findings)
 
     _audit_redmine_case_contracts(config, contracts, findings)
+    _audit_generated_command_policy(config, contracts, findings)
     _audit_evidence_contract_consistency(config, contracts, latest_run, findings)
     _audit_redmine_handoffs(config, findings)
     _audit_gitea_handoffs(config, findings)
@@ -140,6 +142,62 @@ def _is_developer_redmine_command(command: str) -> bool:
     )
 
 
+def _audit_generated_command_policy(
+    config: ProjectConfig,
+    contracts: dict[str, CaseContract],
+    findings: list[dict[str, Any]],
+) -> None:
+    for contract in contracts.values():
+        if not _is_generated_contract(contract):
+            continue
+        qa = contract.raw.get("quality_pilot") if isinstance(contract.raw.get("quality_pilot"), dict) else {}
+        source = contract.raw.get("source") if isinstance(contract.raw.get("source"), dict) else {}
+        safe_runner = source.get("safe_runner") if isinstance(source.get("safe_runner"), dict) else {}
+        source_type = str(qa.get("safe_command_source_type") or safe_runner.get("source_type") or "")
+        allow_user_confirmed = source_type == "user_confirmed"
+        invalid: list[dict[str, Any]] = []
+        for command in contract.commands:
+            result = validate_generated_command(
+                config,
+                command.run,
+                source_type=source_type,
+                allow_user_confirmed_runner=allow_user_confirmed,
+            )
+            if result.get("allowed"):
+                continue
+            invalid.append(
+                {
+                    "command_id": command.id,
+                    "run": command.run,
+                    "policy_reasons": result.get("reasons", []),
+                    "command_kind": result.get("command_kind"),
+                }
+            )
+        if not invalid:
+            continue
+        _add_finding(
+            findings,
+            id="generated_command_policy_violation",
+            severity="blocker",
+            category="case_contract",
+            message="A generated case command does not satisfy the product-runtime command policy.",
+            evidence=[contract.path],
+            recommendation="Regenerate the case so commands[].run uses the configured/inferred product binary/API/runner, or a user-confirmed runner.",
+            case_id=contract.case_id,
+            invalid_commands=invalid,
+        )
+
+
+def _is_generated_contract(contract: CaseContract) -> bool:
+    qa = contract.raw.get("quality_pilot") if isinstance(contract.raw.get("quality_pilot"), dict) else {}
+    source = contract.raw.get("source") if isinstance(contract.raw.get("source"), dict) else {}
+    source_type = str(source.get("type") or "").lower()
+    generation_mode = str(qa.get("generation_mode") or "").lower()
+    if generation_mode:
+        return True
+    return source_type in {"issue", "redmine", "init", "growth", "from_scratch"}
+
+
 def _audit_evidence_contract_consistency(
     config: ProjectConfig,
     contracts: dict[str, CaseContract],
@@ -188,7 +246,7 @@ def _audit_evidence_contract_consistency(
 
 def _audit_issue_traceability(config: ProjectConfig, findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     try:
-        payload = issue_status(config)
+        payload = issue_status(config, persist_traceability=False)
     except IssueSyncError as exc:
         _add_finding(
             findings,

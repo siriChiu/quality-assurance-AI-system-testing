@@ -59,10 +59,10 @@ Redmine 和 Gitea issues 都是問題來源。Redmine issue 經 `issues sync --r
 | issues sync agent | `sync_redmine_issues`, `sync_issues`, `issues status` | 建立 local mirrors、Gitea issue create/update handoff request、dedupe、canonical traceability | Partial | 還不是獨立 state-machine agent；remote write result reconciliation、retry/idempotency、evidence writeback routing 還需要強化 |
 | case generate agent | `generate_cases_from_redmine_issues`, `generate_cases_init`, `generate_cases_growing` | Redmine 可生成 linked case；init/growing 已阻止 runtime 未知時產生 placeholder cases；runtime 可自動推論 executable | Partial | 還缺真正的 subagent candidate generation/critic loop；case command diversity、oracle synthesis、fixture inference 仍偏保守 |
 | case run agent | `run_case`, `cases run`, evidence store | 可執行 contract command、保存 stdout/stderr/rc/meta/result JSON | Partial | 缺 execution planner、preflight env validation、parallel/isolated runner、flaky retry、evidence-contract gate 在 run 前後的強制化 |
-| issues report agent | `report status`, `issues status`, `wiki plan/status` | 可產生 status report、traceability、Wiki plan | Partial | 還沒有獨立「QA issue report」agent，把 problem/repro/evidence/fix recommendation 統一成 Gitea issue evidence update、PR、Wiki 可讀 report |
-| issues fix agent | `issues fix`, `fix_issues.py` | 可 plan/run fix workflow；已支援 synced issue 無 runnable case 時走 issue-driven development handoff；PR body 可人類化 | Partial | 修復 agent 還不是多步 code-understanding loop；缺 failure classification、patch planning、post-fix retest policy、PR-to-issue linkage gate 完整化 |
+| issues report agent | `issues report`, `report status`, `issues status`, `wiki plan/status` | 可產生 per-issue QA report、status report、traceability、Wiki plan，並為 FAIL/BLOCK 產生 gated linked Gitea issue evidence update | Partial | 還缺完整 module session contract、subagent wording persistence、PR/Wiki report consumption 整合 |
+| issues fix agent | `issues fix`, `fix_issues.py` | 可 plan/run fix workflow；已支援 synced issue 無 runnable case 時走 issue-driven development handoff；PR body/linkage metadata 會關聯 Gitea issue、Redmine、case、evidence path | Partial | 修復 agent 還不是多步 code-understanding loop；缺 failure classification、patch planning、post-fix retest policy、PR apply/result reconciliation 完整化 |
 | update wiki agent | `publish wiki plan/apply`, `auto_sync_wiki` | 可產生 gated Wiki update request，Hermes MCP 可套用 | Partial | Wiki readiness 仍需更強 truth source；agent 應根據 latest verified run/audit result 統一生成，不可被 stale state 污染 |
-| Gitea output | Hermes Gitea MCP handoff | 可建立 issue write request、Wiki write request | Partial | Gitea issue create/update、evidence writeback、PR linkage metadata、Wiki write completion 還需 module 化與 audit 化 |
+| Gitea output | Hermes Gitea MCP handoff | 可建立 issue write request、issue evidence update request、PR linkage request、Wiki write request，並以 ledger 記錄 first-pass result reconciliation | Partial | generic issue update、PR apply/result reconciliation、Wiki/report consumption 還需 module 化與 audit 化 |
 | Cross-agent orchestrator | `close-loop run-once`, Hermes skill next_actions | 有固定 pipeline 與 UX recovery | No | 還沒有圖中每個 module 的 agent contract、handoff schema、retry policy、subagent assignment、stop/go gates |
 
 ## Design Principles
@@ -71,8 +71,8 @@ Redmine 和 Gitea issues 都是問題來源。Redmine issue 經 `issues sync --r
 - Ask only missing external facts. 例如 raw secret 永遠不問，只問 env var 名稱；已存在 binary 不問路徑；Redmine 已有 reproduction 不問復現步驟。
 - Subagent is candidate-only. Subagent 可協助摘要、分類、生成候選 testcase/報告/修復方案，但不能直接寫 case、Gitea、Wiki、PR 或跳過 validation。
 - Every module emits a contract. 輸入、輸出、confidence、missing inputs、evidence、next action 都要結構化。
-- No placeholder truth. readiness probe 不能算 testcase；stale evidence 不能算 PASS；Wiki 不能比 latest verified run 更樂觀。
-- Product runtime only. `commands[].run` 必須使用已設定/已推論的產品 binary/API/runner，或使用者確認的 runner；repo-only metadata probe、`python3 -c`、`compileall`、synthetic invalid command、`go test`、`go run` 不能偽裝成 testcase。
+- No placeholder truth. readiness check 不能算 testcase；stale evidence 不能算 PASS；Wiki 不能比 latest verified run 更樂觀。
+- Product runtime only. `commands[].run` 必須使用已設定/已推論的產品 binary/API/runner，或使用者確認的 runner；repo-only metadata check、`python3 -c`、`compileall`、synthetic invalid command、`go test`、`go run` 不能偽裝成 testcase。
 - Close loop state must be replayable. 任一 module 失敗後，下一次可以從 state/handoff/result 繼續，而不是要求使用者重講脈絡。
 
 ## Target Agent Modules
@@ -167,9 +167,9 @@ Purpose: 產生真正可執行、針對問題、可被人類理解的 testcase c
 Already improved:
 - Runtime discovery can infer existing executable such as `cmd/irctool/irctool`.
 - Missing runtime no longer creates placeholder YAML.
-- Repo-only readiness probe is not counted as testcase.
+- Repo-only readiness check is not counted as testcase.
 - Redmine developer commands such as `go test`/`go run` are rejected as QA commands.
-- Gitea issue commands that do not use the configured runtime are recorded as rejected hints and replaced with a product-runtime probe instead of repo-only placeholder commands.
+- Gitea issue commands that do not use the configured runtime are recorded as rejected hints and replaced with a product-runtime command instead of repo-only placeholder commands.
 
 Remaining gaps:
 - Candidate generation is still mostly deterministic, not a multi-agent SWQA reasoning loop.
@@ -197,7 +197,7 @@ Acceptance:
 - No two generated cases may have identical `commands[].run` unless they intentionally share a setup preflight and differ in assertion/oracle.
 - Generated Redmine cases include exact issue objective, not just binary help.
 - If command cannot be made safe, output is `needs_input` with already-analyzed candidates and precise missing fields.
-- Generated YAML contains no placeholder readiness probe, repo-only static check, synthetic invalid command, or developer test command.
+- Generated YAML contains no placeholder readiness check, repo-only static check, synthetic invalid command, or developer test command.
 
 ### A4: Case Run Agent
 
@@ -237,18 +237,22 @@ Acceptance:
 
 Purpose: 將 run/evidence/traceability 整理成人類可讀、可協作、可修復的 report，並在 FAIL/BLOCK 時產生 linked Gitea issue evidence update payload。
 
-Current equivalent:
+Already available:
+- `/quality-pilot issues report`
+- `reports/issues-report.md`
+- `state/issues-report.json`
+- gated `gitea.issue.update` evidence payload for linked FAIL/BLOCK latest results.
 - `report status`
 - `issues status`
 - Wiki status.
 
-Gap:
-- 沒有獨立的 `issues report` command/module，無法針對每個 active issue 生成「問題、測試、結果、下一步」報告。
+Remaining gap:
+- `issues report` still needs a full agent module/session contract, subagent wording candidate persistence, richer problem/repro/fix readiness narrative, and downstream consumption by Wiki/PR flows.
 
 Required changes:
-- Add `/quality-pilot issues report`.
-- Generate `reports/issues-report.md`.
-- Generate `state/issues-report.json`.
+- Harden `/quality-pilot issues report` into a resumable module contract.
+- Extend `reports/issues-report.md`.
+- Extend `state/issues-report.json`.
 - Per issue include:
   - Redmine/Gitea/case mapping
   - latest evidence
@@ -274,6 +278,7 @@ Already available:
 - `submit_fix_pr`
 - human-readable PR body improvements.
 - Issue-driven handoff when a synced issue has no stale case mapping yet.
+- First-pass PR linkage metadata and ledger entries with Gitea issue id, Redmine id when present, case ids, and evidence paths.
 
 Gaps:
 - Fix planning still mostly maps issue to existing case; it is not yet a robust code-understanding agent.
@@ -296,7 +301,7 @@ Required changes:
   - update issues report
   - update wiki
 - PR body must include reproduction command, evidence path, fix summary, verification, residual risk.
-- PR metadata/body must include linked Gitea issue id, Redmine id when present, case id/evidence path when available, or issue-driven acceptance verification.
+- PR metadata/body must include linked Gitea issue id, Redmine id when present, case id/evidence path when available, or issue-driven acceptance verification. First-pass metadata/ledger is implemented; richer PR result reconciliation remains pending.
 
 Acceptance:
 - `issues fix --issue X` may proceed without a linked runnable case only when the synced issue has no stale/non-runnable case mapping; this is marked `issue_driven_development`.
@@ -387,9 +392,31 @@ Subagent config is currently available through `/quality-pilot subagent status/c
 
 ## Phased Implementation Roadmap
 
+Roadmap alignment after the documentation update:
+
+- Testcase generation work is now defined as product-runtime command contract generation, not probe generation.
+- `issues sync` is a two-input module: Redmine and Gitea issues both feed canonical issue mapping.
+- Redmine sync must create or update linked Gitea issues through gated handoff, and later FAIL/BLOCK evidence must update that linked issue.
+- `issues fix --issue <id>` is a valid entry immediately after `issues sync` for feature/direct-fix work; PR creation still waits for acceptance coverage/evidence.
+- Hermes may automate local MCP reads, overlay writes, and verified side-effect-safe case execution after an explicit `/quality-pilot ...` command. Remote writes, Wiki apply, branch push, PR creation, and externally side-effectful tests remain gated.
+- Wiki apply is Wiki-only; issue create/update, evidence writeback, and PR linkage are separate Gitea output handoffs.
+- SWQA readiness is pattern-based: exact repro is required, but PASS also needs sibling-surface scan, boundary/invalid coverage, side-effect control, evidence paths, and an explicit residual risk list.
+- Public docs are part of the product contract: command lists, removed-command replacements, config skeletons, Hermes skill install, and subagent setup must be checked against actual dispatcher behavior.
+
+Implementation progress on 2026-06-26:
+
+- `src/quality_pilot/command_policy.py` now centralizes generated command validation.
+- Issue, scratch, init, growing, and Redmine generation paths enforce the command policy before writing YAML.
+- `audit state` now reports `generated_command_policy_violation` for existing generated cases with repo-only, synthetic, or developer commands.
+- `issues sync`/`issues status` now write `state/traceability-map.json` with canonical runnable case mapping, snapshot case aliases, Redmine references, coverage status, latest evidence, and MCP issue-write result links.
+- MCP issue-write results now update canonical traceability before the next Gitea snapshot refresh, so Redmine-created Gitea issue IDs can be used immediately by report/fix follow-up paths.
+- Direct issue-driven fix after sync and PR blocking until verification are implemented and covered by lifecycle tests.
+- `/quality-pilot issues report` now writes per-issue markdown/JSON and creates gated linked Gitea issue evidence update payloads for FAIL/BLOCK latest results.
+- `src/quality_pilot/gitea_ledger.py` now records Gitea MCP ledger entries for Redmine issue create handoffs, issue evidence update handoffs, PR linkage handoffs, and Wiki update handoffs, including operation id, idempotency key, target type, request/result paths, source module, gate result, observed result status, and remote id/url when result JSON exists.
+
 ### CL0: Stabilize First-Run Truth
 
-Status: partially implemented in current checkout.
+Status: mostly implemented in current checkout; remaining work is to make the product-runtime contract policy uniformly enforced in every generation path.
 
 Tasks:
 - CL0-01 Infer runtime executable from repo before asking user.
@@ -397,10 +424,13 @@ Tasks:
 - CL0-03 Make clarify prompts bullet-listed and analysis-first.
 - CL0-04 Prevent Wiki auto-sync when case generation returns `needs_input`.
 - CL0-05 Add smoke tests for clean repo with executable and clean repo without executable.
+- CL0-06 Enforce product-runtime-only `commands[].run` across init, growing, Redmine, and Gitea issue generation.
+- CL0-07 Record repo-only checks and developer commands as readiness/implementation hints, not testcase commands.
 
 Acceptance:
 - Clean repo with `cmd/tool/tool` generates cases without asking for binary.
 - Clean repo without executable returns `needs_input`, `generated_count: 0`, and writes no case YAML.
+- Generated YAML never contains repo-only checks, `python3 -c`, `compileall`, synthetic invalid commands, `go test`, or `go run` unless the user explicitly configured that command as the product runner.
 
 ### CL1: Module Contracts And Session State
 
@@ -410,9 +440,12 @@ Tasks:
 - CL1-03 Add `close-loop session.json`.
 - CL1-04 Make every module write result path and next module.
 - CL1-05 Add resume command.
+- CL1-06 Add action-safety classification: local read, local write, side-effect-safe run, remote write, branch push, PR create, external-resource run.
+- CL1-07 Encode whether a module can proceed automatically after explicit user command or must stop for gate/confirmation.
 
 Acceptance:
 - A close loop can be stopped after any module and resumed without losing state.
+- Hermes can automate local reads/writes and verified side-effect-safe runs, while remote writes, Wiki apply, branch push, PR creation, and externally side-effectful runs remain gated.
 
 ### CL2: Redmine And Issue Sync Hardening
 
@@ -422,9 +455,13 @@ Tasks:
 - CL2-03 Attachment/journal semantic handoff.
 - CL2-04 Traceability map.
 - CL2-05 Remote write ledger for Gitea issue create/update and evidence writeback.
+- CL2-06 Treat Gitea issues as first-class issue-sync input, not only downstream output.
+- CL2-07 Route Redmine sync through idempotent linked Gitea issue create/update, never duplicate create when mapping exists.
+- CL2-08 Persist canonical rows for Redmine ID, Gitea issue ID, case ID, latest evidence, fix attempt, and PR linkage.
 
 Acceptance:
 - Redmine/Gitea/case mapping is deterministic and duplicate-safe; Redmine sync reuses linked Gitea issues when possible.
+- `issues sync` can be followed by either `cases generate` or `issues fix --issue <id>` from the same canonical mapping.
 
 ### CL3: Case Generation Agent Upgrade
 
@@ -435,9 +472,16 @@ Tasks:
 - CL3-04 Add confidence fields.
 - CL3-05 Add reviewer gate for low-confidence or unsafe candidates.
 - CL3-06 Add command uniqueness/deduplication rule.
+- CL3-07 Generate product-runtime command contracts, not readiness checks.
+- CL3-08 Store rejected developer/repo-only commands as implementation hints with reasons.
+- CL3-09 Emit environment preparation requirements before free-hand execution.
+- CL3-10 Generate bug pattern cards for confirmed issue-linked bugs.
+- CL3-11 Expand CLI/parser bugs through global/local/same-name flag order, positional, inline, short alias, double-dash, and value-shape matrices.
 
 Acceptance:
-- Generated cases are issue-specific, executable, and non-duplicative.
+- Generated cases are issue-specific, executable through the product runtime, and non-duplicative.
+- Unknown runtime or unsafe command context returns `needs_input` with analyzed candidates and writes no fake executable coverage.
+- Bug-linked generation records exact repro plus sibling/boundary/invalid coverage candidates or explicit HOLD reasons.
 
 ### CL4: Execution And Evidence Gate
 
@@ -447,9 +491,15 @@ Tasks:
 - CL4-03 Evidence-contract hash gate.
 - CL4-04 Run isolation metadata.
 - CL4-05 Flaky retry classification.
+- CL4-06 Separate local side-effect-safe execution from external-resource execution that needs gate/confirmation.
+- CL4-07 Persist execution safety class with evidence and report rows.
+- CL4-08 Require evidence for what was tested, what was not tested, and why remaining risk is acceptable before PASS.
 
 Acceptance:
 - PASS means current contract truly passed under recorded runtime profile.
+- BLOCK distinguishes missing env/fixture/target from product failure and tool failure.
+- Hermes can run verified side-effect-safe cases automatically after explicit user command; tests that may touch lab resources, credentials, remote systems, or mutable state must stop at the gate.
+- A single passing command cannot close a bug when sibling surfaces, boundary/invalid values, or side-effect risk remain unclassified.
 
 ### CL5: Issues Report Agent
 
@@ -459,9 +509,12 @@ Tasks:
 - CL5-03 Add human markdown report.
 - CL5-04 Add subagent wording candidate.
 - CL5-05 Add per-issue next action and gated Gitea issue evidence update payload for FAIL/BLOCK.
+- CL5-06 Use canonical mapping as the only source for evidence writeback target selection.
+- CL5-07 Keep issue report facts deterministic; subagent may only rewrite human wording.
 
 Acceptance:
 - Human collaborator can reproduce current state and next step from report alone; FAIL/BLOCK writeback is human-readable and targets the linked Gitea issue.
+- Evidence writeback never creates a duplicate issue when a linked Gitea issue exists.
 
 ### CL6: Fix Agent And Retest Loop
 
@@ -471,6 +524,8 @@ Tasks:
 - CL6-03 Add patch plan state.
 - CL6-04 Add post-fix retest gate.
 - CL6-05 Add PR body truth gate with Gitea issue id, Redmine id when present, case id/evidence path when available, or issue-driven acceptance verification.
+- CL6-06 For direct issue-driven work, require acceptance criteria extraction before patch planning.
+- CL6-07 Before `--push-pr`, require either linked case evidence or explicitly recorded issue-driven acceptance verification.
 
 Acceptance:
 - `issues fix` can start immediately after `issues sync` for new feature/development issues when no stale case mapping exists.
@@ -485,21 +540,55 @@ Tasks:
 - CL7-03 Add Wiki stale-source banner.
 - CL7-04 Add Gitea issue/Wiki apply reconciliation.
 - CL7-05 Add management summary subagent.
+- CL7-06 Keep Wiki apply Wiki-only; issue create/update and evidence writeback use issue/report handoffs.
+- CL7-07 Add ledger target types for `issue_create`, `issue_update`, `issue_evidence_update`, `pr_linkage`, and `wiki_update`.
 
 Acceptance:
 - Wiki cannot overstate readiness or duplicate remote writes; it reflects issue evidence writeback and PR linkage state.
+- Wiki apply cannot create issues, comments, or PRs.
 
 ### CL8: Full Autonomous Close Loop
 
 Tasks:
 - CL8-01 Add `/quality-pilot close-loop run --redmine-issues ...`.
 - CL8-02 Add module stop/go policy.
-- CL8-03 Add minimal human-intervention mode.
+- CL8-03 Add minimal human-intervention mode with explicit local/remote action gates.
 - CL8-04 Add dry-run simulation.
 - CL8-05 Add end-to-end fixture test with fake Redmine/Gitea/MCP.
+- CL8-06 Add one-command flow for Gitea-only issue input as well as Redmine input.
 
 Acceptance:
 - One command can run a Redmine or Gitea issue through sync, canonical mapping, either issue-driven fix handoff or case generation, safe execution, report/evidence, linked Gitea issue writeback, fix/PR readiness, and Wiki publication, stopping only for missing external facts or gated writes.
+
+### CL9: SWQA Pattern And Readiness Gate
+
+Tasks:
+- CL9-01 Add `bug-pattern-card.json` output for confirmed issue-linked bugs.
+- CL9-02 Add PASS/HOLD decision logic based on exact repro, deterministic regression, user-facing smoke, sibling surface, boundary/invalid checks, evidence paths, and residual risk.
+- CL9-03 Add report fields for untested surfaces and HOLD reasons.
+- CL9-04 Add Wiki readiness downgrade when bug-linked issues have shallow evidence only.
+- CL9-05 Add subagent candidate roles for pattern drafting while keeping deterministic PASS/HOLD/FAIL decisions in the engine.
+
+Acceptance:
+- A bug-linked issue can be PASS only when the engine can trace exact repro, pattern expansion, side-effect control, and evidence paths.
+- Missing sibling, boundary, invalid-value, or residual-risk evidence yields HOLD/BLOCK rather than READY.
+- Subagent wording cannot change the deterministic PASS/HOLD/FAIL result.
+
+### CL10: Documentation And Install Contract Conformance
+
+Tasks:
+- CL10-01 Add public command drift tests across dispatcher help, generated Hermes skill, `README.md`, and `docs/COMMANDS.md`.
+- CL10-02 Add removed-command recovery tests for every replacement listed in `docs/COMMANDS.md`.
+- CL10-03 Add setup/doctor config conformance tests for MCP-only tracker fields, runtime profile, simplified Open WebUI subagent config, and SWQA policy fields.
+- CL10-04 Add old-config repair tests proving `doctor --fix` adds missing structure without overwriting user-owned model/API env/runtime fields.
+- CL10-05 Add Hermes install contract tests for `install-skill`, `skill-status`, generated `SKILL.md`, runner command, and direct dispatcher verification.
+- CL10-06 Add snapshot contract fixtures for Gitea issues input, full Redmine manifest input, and rejected legacy/trimmed Redmine snapshots.
+- CL10-07 Add simplified subagent config tests for endpoint query `?model=...`, separate `model`, optional `task_prompts`, and raw secret-like `api_key_env` rejection.
+
+Acceptance:
+- Documentation drift becomes a test failure before it reaches Hermes users.
+- Fresh setup and `doctor --fix` produce the documented safe config skeleton without storing product-specific hosts, tracker tokens, raw secrets, or lab credentials.
+- Hermes install docs remain reproducible from a source checkout and the generated skill exposes only supported `/quality-pilot` commands.
 
 ## Current Environment Readiness Checklist
 
@@ -511,11 +600,16 @@ Acceptance:
 | Runtime can be inferred before asking user | `runtime_profile.py` | Mostly ready |
 | Placeholder cases are blocked | `generate_cases_init/growing` runtime gate | Ready for init/growing |
 | Redmine case generation avoids developer commands | `case_generation.py`, tests | Mostly ready |
+| Product-runtime generated command policy exists | `command_policy.py`, `case_generation.py`, `state_audit.py`, tests | Mostly ready |
+| Canonical traceability map is persisted | `issues.py`, `state/traceability-map.json`, result-to-traceability and PR-linkage lifecycle tests | Partial |
+| Remote write ledger records request/result handoffs | `gitea_ledger.py`, Redmine sync, issues report, issues fix PR linkage, Wiki apply/status, issue status, lifecycle tests | Partial |
 | Subagent can be configured | `subagents.py` | Partial |
 | Subagent task results are persisted | missing task result store | Not ready |
 | Independent agent module state exists | no module result schema/session | Not ready |
-| Issues report agent exists | no `/quality-pilot issues report` | Not ready |
+| Issues report agent exists | `issues report`, `reports/issues-report.md`, `state/issues-report.json`, evidence update lifecycle test | Partial |
 | Full close loop one-command flow exists | `close-loop run-once` is pipeline-like but not flowchart-module aware | Not ready |
+| SWQA bug-pattern PASS gate exists | principles documented in `docs/SWQA_TEST_DESIGN.md`; engine gate pending | Not ready |
+| Docs/install/config conformance is regression-tested | docs are aligned manually; drift tests pending | Not ready |
 
 ## Test Plan
 
@@ -537,19 +631,30 @@ Regression tests to add or keep:
   - developer commands are rejected as implementation hints.
 - Duplicate command prevention:
   - generated cases may not all share identical command unless they are a named shared preflight.
+- Bug pattern expansion:
+  - confirmed bug generates a pattern card with exact repro, sibling surfaces, equivalence classes, boundary values, side-effect control, and residual risk.
+  - CLI/parser bug fixture expands through flag order and value-shape matrix via product runtime.
 - Evidence truth:
   - stale evidence hash mismatch blocks PASS.
+  - shallow single-command evidence without sibling/boundary/invalid/risk coverage yields HOLD/BLOCK.
 - Issues report:
   - active issue with no runnable case is blocker.
   - report includes Redmine/Gitea/case/evidence mapping.
   - FAIL/BLOCK evidence produces a human-readable linked Gitea issue update payload.
 - PR linkage:
   - fix handoff includes Gitea issue id, Redmine id when present, and case/evidence or acceptance verification state.
+  - MCP-backend PR creation remains blocked while preserving a PR linkage request and ledger entry.
   - issue-driven handoff after sync succeeds without a linked case, but `--push-pr` blocks until verification coverage exists.
 - Wiki truth:
   - READY impossible when audit blocked or cases NOT_RUN.
 - End-to-end fake close loop:
   - Redmine fixture -> sync -> Gitea issue create/update -> generate -> run -> report -> linked issue evidence update -> fix/PR handoff -> gated Wiki request.
+- Documentation and install conformance:
+  - dispatcher help, generated Hermes skill, README, and command docs expose the same public commands.
+  - removed commands return documented `command_removed` replacements.
+  - setup/doctor output matches the documented safe config skeleton.
+  - Hermes install commands generate a valid skill and runner path.
+  - simplified Open WebUI endpoint/model/API env behavior matches configuration docs.
 
 ## Definition Of Done
 
@@ -562,4 +667,6 @@ The ideal flowchart is achieved when:
 5. Subagents assist candidate reasoning for summaries, testcase design, report wording, and fix strategy, but all writes pass deterministic validation.
 6. Case generation never creates fake executable coverage.
 7. PASS/Wiki/Gitea state can be traced back to current case contract and evidence.
-8. The complete Redmine-to-Gitea loop can run in dry-run and real gated modes.
+8. PASS for bug-linked work requires exact repro, pattern expansion, side-effect control, and explicit residual risk.
+9. Public docs, generated skill content, dispatcher help, and default config are regression-tested against each other.
+10. The complete Redmine-to-Gitea loop can run in dry-run and real gated modes.

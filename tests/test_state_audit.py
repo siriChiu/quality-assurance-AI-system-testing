@@ -9,7 +9,9 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
+from quality_pilot import config as config_module
 from quality_pilot.cli import main
+from quality_pilot.config import load_yaml
 from quality_pilot.hermes_mcp import MCP_SERVERS_ENV
 
 
@@ -23,6 +25,19 @@ class StateAuditTest(unittest.TestCase):
     def init_project(self, root: Path) -> None:
         code, payload = self.run_cli(["setup", "--root", str(root), "--json"])
         self.assertEqual(code, 0, payload)
+
+    def write_runtime_profile(self, root: Path, *, entrypoint: str = "cmd/democtl/democtl") -> None:
+        config_path = root / ".quality-pilot.yaml"
+        data = load_yaml(config_path)
+        data["runtime"] = {
+            "primary_entrypoint": entrypoint,
+            "binary_env": "QUALITY_PILOT_BINARY",
+            "target_host_env": "QUALITY_PILOT_TARGET_HOST",
+            "fixture_paths": [],
+            "credential_envs": [],
+            "side_effect_boundary": "Read-only local parser/help probes only.",
+        }
+        config_path.write_text(config_module.yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
     def write_audited_irctool_overlay_shape(self, root: Path) -> None:
         self.init_project(root)
@@ -305,6 +320,38 @@ expected: "CLI rejects unknown commands."
             self.assertIn("hermes_mcp_status_missing", payload["state_audit"]["blockers"])
             self.assertIn("redmine_generic_probe_invalid", payload["state_audit"]["blockers"])
             self.assertIn("redmine_developer_command_invalid", payload["state_audit"]["blockers"])
+
+    def test_audit_flags_generated_command_policy_violation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.init_project(root)
+            self.write_runtime_profile(root)
+            cases = root / ".quality-pilot-project" / "cases"
+            cases.mkdir(parents=True, exist_ok=True)
+            (cases / "INIT-DEMO.yaml").write_text(
+                """case_id: INIT-DEMO
+title: "Generated repo-only placeholder"
+source:
+  type: init
+quality_pilot:
+  generation_mode: init
+  executable: true
+commands:
+  - id: repo_probe
+    run: python3 -c 'from pathlib import Path; assert Path("README.md").exists()'
+    expected_exit_code: 0
+expected: "Repo metadata exists."
+""",
+                encoding="utf-8",
+            )
+
+            code, audit = self.run_cli(["audit", "state", "--root", str(root), "--json"])
+
+            self.assertEqual(code, 0)
+            self.assertIn("generated_command_policy_violation", audit["blockers"])
+            finding = next(item for item in audit["findings"] if item["id"] == "generated_command_policy_violation")
+            self.assertEqual(finding["case_id"], "INIT-DEMO")
+            self.assertIn("python_inline_metadata_check", finding["invalid_commands"][0]["policy_reasons"])
 
     def test_wiki_render_does_not_mark_ready_when_latest_run_is_not_reflected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

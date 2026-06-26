@@ -10,10 +10,12 @@ from typing import Any
 from .config import ProjectConfig, json_dumps
 from .contracts import list_contract_paths, load_contract
 from .gitea import GiteaClient, GiteaError, gitea_config_from_project, issue_number
+from .gitea_ledger import reconcile_gitea_mcp_write_results, write_ledger_path
 from .hermes_mcp import hermes_mcp_readiness, mcp_server_is_available
 from .runner import utc_now
 
 ISSUE_SNAPSHOT_NAME = "issues-snapshot.json"
+TRACEABILITY_MAP_NAME = "traceability-map.json"
 MCP_ISSUES_ENV = "QUALITY_PILOT_GITEA_MCP_ISSUES_JSON"
 
 
@@ -75,12 +77,18 @@ def sync_issues(
     snapshot = build_issue_snapshot(config, open_issues)
     snapshot_path = issue_snapshot_path(config)
     if not dry_run:
+        reconcile_gitea_mcp_write_results(config)
+    traceability_map = build_traceability_map(config, snapshot)
+    traceability_path = traceability_map_path(config)
+    if not dry_run:
         snapshot_path.write_text(json_dumps(snapshot) + "\n", encoding="utf-8")
+        traceability_path.write_text(json_dumps(traceability_map) + "\n", encoding="utf-8")
 
     return {
         "status": "dry_run" if dry_run else "ok",
         **source_info,
         "snapshot_path": _relative_or_str(snapshot_path, config.root),
+        "traceability_map_path": _relative_or_str(traceability_path, config.root),
         "issues_dir": _relative_or_str(config.paths.issues, config.root),
         "open_active_issue_ids": [issue.issue_id for issue in open_issues],
         "closed_issue_ids": closed_ids,
@@ -92,21 +100,35 @@ def sync_issues(
     }
 
 
-def issue_status(config: ProjectConfig) -> dict[str, Any]:
+def issue_status(config: ProjectConfig, *, persist_traceability: bool = True) -> dict[str, Any]:
     snapshot = load_issue_snapshot(config)
     mirrors = sorted(path for path in config.paths.issues.glob("*.md")) if config.paths.issues.exists() else []
     readiness = issue_sync_readiness(config)
+    write_ledger = reconcile_gitea_mcp_write_results(config)
+    traceability_map = build_traceability_map(config, snapshot)
+    if persist_traceability:
+        _write_traceability_map(config, traceability_map)
+    traceability = traceability_map["rows"]
     return {
         "status": "ok",
         "snapshot_exists": issue_snapshot_path(config).exists(),
         "snapshot_path": _relative_or_str(issue_snapshot_path(config), config.root),
+        "traceability_map_exists": traceability_map_path(config).exists(),
+        "traceability_map_path": _relative_or_str(traceability_map_path(config), config.root),
+        "write_ledger_exists": write_ledger_path(config).exists(),
+        "write_ledger_path": _relative_or_str(write_ledger_path(config), config.root),
+        "write_ledger": {
+            "entry_count": write_ledger.get("entry_count", 0),
+            "updated_count": write_ledger.get("updated_count", 0),
+            "entries": write_ledger.get("entries", []),
+        },
         "issues_dir": _relative_or_str(config.paths.issues, config.root),
         "open_count": len(snapshot.get("items", [])),
         "mirror_count": len(mirrors),
         "open_active_issue_ids": [item.get("issue_id") for item in snapshot.get("items", [])],
         "synced_at": snapshot.get("synced_at"),
         "issue_sync": readiness,
-        "traceability": build_traceability(config, snapshot),
+        "traceability": traceability,
     }
 
 
@@ -352,6 +374,10 @@ def issue_snapshot_path(config: ProjectConfig) -> Path:
     return config.paths.state / ISSUE_SNAPSHOT_NAME
 
 
+def traceability_map_path(config: ProjectConfig) -> Path:
+    return config.paths.state / TRACEABILITY_MAP_NAME
+
+
 def issue_mirror_path(config: ProjectConfig, issue_id: int) -> Path:
     return config.paths.issues / f"{issue_id}.md"
 
@@ -382,20 +408,38 @@ def archive_closed_issue(config: ProjectConfig, *, issue_id: int, mirror_path: P
 def build_traceability(config: ProjectConfig, snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     contracts = _contracts_by_case(config)
     latest = _latest_results_by_case(config)
+    ledger_links = _issue_links_from_write_ledger(config)
+    pr_links = _pr_links_from_write_ledger(config)
+    ledger_by_gitea: dict[int, list[dict[str, Any]]] = {}
+    for link in ledger_links:
+        ledger_by_gitea.setdefault(int(link["gitea_issue_id"]), []).append(link)
+    pr_by_gitea: dict[int, list[dict[str, Any]]] = {}
+    for link in pr_links:
+        pr_by_gitea.setdefault(int(link["gitea_issue_id"]), []).append(link)
     rows: list[dict[str, Any]] = []
+    seen_gitea_ids: set[int] = set()
     for item in snapshot.get("items", []):
         if not isinstance(item, dict):
             continue
         issue_id = item.get("issue_id")
+        normalized_issue_id = _int_or_none(issue_id)
         case_id = str(item.get("case_id") or "")
         runnable_case_id = case_id if case_id in contracts else _case_for_issue(contracts, issue_id, item)
         contract = contracts.get(runnable_case_id or "")
         coverage = _coverage_for_issue(item, snapshot_case_id=case_id, runnable_case_id=runnable_case_id, contract=contract)
         result = latest.get(runnable_case_id or "")
+        linked_entries = ledger_by_gitea.get(normalized_issue_id or -1, [])
+        linked_pr_entries = pr_by_gitea.get(normalized_issue_id or -1, [])
+        redmine_refs = _merge_redmine_refs(
+            _redmine_refs(item),
+            [entry["redmine_issue_id"] for entry in linked_entries] + [entry.get("redmine_issue_id") for entry in linked_pr_entries],
+        )
+        if normalized_issue_id is not None:
+            seen_gitea_ids.add(normalized_issue_id)
         rows.append(
             {
                 "gitea_issue_id": issue_id,
-                "redmine_issue_ids": _redmine_refs(item),
+                "redmine_issue_ids": redmine_refs,
                 "case_id": runnable_case_id,
                 "snapshot_case_id": case_id or None,
                 "case_runnable": bool(runnable_case_id),
@@ -405,9 +449,67 @@ def build_traceability(config: ProjectConfig, snapshot: dict[str, Any]) -> list[
                 "latest_status": result.get("status") if isinstance(result, dict) else None,
                 "latest_evidence": result.get("evidence", []) if isinstance(result, dict) else [],
                 "title": item.get("title"),
+                "source": "gitea_snapshot",
+                "source_write_ledger_entries": [entry["operation_id"] for entry in linked_entries],
+                "pr_linkage": _pr_linkage_summary(linked_pr_entries),
+                "source_pr_ledger_entries": [entry["operation_id"] for entry in linked_pr_entries],
             }
         )
-    return rows
+    for link in ledger_links:
+        gitea_issue_id = int(link["gitea_issue_id"])
+        if gitea_issue_id in seen_gitea_ids:
+            continue
+        synthetic_issue = {
+            "issue_id": gitea_issue_id,
+            "title": f"Redmine #{link['redmine_issue_id']} linked via Gitea MCP result",
+            "body": f"Linked Redmine #{link['redmine_issue_id']} issue created or updated through gated Gitea MCP result.",
+            "url": link.get("remote_url") or "",
+            "case_id": None,
+        }
+        runnable_case_id = _case_for_redmine(contracts, link["redmine_issue_id"], gitea_issue_id=gitea_issue_id)
+        contract = contracts.get(runnable_case_id or "")
+        coverage = _coverage_for_issue(synthetic_issue, snapshot_case_id="", runnable_case_id=runnable_case_id, contract=contract)
+        result = latest.get(runnable_case_id or "")
+        linked_pr_entries = pr_by_gitea.get(gitea_issue_id, [])
+        rows.append(
+            {
+                "gitea_issue_id": gitea_issue_id,
+                "redmine_issue_ids": [link["redmine_issue_id"]],
+                "case_id": runnable_case_id,
+                "snapshot_case_id": None,
+                "case_runnable": bool(runnable_case_id),
+                "coverage_status": coverage["status"],
+                "coverage_reason": coverage["reason"],
+                "repair_action": coverage["repair_action"],
+                "latest_status": result.get("status") if isinstance(result, dict) else None,
+                "latest_evidence": result.get("evidence", []) if isinstance(result, dict) else [],
+                "title": synthetic_issue["title"],
+                "source": "gitea_mcp_write_ledger",
+                "source_result_status": link.get("result_status"),
+                "source_result_path": link.get("result_path"),
+                "source_write_ledger_entries": [link["operation_id"]],
+                "pr_linkage": _pr_linkage_summary(linked_pr_entries),
+                "source_pr_ledger_entries": [entry["operation_id"] for entry in linked_pr_entries],
+            }
+        )
+    return sorted(rows, key=lambda item: (_int_or_none(item.get("gitea_issue_id")) is None, _int_or_none(item.get("gitea_issue_id")) or 0))
+
+
+def build_traceability_map(config: ProjectConfig, snapshot: dict[str, Any]) -> dict[str, Any]:
+    rows = build_traceability(config, snapshot)
+    return {
+        "schema": "quality-pilot.traceability-map.v1",
+        "generated_at": utc_now(),
+        "snapshot_path": _relative_or_str(issue_snapshot_path(config), config.root),
+        "row_count": len(rows),
+        "rows": rows,
+    }
+
+
+def _write_traceability_map(config: ProjectConfig, traceability_map: dict[str, Any]) -> None:
+    path = traceability_map_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json_dumps(traceability_map) + "\n", encoding="utf-8")
 
 
 def case_id_for_issue(issue: NormalizedIssue | dict[str, Any]) -> str:
@@ -455,6 +557,25 @@ def _case_for_issue(contracts: dict[str, Any], issue_id: Any, issue: dict[str, A
         if _int_or_none(source.get("gitea_issue_id")) == _int_or_none(issue_id):
             return case_id
         if _int_or_none(source.get("redmine_issue_id")) in redmine_refs:
+            return case_id
+    return None
+
+
+def _case_for_redmine(contracts: dict[str, Any], redmine_issue_id: Any, *, gitea_issue_id: Any | None = None) -> str | None:
+    redmine_id = _int_or_none(redmine_issue_id)
+    gitea_id = _int_or_none(gitea_issue_id)
+    if redmine_id is None:
+        return None
+    direct = f"REDMINE-{redmine_id}"
+    if direct in contracts:
+        return direct
+    for case_id, contract in contracts.items():
+        source = contract.raw.get("source") if isinstance(contract.raw.get("source"), dict) else {}
+        if _int_or_none(source.get("redmine_issue_id")) == redmine_id:
+            return case_id
+        if gitea_id is not None and _int_or_none(source.get("gitea_issue_id")) == gitea_id:
+            return case_id
+        if gitea_id is not None and _int_or_none(source.get("issue_id")) == gitea_id:
             return case_id
     return None
 
@@ -526,6 +647,93 @@ def _redmine_from_case_id(case_id: str) -> str:
 def _redmine_refs(issue: dict[str, Any]) -> list[int]:
     text = "\n".join(str(issue.get(key) or "") for key in ("title", "body", "url"))
     return sorted({int(match) for match in re.findall(r"(?i)\bredmine\s*#?\s*(\d+)\b", text)})
+
+
+def _merge_redmine_refs(primary: list[int], secondary: list[Any]) -> list[int]:
+    merged = {_int_or_none(item) for item in [*primary, *secondary]}
+    return sorted(item for item in merged if item is not None)
+
+
+def _issue_links_from_write_ledger(config: ProjectConfig) -> list[dict[str, Any]]:
+    path = write_ledger_path(config)
+    if not path.exists():
+        return []
+    try:
+        ledger = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    links: list[dict[str, Any]] = []
+    for entry in ledger.get("entries", []) if isinstance(ledger, dict) else []:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("target_type") or "") not in {"issue_create", "issue_update", "issue_evidence_update"}:
+            continue
+        redmine_issue_id = _int_or_none(entry.get("redmine_issue_id"))
+        gitea_issue_id = _int_or_none(entry.get("remote_id"))
+        if redmine_issue_id is None or gitea_issue_id is None:
+            continue
+        links.append(
+            {
+                "operation_id": str(entry.get("operation_id") or ""),
+                "target_type": entry.get("target_type"),
+                "redmine_issue_id": redmine_issue_id,
+                "gitea_issue_id": gitea_issue_id,
+                "result_status": entry.get("result_status"),
+                "result_path": entry.get("result_path"),
+                "remote_url": entry.get("remote_url") or entry.get("url"),
+            }
+        )
+    return sorted(links, key=lambda item: (item["gitea_issue_id"], item["redmine_issue_id"], item["operation_id"]))
+
+
+def _pr_links_from_write_ledger(config: ProjectConfig) -> list[dict[str, Any]]:
+    path = write_ledger_path(config)
+    if not path.exists():
+        return []
+    try:
+        ledger = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    links: list[dict[str, Any]] = []
+    for entry in ledger.get("entries", []) if isinstance(ledger, dict) else []:
+        if not isinstance(entry, dict) or str(entry.get("target_type") or "") != "pr_linkage":
+            continue
+        gitea_issue_id = _int_or_none(entry.get("gitea_issue_id"))
+        if gitea_issue_id is None:
+            continue
+        links.append(
+            {
+                "operation_id": str(entry.get("operation_id") or ""),
+                "gitea_issue_id": gitea_issue_id,
+                "redmine_issue_id": _int_or_none(entry.get("redmine_issue_id")),
+                "case_id": entry.get("case_id"),
+                "case_ids": entry.get("case_ids") if isinstance(entry.get("case_ids"), list) else [],
+                "evidence_paths": entry.get("evidence_paths") if isinstance(entry.get("evidence_paths"), list) else [],
+                "result_status": entry.get("result_status"),
+                "result_path": entry.get("result_path"),
+                "pr_number": entry.get("remote_id"),
+                "pr_url": entry.get("remote_url"),
+                "gate_result": entry.get("gate_result"),
+            }
+        )
+    return sorted(links, key=lambda item: (item["gitea_issue_id"], str(item.get("operation_id") or "")))
+
+
+def _pr_linkage_summary(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not entries:
+        return None
+    latest = entries[-1]
+    return {
+        "count": len(entries),
+        "latest_operation_id": latest.get("operation_id"),
+        "latest_result_status": latest.get("result_status"),
+        "latest_result_path": latest.get("result_path"),
+        "pr_number": latest.get("pr_number"),
+        "pr_url": latest.get("pr_url"),
+        "case_ids": latest.get("case_ids", []),
+        "evidence_paths": latest.get("evidence_paths", []),
+        "gate_result": latest.get("gate_result"),
+    }
 
 
 def _int_or_none(value: Any) -> int | None:

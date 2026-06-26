@@ -82,7 +82,7 @@ policy:
 
 Use these fields to prepare automation once:
 
-- `primary_entrypoint`: the user-facing runner, binary, API command, or repo-only health entrypoint.
+- `primary_entrypoint`: the user-facing product runner, binary, or API command.
 - `binary_env`: env var pointing to the built product binary when applicable; default `QUALITY_PILOT_BINARY`.
 - `target_host_env`: env var for a prepared target/lab resource when applicable; default `QUALITY_PILOT_TARGET_HOST`.
 - `fixture_paths`: non-secret fixture/config paths required for tests.
@@ -90,6 +90,8 @@ Use these fields to prepare automation once:
 - `side_effect_boundary`: what the runner may and may not touch during unattended execution.
 
 `doctor` exposes `runtime_profile.repo_analysis` before asking anything. Clarify prompts are bullet-listed and ask only for details the repo analysis could not infer, such as missing runner path, credential env names, target resources, fixture/config paths, or side-effect boundaries for non-parser tests.
+
+Generated testcase commands must use this product entrypoint or a user-confirmed runner. Repo-only metadata checks, static repo checks, `python3 -c`, `compileall`, synthetic invalid commands, `go test`, and `go run` are readiness or implementation hints, not testcase `commands[].run`, unless the user explicitly configured one of them as the product runner.
 
 ## Hermes MCP Readiness
 
@@ -129,7 +131,7 @@ Redmine import has two explicit paths:
 
 1. Hermes live-reads requested Redmine IDs through Redmine MCP.
 2. Hermes writes a verified `quality-pilot.redmine-mcp-issues.v1` manifest to `tracker.mcp.redmine_issues_json`, including `fetched_at`, `requested_issue_ids`, `include: [description, custom_fields, journals, attachments]`, `payload_completeness: full`, and issue entries with full description, `updated_on`, custom fields, journals/comments, and attachments.
-3. AI Quality Pilot runs `/quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]` when those Redmine tickets should be mirrored locally and created as gated Gitea issues through Hermes MCP.
+3. AI Quality Pilot runs `/quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]` when those Redmine tickets should be mirrored locally and created or updated as linked Gitea issues through Hermes MCP.
 4. AI Quality Pilot runs `/quality-pilot cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]` when linked testcase contracts should be generated directly. This command does not create a Gitea sync plan.
 
 Legacy/raw/trimmed Redmine snapshots are rejected for `--redmine-issues`; this prevents stale local snapshot data from masking newer live Redmine descriptions, journals, or attachments.
@@ -152,7 +154,7 @@ Hermes then uses Gitea MCP to update only the requested Wiki page and writes the
 .quality-pilot-project/state/gitea-mcp/wiki-write-result.json
 ```
 
-AI Quality Pilot must not use MCP to create issue comments, create issues, create PRs, or write arbitrary Wiki pages.
+AI Quality Pilot must not use Wiki apply to create issue comments, create issues, create PRs, or write arbitrary Wiki pages. Gitea issue create/update and FAIL/BLOCK evidence writeback are separate issue-sync/report handoffs and must use their own gated request payloads.
 
 ## Subagent Text Generation
 

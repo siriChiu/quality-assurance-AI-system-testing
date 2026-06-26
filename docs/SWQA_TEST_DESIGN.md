@@ -51,9 +51,9 @@ bug_pattern_card:
 
 `/quality-pilot cases generate` requires an explicit mode so users do not confuse first-time test design with incremental growth.
 
-`/quality-pilot cases generate --init` is the first-time full-repo SWQA map. It scans README, code inventory, package metadata, existing runners, existing cases, and project rules, then creates executable safe-probe cases for functional, positive, negative, boundary, side-effect-safe, and stress/timeout-risk coverage.
+`/quality-pilot cases generate --init` is the first-time full-repo SWQA map. It scans README, code inventory, package metadata, existing runners, existing cases, and project rules, then creates executable product-runtime command contracts for functional, positive, negative, boundary, side-effect-safe, and stress/timeout-risk coverage.
 
-`/quality-pilot cases generate --growing` is the follow-up mode. It is not limited to issue-to-case conversion; it observes repo metadata, current issue mirrors, PR references, latest run state, reports, existing cases/runners, and project rules, then creates executable safe-probe cases from fresh signals.
+`/quality-pilot cases generate --growing` is the follow-up mode. It is not limited to issue-to-case conversion; it observes repo metadata, current issue mirrors, PR references, latest run state, reports, existing cases/runners, and project rules, then creates executable product-runtime command contracts from fresh signals.
 
 ```yaml
 growth_generation:
@@ -90,7 +90,7 @@ growth_generation:
     - latest_run
     - reports
   if_lab_command_or_fixture_is_unclear:
-    generated_case: executable_safe_probe
+    generated_case: product_runtime_command_or_needs_input
     review_required_before_run: false
     lab_runner_status: advisory_until_configured
   ask_user_for:
@@ -102,7 +102,7 @@ growth_generation:
     - side_effect_boundary
 ```
 
-Do not invent a destructive or credentialed command when only the testing idea is known. Repo-only metadata checks are readiness probes, not generated testcase contracts. If the runtime profile is missing, generation must stop with `needs_input` and write no placeholder case YAML. After runtime confirmation, AI Quality Pilot may generate runnable side-effect-safe probes only through the configured or inferred product entrypoint, such as CLI help/parser/version, dry-run/no-op, or bounded baseline checks. Synthetic invalid subcommands, static repo probes, `python3 -c` metadata checks, `compileall`, `go test`, and `go run` are not testcase commands unless the user explicitly configured them as the product runner. Lab runners can replace or extend the safe probe after the user provides fixture, credential env names, and side-effect boundaries.
+Do not invent a destructive or credentialed command when only the testing idea is known. Repo-only metadata checks are readiness checks, not generated testcase contracts. If the runtime profile is missing, generation must stop with `needs_input` and write no placeholder case YAML. After runtime confirmation, AI Quality Pilot may generate runnable side-effect-safe commands only through the configured or inferred product entrypoint, such as CLI help/parser/version, dry-run/no-op, or bounded baseline checks. Synthetic invalid subcommands, static repo checks, `python3 -c` metadata checks, `compileall`, `go test`, and `go run` are not testcase commands unless the user explicitly configured them as the product runner. Lab runners can replace or extend the product-runtime command after the user provides fixture, credential env names, and side-effect boundaries.
 
 Hermes may use a separate growth session or agent for broader analysis, but that session may only produce candidate JSON. AI Quality Pilot remains the sole writer of case YAML and must validate schema, dedupe fingerprints, raw-secret leakage, internal prompt leakage, dangerous `.qa` runtime paths, and command fields before writing any contract.
 

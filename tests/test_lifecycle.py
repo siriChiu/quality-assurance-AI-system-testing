@@ -11,7 +11,7 @@ from quality_pilot import hermes
 from quality_pilot import config as config_module
 from quality_pilot.cli import main
 from quality_pilot.config import load_project_config, load_yaml
-from quality_pilot.case_generation import generate_cases_from_issues
+from quality_pilot.case_generation import CaseGenerationError, generate_cases_from_issues, generate_cases_growing
 from quality_pilot.fix_issues import submit_fix_pr
 from quality_pilot.policy_pack import policy_pack
 
@@ -191,6 +191,25 @@ expected: CLI help path remains callable.
             encoding="utf-8",
         )
 
+    def write_redmine_failure_case(self, root: Path, *, gitea_issue_id: int = 501) -> None:
+        case = root / ".quality-pilot-project" / "cases" / "REDMINE-144780.yaml"
+        case.write_text(
+            f"""case_id: REDMINE-144780
+title: Redmine #144780: Sensor list after cold boot
+source:
+  type: redmine
+  provider: redmine_mcp
+  redmine_issue_id: 144780
+  gitea_issue_id: {gitea_issue_id}
+commands:
+  - id: reproduce
+    run: python3 --version
+    expected_exit_code: 99
+expected: Sensor inventory should be populated after cold boot.
+""",
+            encoding="utf-8",
+        )
+
     def test_setup_and_doctor_analyze_repo_before_runtime_questions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -331,6 +350,52 @@ democtl = "demo.cli:main"
             self.assertFalse(stale.exists())
             snapshot = json.loads((root / ".quality-pilot-project" / "state" / "issues-snapshot.json").read_text(encoding="utf-8"))
             self.assertEqual(snapshot["items"][0]["issue_id"], 1)
+            traceability_path = root / payload["traceability_map_path"]
+            self.assertTrue(traceability_path.exists())
+            traceability = json.loads(traceability_path.read_text(encoding="utf-8"))
+            self.assertEqual(traceability["schema"], "quality-pilot.traceability-map.v1")
+            self.assertEqual(traceability["rows"][0]["gitea_issue_id"], 1)
+            self.assertEqual(traceability["rows"][0]["snapshot_case_id"], "ISSUE-1")
+            self.assertIsNone(traceability["rows"][0]["case_id"])
+            self.assertFalse(traceability["rows"][0]["case_runnable"])
+
+    def test_external_candidate_developer_command_is_rejected_before_yaml_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.init_gitea_project(tmp)
+            (root / "cmd" / "democtl").mkdir(parents=True)
+            binary = root / "cmd" / "democtl" / "democtl"
+            binary.write_text("#!/bin/sh\nprintf 'democtl help\\n'\n", encoding="utf-8")
+            binary.chmod(0o755)
+            self.write_runtime_profile(root, entrypoint="cmd/democtl/democtl")
+            candidate_json = root / "candidate.json"
+            candidate_json.write_text(
+                json.dumps(
+                    {
+                        "candidates": [
+                            {
+                                "title": "Developer-only candidate must not become QA coverage",
+                                "feature": "democtl",
+                                "expected": "The user-facing binary behavior is verified.",
+                                "swqa_dimensions": ["exact_reproduction", "side_effect_safe"],
+                                "commands": [
+                                    {
+                                        "id": "unit",
+                                        "run": "go test ./internal/export -run TestCSVExport",
+                                        "expected_exit_code": 0,
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(CaseGenerationError) as ctx:
+                generate_cases_growing(load_project_config(root), candidate_json=candidate_json, count=1)
+
+            self.assertIn("go_test_developer_command", str(ctx.exception))
+            self.assertFalse(any((root / ".quality-pilot-project" / "cases").glob("GROW-*.yaml")))
 
     def test_issues_sync_reads_gitea_mcp_snapshot_without_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -469,6 +534,55 @@ democtl = "demo.cli:main"
             self.assertIn("Full journal note: cold boot reproduces after AC cycle; do not shorten this text.", request["actions"][0]["body"])
             self.assertIn("Steps to reproduce:", request["actions"][0]["body"])
             self.assertNotIn("AI Quality Pilot", request["actions"][0]["body"])
+            ledger_path = root / payload["mcp_write_ledger_path"]
+            self.assertTrue(ledger_path.exists())
+            ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+            self.assertEqual(ledger["schema"], "quality-pilot.gitea-mcp-write-ledger.v1")
+            self.assertEqual(ledger["entry_count"], 2)
+            entry = next(item for item in ledger["entries"] if item["redmine_issue_id"] == 144780)
+            self.assertEqual(entry["target_type"], "issue_create")
+            self.assertEqual(entry["operation"], "gitea.issue.create")
+            self.assertEqual(entry["request_operation"], "gitea.issue.sync_from_redmine")
+            self.assertEqual(entry["source_module"], "redmine_issue_sync")
+            self.assertEqual(entry["request_schema"], "quality-pilot.gitea-mcp-issue-write-request.v1")
+            self.assertEqual(entry["request_status"], "needs_mcp_apply")
+            self.assertEqual(entry["request_path"], payload["mcp_issue_write_request_path"])
+            self.assertEqual(entry["result_path"], payload["mcp_issue_write_result_path"])
+            self.assertEqual(entry["idempotency_key"], request["actions"][0]["idempotency_key"])
+            self.assertFalse(entry["result_exists"])
+            result_path = root / payload["mcp_issue_write_result_path"]
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "schema": "quality-pilot.gitea-mcp-issue-write-result.v1",
+                        "status": "applied",
+                        "created": [
+                            {"redmine_issue_id": 144780, "issue_id": 501, "url": "https://git.example.test/issues/501"},
+                            {"redmine_issue_id": 144693, "issue_id": 502, "url": "https://git.example.test/issues/502"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            code, status_payload = self.run_cli(["issues", "status", "--root", tmp, "--json"])
+            self.assertEqual(code, 0)
+            reconciled = next(item for item in status_payload["write_ledger"]["entries"] if item["redmine_issue_id"] == 144780)
+            self.assertTrue(reconciled["result_exists"])
+            self.assertEqual(reconciled["result_status"], "applied")
+            self.assertEqual(reconciled["remote_id"], 501)
+            trace_row = next(item for item in status_payload["traceability"] if item["gitea_issue_id"] == 501)
+            self.assertEqual(trace_row["redmine_issue_ids"], [144780])
+            self.assertEqual(trace_row["source"], "gitea_mcp_write_ledger")
+            self.assertEqual(trace_row["source_result_status"], "applied")
+            self.assertEqual(trace_row["source_result_path"], payload["mcp_issue_write_result_path"])
+            self.assertEqual(trace_row["coverage_status"], "no_case")
+            self.assertEqual(trace_row["repair_action"], "/quality-pilot cases generate --redmine-issues 144780")
+            traceability_path = root / status_payload["traceability_map_path"]
+            traceability = json.loads(traceability_path.read_text(encoding="utf-8"))
+            persisted_row = next(item for item in traceability["rows"] if item["gitea_issue_id"] == 501)
+            self.assertEqual(persisted_row["redmine_issue_ids"], [144780])
+            self.assertEqual(persisted_row["source"], "gitea_mcp_write_ledger")
             self.assertFalse((root / ".quality-pilot-project" / "cases" / "REDMINE-144780.yaml").exists())
 
     def test_cases_generate_redmine_issues_derives_safe_probes_without_user_input(self) -> None:
@@ -528,6 +642,72 @@ democtl = "demo.cli:main"
             self.assertEqual(chat["payload"]["status"], "ok")
             self.assertNotIn("hermes_needs_input", chat["payload"])
             self.assertNotIn("需要補充資訊", chat["chat_response"])
+
+    def test_issues_report_writes_gated_evidence_update_for_linked_failed_case(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.init_gitea_project(tmp)
+            self.write_redmine_issues(root)
+
+            code, sync_payload = self.run_cli([
+                "issues",
+                "sync",
+                "--root",
+                tmp,
+                "--redmine-issues",
+                "144780",
+                "--json",
+            ])
+            self.assertEqual(code, 0)
+            result_path = root / sync_payload["mcp_issue_write_result_path"]
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "schema": "quality-pilot.gitea-mcp-issue-write-result.v1",
+                        "status": "applied",
+                        "created": [{"redmine_issue_id": 144780, "issue_id": 501, "url": "https://git.example.test/issues/501"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.write_redmine_failure_case(root, gitea_issue_id=501)
+
+            code, run_payload = self.run_cli(["cases", "run", "--root", tmp, "--json", "REDMINE-144780"])
+            self.assertEqual(code, 1)
+            self.assertEqual(run_payload["status"], "FAIL")
+
+            code, report_payload = self.run_cli(["issues", "report", "--root", tmp, "--json"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(report_payload["status"], "needs_mcp_apply")
+            self.assertEqual(report_payload["evidence_update_count"], 1)
+            self.assertEqual(report_payload["blocked_by_gate"], 0)
+            request_path = root / report_payload["mcp_issue_evidence_write_request_path"]
+            self.assertTrue(request_path.exists())
+            request = json.loads(request_path.read_text(encoding="utf-8"))
+            self.assertEqual(request["operation"], "gitea.issue.evidence_update")
+            self.assertEqual(request["safety"]["allowed_operations"], ["gitea.issue.update"])
+            action = request["actions"][0]
+            self.assertEqual(action["operation"], "gitea.issue.update")
+            self.assertEqual(action["update_kind"], "evidence")
+            self.assertEqual(action["gitea_issue_id"], 501)
+            self.assertEqual(action["redmine_issue_id"], 144780)
+            self.assertEqual(action["redmine_issue_ids"], [144780])
+            self.assertEqual(action["case_id"], "REDMINE-144780")
+            self.assertEqual(action["status"], "FAIL")
+            self.assertTrue(action["write_gate_result"]["allowed"])
+            self.assertIn("## QA Evidence Update", action["body"])
+            self.assertIn("## Reproduction Command", action["body"])
+            self.assertIn("REDMINE-144780", action["body"])
+            self.assertIn(run_payload["results"][0]["result_path"], action["body"])
+            self.assertNotIn("### Raw", action["body"])
+            report_json = json.loads((root / report_payload["report_json_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(report_json["issues"][0]["gitea_issue_id"], 501)
+            ledger = json.loads((root / report_payload["mcp_write_ledger_path"]).read_text(encoding="utf-8"))
+            entry = next(item for item in ledger["entries"] if item["request_path"] == report_payload["mcp_issue_evidence_write_request_path"])
+            self.assertEqual(entry["target_type"], "issue_evidence_update")
+            self.assertEqual(entry["operation"], "gitea.issue.update")
+            self.assertEqual(entry["source_module"], "issues_report")
+            self.assertEqual(entry["redmine_issue_id"], 144780)
 
     def test_cases_generate_redmine_issues_uses_user_confirmed_safe_probe_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -710,10 +890,17 @@ commands:
             issues_json = self.write_issues(root)
             self.run_cli(["issues", "sync", "--root", tmp, "--issues-json", str(issues_json)])
             self.write_issue_case(root)
+            run_code, run_payload = self.run_cli(["cases", "run", "--root", tmp, "ISSUE-1", "--json"])
+            self.assertEqual(run_code, 0)
+            self.assertEqual(run_payload["status"], "PASS")
 
             payload = submit_fix_pr(load_project_config(root), issue_id=1, dry_run=True)
 
             self.assertEqual(payload["status"], "dry_run")
+            self.assertEqual(payload["push_pr_blockers"], [])
+            self.assertEqual(payload["pr_linkage"]["gitea_issue_id"], 1)
+            self.assertEqual(payload["pr_linkage"]["case_ids"], ["ISSUE-1"])
+            self.assertTrue(payload["pr_linkage"]["evidence_paths"])
             self.assertEqual(payload["pr_payload"]["title"], "Fix Gitea #1: CLI help command fails")
             body = payload["pr_payload"]["body"]
             self.assertIn("## Problem", body)
@@ -722,10 +909,56 @@ commands:
             self.assertIn("## How to Reproduce", body)
             self.assertIn("## Linked Tickets", body)
             self.assertIn("- Gitea #1", body)
+            self.assertIn("## Traceability", body)
+            self.assertIn("- Gitea issue: #1", body)
+            self.assertIn("- Case IDs: ISSUE-1", body)
+            self.assertIn("## Evidence", body)
+            self.assertIn(".quality-pilot-project/evidence/", body)
             self.assertIn("## Verification", body)
             self.assertIn("- ISSUE-1", body)
             self.assertNotIn("AI Quality Pilot", body)
             self.assertNotIn("/quality-pilot", body)
+
+    def test_push_pr_mcp_blocked_records_pr_linkage_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.init_gitea_project(tmp)
+            issues_json = self.write_issues(root)
+            self.run_cli(["issues", "sync", "--root", tmp, "--issues-json", str(issues_json)])
+            self.write_issue_case(root)
+            run_code, run_payload = self.run_cli(["cases", "run", "--root", tmp, "ISSUE-1", "--json"])
+            self.assertEqual(run_code, 0)
+            self.assertEqual(run_payload["status"], "PASS")
+
+            code, payload = self.run_cli(["issues", "fix", "--root", tmp, "--issue", "1", "--push-pr", "--json"])
+
+            self.assertEqual(code, 4)
+            self.assertEqual(payload["status"], "blocked")
+            self.assertEqual(payload["error"], "gitea_mcp_write_not_supported")
+            self.assertEqual(payload["pr_linkage"]["gitea_issue_id"], 1)
+            self.assertEqual(payload["pr_linkage"]["case_ids"], ["ISSUE-1"])
+            self.assertTrue(payload["pr_linkage"]["evidence_paths"])
+            request = json.loads((root / payload["pr_linkage_request_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(request["schema"], "quality-pilot.gitea-pr-linkage-request.v1")
+            self.assertEqual(request["status"], "blocked")
+            self.assertEqual(request["actions"][0]["operation"], "gitea.pull_request.create")
+            self.assertEqual(request["actions"][0]["gitea_issue_id"], 1)
+            self.assertEqual(request["actions"][0]["case_ids"], ["ISSUE-1"])
+            self.assertTrue(request["actions"][0]["evidence_paths"])
+
+            ledger = json.loads((root / payload["mcp_write_ledger_path"]).read_text(encoding="utf-8"))
+            pr_entry = next(item for item in ledger["entries"] if item["target_type"] == "pr_linkage")
+            self.assertEqual(pr_entry["source_module"], "issues_fix")
+            self.assertEqual(pr_entry["operation"], "gitea.pull_request.create")
+            self.assertEqual(pr_entry["gitea_issue_id"], 1)
+            self.assertEqual(pr_entry["case_ids"], ["ISSUE-1"])
+            self.assertTrue(pr_entry["evidence_paths"])
+            self.assertFalse(pr_entry["gate_result"]["allowed"])
+
+            status_code, status_payload = self.run_cli(["issues", "status", "--root", tmp, "--json"])
+            self.assertEqual(status_code, 0)
+            trace_row = next(item for item in status_payload["traceability"] if item["gitea_issue_id"] == 1)
+            self.assertEqual(trace_row["pr_linkage"]["case_ids"], ["ISSUE-1"])
+            self.assertTrue(trace_row["pr_linkage"]["evidence_paths"])
 
     def test_issues_fix_supports_issue_driven_handoff_after_sync_without_case(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1223,10 +1456,34 @@ commands:
             self.assertEqual(request["page"], "Quality Pilot Test Status")
             self.assertIn("## 總覽", request["body"])
             self.assertEqual(request["safety"]["allowed_targets"], ["wiki"])
+            ledger_path = root / apply_result["mcp_write_ledger_path"]
+            self.assertTrue(ledger_path.exists())
+            ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+            self.assertEqual(ledger["schema"], "quality-pilot.gitea-mcp-write-ledger.v1")
+            self.assertGreaterEqual(ledger["entry_count"], 1)
+            entry = next(item for item in ledger["entries"] if item["request_path"] == apply_result["mcp_write_request_path"])
+            self.assertEqual(entry["target_type"], "wiki_update")
+            self.assertEqual(entry["operation"], "gitea.wiki.update_page")
+            self.assertEqual(entry["source_module"], "publish_wiki_apply")
+            self.assertEqual(entry["request_schema"], "quality-pilot.gitea-mcp-wiki-write-request.v1")
+            self.assertEqual(entry["request_path"], apply_result["mcp_write_request_path"])
+            self.assertEqual(entry["result_path"], apply_result["mcp_write_result_path"])
+            self.assertFalse(entry["result_exists"])
 
             result_path = root / apply_result["mcp_write_result_path"]
             result_path.parent.mkdir(parents=True, exist_ok=True)
             result_path.write_text(json.dumps({"status": "ok", "url": "https://git.example.test/wiki/Test-status"}), encoding="utf-8")
+
+            code, status_payload = self.run_cli(["publish", "wiki", "status", "--root", tmp, "--json"])
+            self.assertEqual(code, 0)
+            reconciled = next(
+                item
+                for item in status_payload["write_ledger"]["entries"]
+                if item["request_path"] == apply_result["mcp_write_request_path"]
+            )
+            self.assertTrue(reconciled["result_exists"])
+            self.assertEqual(reconciled["result_status"], "ok")
+            self.assertEqual(reconciled["remote_id"], "https://git.example.test/wiki/Test-status")
 
             code, completed = self.run_cli([
                 "publish",

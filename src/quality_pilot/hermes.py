@@ -639,7 +639,8 @@ def _suggest_next_actions_without_recovery(payload: dict[str, Any], engine_argv:
     if current == "cases run":
         return [
             _next("查看 Wiki 自動同步狀態", "/quality-pilot publish wiki status"),
-            _next("產生報告", "/quality-pilot report status"),
+            _next("產生 issue QA report/evidence handoff", "/quality-pilot issues report"),
+            _next("產生整體 case 報告", "/quality-pilot report status"),
             _next("手動重建 Wiki plan", "/quality-pilot publish wiki plan", confirm=True),
             _next("推產品修復 PR", "/quality-pilot cases push-pr <case_id>", confirm=True, destructive=True),
         ]
@@ -648,7 +649,8 @@ def _suggest_next_actions_without_recovery(payload: dict[str, Any], engine_argv:
     if current == "close-loop run-once":
         return [
             _next("查看 Wiki 自動同步狀態", "/quality-pilot publish wiki status"),
-            _next("產生報告", "/quality-pilot report status"),
+            _next("產生 issue QA report/evidence handoff", "/quality-pilot issues report"),
+            _next("產生整體 case 報告", "/quality-pilot report status"),
             _next("手動重建 Wiki plan", "/quality-pilot publish wiki plan", confirm=True),
         ]
     if current == "report status":
@@ -915,6 +917,7 @@ def build_agent_manifest(*, wrapper_path: str | None = None, runner_command: str
             f"{PRIMARY_PREFIX} issues sync",
             f"{PRIMARY_PREFIX} issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]",
             f"{PRIMARY_PREFIX} issues status",
+            f"{PRIMARY_PREFIX} issues report",
             f"{PRIMARY_PREFIX} issues show <issue_id>",
             f"{PRIMARY_PREFIX} issues fix --all",
             f"{PRIMARY_PREFIX} issues fix --issue <id>",
@@ -1062,6 +1065,7 @@ Only these `/quality-pilot` commands are public:
 - `/quality-pilot issues sync`
 - `/quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]`
 - `/quality-pilot issues status`
+- `/quality-pilot issues report`
 - `/quality-pilot issues show <issue_id>`
 - `/quality-pilot issues fix --all`
 - `/quality-pilot issues fix --issue <id>`
@@ -1218,10 +1222,11 @@ Recommended interaction by situation:
 - After `cases generate --init` or `cases generate --growing`, assume the generated cases are runnable safe probes unless AI Quality Pilot explicitly returns `payload.hermes_needs_input`. If needs-input exists, call `clarify` only for category-level blockers. Do not discuss each generated case one by one unless the user explicitly asks.
 - After `/quality-pilot cases list`: suggest running one selected case first, then all cases.
 - After `cases generate --init` or `cases generate --growing`: AI Quality Pilot auto-plans the Wiki draft/missing-input status. Suggest `/quality-pilot publish wiki status`.
-- After a test run: AI Quality Pilot auto-plans or applies the Wiki test-result status. Suggest `/quality-pilot publish wiki status` and `/quality-pilot report status`.
+- After a test run: AI Quality Pilot auto-plans or applies the Wiki test-result status. Suggest `/quality-pilot issues report` for per-issue QA/evidence handoff, `/quality-pilot publish wiki status`, and `/quality-pilot report status`.
 - If the user explicitly wants to update only the Wiki, use `/quality-pilot publish wiki plan`, then `/quality-pilot publish wiki apply` after confirmation. AI Quality Pilot returns a gated `mcp_write_request`; Hermes Gitea MCP performs the Wiki update in the same user flow. This path must never create issue comments, new issues, or PRs.
 - If `/quality-pilot publish wiki apply` returns `status: needs_mcp_apply`, read `payload.mcp_write_request`. Call the configured Hermes Gitea MCP wiki update/write-page tool for the request's `page`, `body`, and `message` in the current product repo context; if `repo` is present, enforce it exactly. Write the MCP tool result JSON to `payload.mcp_write_result_path`, then summarize the result and suggest `/quality-pilot publish wiki status`.
 - If `/quality-pilot issues sync --redmine-issues ...` returns `status: needs_mcp_apply`, read `payload.mcp_issue_write_request`. Call the configured Hermes Gitea MCP issue-create tool for each gated action, write the result JSON to `payload.mcp_issue_write_result_path`, then summarize created issue IDs/URLs and suggest `/quality-pilot cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]`.
+- If `/quality-pilot issues report` returns `status: needs_mcp_apply`, read `payload.mcp_issue_evidence_write_request`. Call the configured Hermes Gitea MCP issue-update tool for each gated FAIL/BLOCK evidence action, write the result JSON to `payload.mcp_issue_evidence_write_result_path`, then summarize updated linked Gitea issue IDs and suggest `/quality-pilot issues fix --issue <id>`.
 - Before `/quality-pilot issues fix --issue <id> --push-pr` or `/quality-pilot cases push-pr <case_id>`: ask for explicit confirmation and summarize what will be written remotely.
 
 Use this command shape:
@@ -1446,6 +1451,7 @@ def _overview_help_payload() -> dict[str, Any]:
         {"command": "/quality-pilot issues sync", "purpose": "同步 Gitea issues，內建 dedupe、prune 與遠端 duplicate gated action plan"},
         {"command": "/quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]", "purpose": "透過 Hermes Redmine MCP snapshot 同步 Redmine mirror，並經 gate 用 Gitea MCP 建立 issues"},
         {"command": "/quality-pilot issues status", "purpose": "查看 issue sync、duplicates、fix queue、PR/handoff 狀態"},
+        {"command": "/quality-pilot issues report", "purpose": "產生 per-issue QA report；FAIL/BLOCK 會建立 gated linked Gitea evidence update handoff"},
         {"command": "/quality-pilot issues show <issue_id>", "purpose": "查看單一 issue mirror"},
         {"command": "/quality-pilot issues fix --all", "purpose": "依 open issue queue 逐一修復/開發，遇到 gate/block 停下"},
         {"command": "/quality-pilot issues fix --issue <id>", "purpose": "對指定 synced issue 做 preflight；可在沒有 stale case mapping 時直接進 issue-driven development handoff"},

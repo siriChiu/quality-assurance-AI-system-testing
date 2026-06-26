@@ -41,7 +41,7 @@ from .issues import IssueSyncError, dedupe_issues, issue_status, issue_sync_read
 from .pipeline import PIPELINE_ORDER, run_close_loop
 from .publishing import PublishError, apply_publish_plan, plan_publish, publish_status
 from .redmine import RedmineError, redmine_readiness, sync_redmine_issues
-from .reports import load_latest_payload, load_latest_results, render_status_report
+from .reports import load_latest_payload, load_latest_results, render_issues_report, render_status_report
 from .runner import RunContext, run_case, utc_now
 from .runtime_profile import runtime_profile_status
 from .state_audit import audit_project_state, audit_summary
@@ -693,6 +693,15 @@ def cmd_audit_state(args: argparse.Namespace) -> int:
     return print_json(payload)
 
 
+def cmd_issues_report(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        payload = render_issues_report(config)
+    except (QAConfigError, IssueSyncError) as exc:
+        return _error_payload(exc)
+    return print_json(payload, exit_code=0 if payload.get("status") != "blocked" else 4)
+
+
 def cmd_issues_show(args: argparse.Namespace) -> int:
     try:
         config = load_project_config(Path(args.root), args.config)
@@ -1222,6 +1231,7 @@ PUBLIC_COMMANDS = [
     "/quality-pilot issues sync",
     "/quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]",
     "/quality-pilot issues status",
+    "/quality-pilot issues report",
     "/quality-pilot issues show <issue_id>",
     "/quality-pilot issues fix --all",
     "/quality-pilot issues fix --issue <id>",
@@ -1315,6 +1325,9 @@ def build_parser() -> argparse.ArgumentParser:
     issues_status = issues_sub.add_parser("status", help="Show local issue sync state")
     _add_root_config(issues_status)
     issues_status.set_defaults(func=cmd_issues_status)
+    issues_report = issues_sub.add_parser("report", help="Render per-issue QA report and gated Gitea evidence update request")
+    _add_root_config(issues_report)
+    issues_report.set_defaults(func=cmd_issues_report)
     issues_show = issues_sub.add_parser("show", help="Show one local issue mirror")
     _add_root_config(issues_show)
     issues_show.add_argument("issue_id", type=int)

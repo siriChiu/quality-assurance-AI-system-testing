@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import ProjectConfig, json_dumps
+from .gitea_ledger import record_gitea_mcp_write_request, write_ledger_path
 from .hermes_mcp import hermes_mcp_readiness, mcp_server_is_available
 from .issues import issue_fingerprint, load_issue_snapshot
 from .runner import utc_now
@@ -250,6 +251,13 @@ def sync_redmine_issues(
         if create_gitea_issues and write_request["actions"]:
             request_path.parent.mkdir(parents=True, exist_ok=True)
             request_path.write_text(json_dumps(write_request) + "\n", encoding="utf-8")
+            record_gitea_mcp_write_request(
+                config,
+                write_request,
+                request_path,
+                source_module="redmine_issue_sync",
+                target_type="issue_create",
+            )
     return {
         **payload,
         "import_path": _relative_or_str(import_path, config.root),
@@ -262,6 +270,7 @@ def sync_redmine_issues(
         "mcp_issue_write_request": write_request if write_request["actions"] else None,
         "mcp_issue_write_request_path": _relative_or_str(request_path, config.root),
         "mcp_issue_write_result_path": _relative_or_str(result_path, config.root),
+        "mcp_write_ledger_path": _relative_or_str(write_ledger_path(config), config.root),
         "message": _redmine_sync_message(write_request, dry_run=dry_run),
     }
 

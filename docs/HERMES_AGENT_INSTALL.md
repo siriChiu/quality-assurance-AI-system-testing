@@ -88,6 +88,7 @@ PYTHONPATH="/root/repo/AI Quality Pilot/src" python3 -m quality_pilot.hermes ski
 /quality-pilot issues sync
 /quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]
 /quality-pilot issues status
+/quality-pilot issues report
 /quality-pilot issues show <issue_id>
 /quality-pilot issues fix --all
 /quality-pilot issues fix --issue <id>
@@ -173,7 +174,7 @@ QUALITY_PILOT_HERMES_MCP_SERVERS=gitea,redmine
 MCP backend 在 V1 只允許三件事：
 
 1. 讀 Gitea issues snapshot，供 `/quality-pilot issues sync` 使用。
-2. 在 `/quality-pilot issues sync --redmine-issues ...` gate 通過後，依 gated `mcp_issue_write_request` 建立新 Gitea issues。
+2. 在 `/quality-pilot issues sync --redmine-issues ...` gate 通過後，依 gated `mcp_issue_write_request` 建立或更新 linked Gitea issues。
 3. 在 `/quality-pilot publish wiki apply` gate 通過後，只更新設定中的 Wiki page。
 
 ### Issue Sync
@@ -217,7 +218,7 @@ Hermes 接著在同一個 `/quality-pilot publish wiki apply` 使用者流程裡
 3. 將 MCP 結果 JSON 寫入 `mcp_write_result_path`。
 4. 回覆使用者結果，建議 `/quality-pilot publish wiki status`。
 
-不要暴露第二個 completion 指令。Wiki apply 不可以建立 issue comment、建立 issue、建立 PR 或修改任意 Wiki page。唯一例外是 `/quality-pilot issues sync --redmine-issues ...` 回傳 gated `mcp_issue_write_request` 時，Hermes 可以在同一流程用 Gitea MCP 建立新 issue；仍禁止 comment、edit、close/reopen issue 或建立 PR。
+不要暴露第二個 completion 指令。Wiki apply 不可以建立 issue comment、建立 issue、建立 PR 或修改任意 Wiki page。唯一例外是 `/quality-pilot issues sync --redmine-issues ...` 回傳 gated `mcp_issue_write_request` 時，Hermes 可以在同一流程用 Gitea MCP 建立或更新 linked issue；仍禁止任意 comment、edit、close/reopen issue 或建立 PR。
 
 ## Redmine MCP Workflow
 
@@ -248,7 +249,7 @@ Hermes 必須先用 Redmine MCP **live read** 這些 ID，不能只因為本地 
 
 `issues[]` 必須保留 live Redmine detail payload：完整 description、`updated_on`、`custom_fields`、`journals` 或 `comments`、`attachments`。若 MCP list 結果只有摘要，Hermes 要再對每個 requested ID 呼叫 detail/read issue，補齊後才寫 snapshot。AI Quality Pilot 會拒絕 legacy/raw/精簡 snapshot，避免舊資料覆蓋較新的 Redmine issue。
 
-- `/quality-pilot issues sync --redmine-issues ...` 會驗證 snapshot、同步 local Redmine mirrors、建立 gated `mcp_issue_write_request`，Hermes 在同一流程用 Gitea MCP 建立 Gitea issues。
+- `/quality-pilot issues sync --redmine-issues ...` 會驗證 snapshot、同步 local Redmine mirrors、建立 gated `mcp_issue_write_request`，Hermes 在同一流程用 Gitea MCP 建立或更新 linked Gitea issues。
 - `/quality-pilot cases generate --redmine-issues ...` 會直接用這些 Redmine IDs 產生 linked testcase contracts，不產生 Gitea plan。
 
 `/quality-pilot doctor` 會檢查 Redmine MCP snapshot path、最近讀取狀態與 issue id coverage。
@@ -262,7 +263,7 @@ Hermes agent 收到 `/quality-pilot ...` 時必須：
 3. 優先回覆 `chat_response`。
 4. 把 `payload.next_actions` 呈現成繁中選單。
 5. 若 `payload.hermes_needs_input.status == "required"`，呼叫 `clarify`，只問大分類阻擋問題，不逐一審每個 testcase。
-6. 寫檔、跑測試、讀 MCP、寫 Wiki、push branch、建立 PR 前先取得使用者確認。
+6. 使用者明確輸入 `/quality-pilot ...` 後，可自動讀 MCP、寫本地 overlay state、執行已驗證 side-effect-safe 的 case；遠端寫入、Wiki apply、push branch、建立 PR、或可能碰觸外部資源的測試仍必須經 AI Quality Pilot gate 與必要確認。
 7. 長文字候選稿可透過 `/quality-pilot subagent status` 所設定的 subagent 產生；預設 Open WebUI endpoint 是 `https://172.17.20.220/`，使用者只需提供 model，例如 `https://172.17.20.220/?model=qwen3.6-chat-direct` 或分開填 `model`。API key 僅能以 `api_key_env` 指向環境變數。Subagent 只能回 candidate text/JSON，不可直接寫檔、建立 issue、更新 Wiki 或開 PR。
 
 Dispatcher command shape:
@@ -288,6 +289,6 @@ Dispatcher command shape:
 | `/quality-pilot` 不出現在 Hermes | Hermes 沒掃到 skill | 檢查 `~/.hermes/skills/quality-pilot/SKILL.md` 並執行 `/reload-skills`。 |
 | `config_not_found` | root 指到錯 repo 或尚未 setup | 回產品 repo root 執行 `/quality-pilot setup`。 |
 | `gitea_mcp_snapshot_missing` | MCP backend 尚未寫 issue snapshot | 用 Gitea MCP 讀 issues，寫入設定的 snapshot path，再跑 `/quality-pilot issues sync`。 |
-| `redmine_mcp_snapshot_missing` / `redmine_mcp_snapshot_unverified` / `redmine_mcp_snapshot_incomplete_payload` | Redmine MCP snapshot 缺失、舊格式、或不是 full live-read payload | 用 Redmine MCP live read 指定 IDs，寫入 `quality-pilot.redmine-mcp-issues.v1` manifest；要建立 Gitea issues 跑 `issues sync --redmine-issues`，要產 testcases 跑 `cases generate --redmine-issues`。 |
+| `redmine_mcp_snapshot_missing` / `redmine_mcp_snapshot_unverified` / `redmine_mcp_snapshot_incomplete_payload` | Redmine MCP snapshot 缺失、舊格式、或不是 full live-read payload | 用 Redmine MCP live read 指定 IDs，寫入 `quality-pilot.redmine-mcp-issues.v1` manifest；要建立或更新 linked Gitea issues 跑 `issues sync --redmine-issues`，要產 testcases 跑 `cases generate --redmine-issues`。 |
 | `needs_mcp_apply` | Wiki gate 通過，等待 Hermes 用 Gitea MCP 寫 Wiki | 在同一個 apply 流程中更新指定 Wiki page，寫 result JSON，回報狀態。 |
 | `command_removed` | 使用者輸入舊命令 | 顯示 replacement，不要偷偷轉址執行。 |

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import json
+import hashlib
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -8,12 +10,15 @@ from typing import Any
 from .config import ProjectConfig, json_dumps
 from .contracts import load_contracts
 from .gitea import GiteaClient, gitea_config_from_project
+from .gitea_ledger import reconcile_gitea_mcp_write_results, record_gitea_mcp_write_request, write_ledger_path
 from .issues import dedupe_issues, load_issue_snapshot
+from .runner import utc_now
 from .subagents import text_generation_handoff
 
 FIX_PLAN_NAME = "fix-plan.json"
 FIX_RUN_NAME = "fix-run-handoff.json"
 FIX_PR_NAME = "fix-pr-result.json"
+FIX_PR_LINKAGE_REQUEST_NAME = "fix-pr-linkage-request.json"
 MAX_PR_TITLE_LEN = 120
 REDMINE_REF_RE = re.compile(r"\bRedmine\s*#\s*(\d+)\b", re.IGNORECASE)
 
@@ -33,6 +38,7 @@ def plan_fix_issue(config: ProjectConfig, *, issue_id: int) -> dict[str, Any]:
     recovered_case_ids = _recoverable_case_ids(config, issue_id, issue)
     declared_case_id = str(issue.get("case_id") or "").strip() if isinstance(issue, dict) else ""
     workflow_mode = "case_driven_fix" if case_ids else "issue_driven_development"
+    latest_results = _latest_results_for_cases(config, case_ids)
     blockers: list[str] = []
     if not snapshot.get("synced_at"):
         blockers.append("issue_sync_required")
@@ -42,7 +48,11 @@ def plan_fix_issue(config: ProjectConfig, *, issue_id: int) -> dict[str, Any]:
         blockers.append("duplicate_issue_candidates")
     if issue is not None and declared_case_id and not case_ids and not _can_start_issue_driven_without_case(issue, issue_id):
         blockers.append("handoff_case_id_not_runnable")
-    push_pr_blockers = [] if case_ids else ["verification_case_required_before_pr"]
+    push_pr_blockers: list[str] = []
+    if not case_ids:
+        push_pr_blockers.append("verification_case_required_before_pr")
+    elif not latest_results:
+        push_pr_blockers.append("verification_evidence_required_before_pr")
 
     plan = {
         "schema": "quality-pilot.fix-plan.v1",
@@ -52,6 +62,7 @@ def plan_fix_issue(config: ProjectConfig, *, issue_id: int) -> dict[str, Any]:
         "issue": issue,
         "case_ids": case_ids,
         "recovered_case_ids": recovered_case_ids,
+        "latest_results": latest_results,
         "push_pr_blockers": push_pr_blockers,
         "branch": branch,
         "base_branch": config.data.get("project", {}).get("default_branch", "main"),
@@ -102,18 +113,10 @@ def submit_fix_pr(config: ProjectConfig, *, issue_id: int, dry_run: bool = False
     plan = plan_fix_issue(config, issue_id=issue_id)
     if plan["status"] != "ready":
         return {"status": "blocked", "error": "fix_plan_blocked", "plan": plan}
-    if plan.get("push_pr_blockers"):
-        return {
-            "status": "blocked",
-            "error": "verification_case_required_before_pr",
-            "issue_id": issue_id,
-            "push_pr_blockers": plan.get("push_pr_blockers", []),
-            "message": "Create or confirm acceptance cases/evidence before creating a product PR from an issue-driven handoff.",
-            "plan": plan,
-        }
     latest_report = config.paths.reports / "status.md"
     title = render_pr_title(plan)
-    body = render_pr_body(plan, latest_report)
+    linkage = build_pr_linkage(config, plan)
+    body = render_pr_body(plan, latest_report, linkage=linkage)
     payload = {
         "title": title,
         "body": body,
@@ -121,30 +124,78 @@ def submit_fix_pr(config: ProjectConfig, *, issue_id: int, dry_run: bool = False
         "base": plan["base_branch"],
     }
     if dry_run:
-        return {"status": "dry_run", "issue_id": issue_id, "pr_payload": payload, "text_generation": text_generation_handoff(config, "pull_request_body")}
+        return {
+            "status": "dry_run",
+            "issue_id": issue_id,
+            "push_pr_blockers": plan.get("push_pr_blockers", []),
+            "pr_payload": payload,
+            "pr_linkage": linkage,
+            "text_generation": text_generation_handoff(config, "pull_request_body"),
+        }
+    if plan.get("push_pr_blockers"):
+        return {
+            "status": "blocked",
+            "error": plan.get("push_pr_blockers", ["verification_required_before_pr"])[0],
+            "issue_id": issue_id,
+            "push_pr_blockers": plan.get("push_pr_blockers", []),
+            "message": "Create or confirm acceptance cases/evidence before creating a product PR from an issue-driven handoff.",
+            "plan": plan,
+            "pr_payload": payload,
+            "pr_linkage": linkage,
+        }
 
     gitea_cfg = gitea_config_from_project(config.data)
     if not gitea_cfg.configured:
-        return {"status": "blocked", "error": "gitea_not_configured", "token_env": gitea_cfg.token_env}
+        blocked_linkage_request = _record_pr_linkage_request(config, plan, payload, linkage, status="blocked", blocked_reason="gitea_not_configured")
+        return {
+            "status": "blocked",
+            "error": "gitea_not_configured",
+            "token_env": gitea_cfg.token_env,
+            "pr_payload": payload,
+            "pr_linkage": linkage,
+            **blocked_linkage_request,
+        }
     if gitea_cfg.uses_mcp:
+        blocked_linkage_request = _record_pr_linkage_request(config, plan, payload, linkage, status="blocked", blocked_reason="gitea_mcp_write_not_supported")
         return {
             "status": "blocked",
             "error": "gitea_mcp_write_not_supported",
             "message": "tracker.gitea.backend: mcp supports issue sync and gated Wiki-only handoff. Configure HTTP backend with token_env before /quality-pilot fix-issues submit-pr creates a pull request.",
             "backend": gitea_cfg.backend,
+            "pr_payload": payload,
+            "pr_linkage": linkage,
+            **blocked_linkage_request,
         }
+    linkage_request = _record_pr_linkage_request(config, plan, payload, linkage, status="ready")
     _push_branch(config.root, plan["branch"])
     response = GiteaClient(gitea_cfg).create_pull_request(**payload)
-    result = {"status": "ok", "issue_id": issue_id, "pr_payload": payload, "text_generation": text_generation_handoff(config, "pull_request_body"), "response": response}
+    result = {
+        "status": "ok",
+        "issue_id": issue_id,
+        "pr_payload": payload,
+        "pr_linkage": linkage,
+        "text_generation": text_generation_handoff(config, "pull_request_body"),
+        "response": response,
+    }
     path = config.paths.state / FIX_PR_NAME
     path.write_text(json_dumps(result) + "\n", encoding="utf-8")
-    return {**result, "pr_result_path": _relative_or_str(path, config.root)}
+    reconciled = reconcile_gitea_mcp_write_results(config)
+    return {
+        **result,
+        "pr_result_path": _relative_or_str(path, config.root),
+        **linkage_request,
+        "mcp_write_ledger": {
+            "entry_count": reconciled.get("entry_count", 0),
+            "updated_count": reconciled.get("updated_count", 0),
+        },
+    }
 
 
 def fix_status(config: ProjectConfig) -> dict[str, Any]:
     paths = {
         "plan_path": fix_plan_path(config),
         "handoff_path": config.paths.state / FIX_RUN_NAME,
+        "pr_linkage_request_path": pr_linkage_request_path(config),
         "pr_result_path": config.paths.state / FIX_PR_NAME,
     }
     return {
@@ -190,12 +241,15 @@ def _fix_handoff_instructions(plan: dict[str, Any]) -> list[str]:
     return base
 
 
-def render_pr_body(plan: dict[str, Any], report_path: Path) -> str:
+def render_pr_body(plan: dict[str, Any], report_path: Path, *, linkage: dict[str, Any] | None = None) -> str:
     issue = plan.get("issue") if isinstance(plan.get("issue"), dict) else {}
     refs = _issue_refs(plan, issue)
     case_lines = [f"- {case_id}" for case_id in plan.get("case_ids", [])] or [
         "- No linked case IDs were found; add manual verification steps before merging."
     ]
+    linkage = linkage if isinstance(linkage, dict) else {}
+    evidence_paths = linkage.get("evidence_paths") if isinstance(linkage.get("evidence_paths"), list) else []
+    evidence_lines = [f"- {path}" for path in evidence_paths] or ["- No evidence path recorded yet; run linked cases before merge."]
     return "\n".join(
         [
             f"Fixes Gitea issue #{plan.get('issue_id')}.",
@@ -215,6 +269,16 @@ def render_pr_body(plan: dict[str, Any], report_path: Path) -> str:
             "## Linked Tickets",
             "",
             *[f"- {ref}" for ref in refs],
+            "",
+            "## Traceability",
+            "",
+            f"- Gitea issue: #{linkage.get('gitea_issue_id') or plan.get('issue_id')}",
+            f"- Redmine IDs: {_format_id_list(linkage.get('redmine_issue_ids'))}",
+            f"- Case IDs: {_format_id_list(linkage.get('case_ids'))}",
+            "",
+            "## Evidence",
+            "",
+            *evidence_lines,
             "",
             "## Verification",
             "",
@@ -301,6 +365,99 @@ def fix_plan_path(config: ProjectConfig) -> Path:
     return config.paths.state / FIX_PLAN_NAME
 
 
+def pr_linkage_request_path(config: ProjectConfig) -> Path:
+    return config.paths.state / "gitea-mcp" / FIX_PR_LINKAGE_REQUEST_NAME
+
+
+def build_pr_linkage(config: ProjectConfig, plan: dict[str, Any]) -> dict[str, Any]:
+    issue = plan.get("issue") if isinstance(plan.get("issue"), dict) else {}
+    case_ids = [str(case_id) for case_id in plan.get("case_ids", []) if str(case_id)]
+    latest_results = plan.get("latest_results") if isinstance(plan.get("latest_results"), list) else _latest_results_for_cases(config, case_ids)
+    redmine_ids = sorted(set([*_redmine_refs(issue), *_redmine_refs_from_cases(config, case_ids)]))
+    evidence_paths = _evidence_paths(latest_results)
+    return {
+        "schema": "quality-pilot.pr-linkage.v1",
+        "gitea_issue_id": plan.get("issue_id"),
+        "redmine_issue_ids": redmine_ids,
+        "case_ids": case_ids,
+        "evidence_paths": evidence_paths,
+        "latest_results": latest_results,
+        "workflow_mode": plan.get("workflow_mode"),
+        "branch": plan.get("branch"),
+        "base_branch": plan.get("base_branch"),
+        "issue_refs": _issue_refs(plan, issue),
+    }
+
+
+def _record_pr_linkage_request(
+    config: ProjectConfig,
+    plan: dict[str, Any],
+    pr_payload: dict[str, Any],
+    linkage: dict[str, Any],
+    *,
+    status: str,
+    blocked_reason: str | None = None,
+) -> dict[str, Any]:
+    action = {
+        "id": f"pr-linkage-{plan.get('issue_id')}",
+        "operation": "gitea.pull_request.create",
+        "update_kind": "pr_linkage",
+        "action_safety_class": "pr_create",
+        "gitea_issue_id": linkage.get("gitea_issue_id"),
+        "redmine_issue_id": _first_int(linkage.get("redmine_issue_ids")),
+        "redmine_issue_ids": linkage.get("redmine_issue_ids", []),
+        "case_id": (linkage.get("case_ids") or [None])[0],
+        "case_ids": linkage.get("case_ids", []),
+        "evidence_paths": linkage.get("evidence_paths", []),
+        "title": pr_payload.get("title"),
+        "head": pr_payload.get("head"),
+        "base": pr_payload.get("base"),
+        "idempotency_key": _pr_linkage_idempotency_key(plan, pr_payload, linkage),
+        "write_gate_result": {
+            "allowed": status != "blocked",
+            "reason": blocked_reason or "verification_case_and_evidence_ready",
+        },
+    }
+    request = {
+        "schema": "quality-pilot.gitea-pr-linkage-request.v1",
+        "status": status,
+        "operation": "gitea.pull_request.create",
+        "created_at": utc_now(),
+        "source": "issues_fix",
+        "blocked_reason": blocked_reason,
+        "actions": [action],
+        "pr_payload": pr_payload,
+        "pr_linkage": linkage,
+        "safety": {
+            "allowed_targets": ["pull_requests"],
+            "allowed_operations": ["gitea.pull_request.create"],
+            "source": "issues_fix",
+            "requires_explicit_push_pr": True,
+            "requires_issue_case_evidence_linkage": True,
+        },
+        "result_path": _relative_or_str(config.paths.state / FIX_PR_NAME, config.root),
+    }
+    path = pr_linkage_request_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json_dumps(request) + "\n", encoding="utf-8")
+    ledger = record_gitea_mcp_write_request(
+        config,
+        request,
+        path,
+        source_module="issues_fix",
+        target_type="pr_linkage",
+    )
+    return {
+        "pr_linkage_request": request,
+        "pr_linkage_request_path": _relative_or_str(path, config.root),
+        "mcp_write_ledger_path": _relative_or_str(write_ledger_path(config), config.root),
+        "mcp_write_ledger": {
+            "entry_count": ledger.get("entry_count", 0),
+            "touched_operation_ids": ledger.get("touched_operation_ids", []),
+        },
+    }
+
+
 def _case_ids_for_issue(config: ProjectConfig, issue_id: int, issue: dict[str, Any] | None) -> list[str]:
     case_ids: list[str] = []
     available = _available_case_ids(config)
@@ -363,6 +520,64 @@ def _available_case_ids(config: ProjectConfig) -> set[str]:
         return set()
 
 
+def _latest_results_for_cases(config: ProjectConfig, case_ids: list[str]) -> list[dict[str, Any]]:
+    if not case_ids:
+        return []
+    path = config.paths.state / "latest-run.json"
+    if not path.exists():
+        return []
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    results = loaded.get("results") if isinstance(loaded, dict) else []
+    wanted = set(case_ids)
+    out: list[dict[str, Any]] = []
+    for result in results if isinstance(results, list) else []:
+        if not isinstance(result, dict) or str(result.get("case_id") or "") not in wanted:
+            continue
+        out.append(
+            {
+                "case_id": result.get("case_id"),
+                "status": result.get("status"),
+                "result_path": result.get("result_path"),
+                "evidence": result.get("evidence", []),
+                "contract_hash": result.get("contract_hash"),
+            }
+        )
+    return out
+
+
+def _evidence_paths(results: Any) -> list[str]:
+    paths: list[str] = []
+    for result in results if isinstance(results, list) else []:
+        if not isinstance(result, dict):
+            continue
+        if result.get("result_path"):
+            paths.append(str(result["result_path"]))
+        evidence = result.get("evidence") if isinstance(result.get("evidence"), list) else []
+        paths.extend(str(item) for item in evidence if str(item))
+    return sorted(dict.fromkeys(paths))
+
+
+def _redmine_refs_from_cases(config: ProjectConfig, case_ids: list[str]) -> list[int]:
+    wanted = set(case_ids)
+    if not wanted:
+        return []
+    refs: set[int] = set()
+    try:
+        for contract in load_contracts(config.paths.cases):
+            if contract.case_id not in wanted:
+                continue
+            source = contract.raw.get("source") if isinstance(contract.raw.get("source"), dict) else {}
+            redmine_id = _int_or_none(source.get("redmine_issue_id"))
+            if redmine_id is not None:
+                refs.add(redmine_id)
+    except Exception:
+        return []
+    return sorted(refs)
+
+
 def _redmine_refs(issue: dict[str, Any] | None) -> list[int]:
     if not isinstance(issue, dict):
         return []
@@ -397,6 +612,49 @@ def _case_suffix(case_ids: Any) -> str:
     if len(case_ids) > 3:
         ids.append("...")
     return f" (cases: {', '.join(ids)})"
+
+
+def _format_id_list(values: Any) -> str:
+    if isinstance(values, list):
+        cleaned = [str(item) for item in values if str(item)]
+    elif values:
+        cleaned = [str(values)]
+    else:
+        cleaned = []
+    return ", ".join(cleaned) if cleaned else "-"
+
+
+def _pr_linkage_idempotency_key(plan: dict[str, Any], pr_payload: dict[str, Any], linkage: dict[str, Any]) -> str:
+    material = json.dumps(
+        {
+            "issue_id": plan.get("issue_id"),
+            "case_ids": linkage.get("case_ids", []),
+            "evidence_paths": linkage.get("evidence_paths", []),
+            "head": pr_payload.get("head"),
+            "base": pr_payload.get("base"),
+            "title": pr_payload.get("title"),
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    return f"pr-linkage-{hashlib.sha256(material.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _first_int(values: Any) -> int | None:
+    if isinstance(values, list):
+        for value in values:
+            parsed = _int_or_none(value)
+            if parsed is not None:
+                return parsed
+        return None
+    return _int_or_none(values)
 
 
 def _clean_summary(value: Any) -> str:

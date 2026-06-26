@@ -8,6 +8,7 @@ from typing import Any
 from .config import ProjectConfig, json_dumps, load_yaml
 from .contracts import list_contract_paths
 from .gitea import GiteaClient, GiteaError, gitea_config_from_project
+from .gitea_ledger import reconcile_gitea_mcp_write_results, record_gitea_mcp_write_request, write_ledger_path
 from .hermes_mcp import configured_mcp_json_path, hermes_mcp_readiness, mcp_server_is_available
 from .issues import load_issue_snapshot
 from .runner import utc_now
@@ -116,6 +117,13 @@ def apply_wiki_plan(config: ProjectConfig, *, plan_path: str | Path | None = Non
         request_path = wiki_mcp_request_path(config)
         request_path.parent.mkdir(parents=True, exist_ok=True)
         request_path.write_text(json_dumps(request_payload) + "\n", encoding="utf-8")
+        record_gitea_mcp_write_request(
+            config,
+            request_payload,
+            request_path,
+            source_module="publish_wiki_apply",
+            target_type="wiki_update",
+        )
         payload = {
             "status": "needs_mcp_apply",
             "event": plan.get("event"),
@@ -124,6 +132,7 @@ def apply_wiki_plan(config: ProjectConfig, *, plan_path: str | Path | None = Non
             "mcp_write_request": request_payload,
             "mcp_write_request_path": _relative_or_str(request_path, config.root),
             "mcp_write_result_path": _relative_or_str(wiki_mcp_result_path(config), config.root),
+            "mcp_write_ledger_path": _relative_or_str(write_ledger_path(config), config.root),
             "next_action": "/quality-pilot publish wiki status",
             "remote": remote,
         }
@@ -218,6 +227,7 @@ def wiki_status(config: ProjectConfig) -> dict[str, Any]:
     report_path = wiki_report_path(config)
     plan = load_wiki_plan(config) if plan_path.exists() else None
     apply_result = _load_json_file(apply_path) if apply_path.exists() else None
+    write_ledger = reconcile_gitea_mcp_write_results(config)
     return {
         "status": "ok",
         "page": gitea_config_from_project(config.data).wiki_page,
@@ -231,6 +241,13 @@ def wiki_status(config: ProjectConfig) -> dict[str, Any]:
         "blocked_reasons": plan.get("blocked_reasons", []) if isinstance(plan, dict) else [],
         "last_event": plan.get("event") if isinstance(plan, dict) else None,
         "last_apply_status": apply_result.get("status") if isinstance(apply_result, dict) else None,
+        "write_ledger_exists": write_ledger_path(config).exists(),
+        "write_ledger_path": _relative_or_str(write_ledger_path(config), config.root),
+        "write_ledger": {
+            "entry_count": write_ledger.get("entry_count", 0),
+            "updated_count": write_ledger.get("updated_count", 0),
+            "entries": write_ledger.get("entries", []),
+        },
         "remote": wiki_remote_readiness(config, plan.get("write_gate_result", {}) if isinstance(plan, dict) else {}),
     }
 
@@ -281,6 +298,8 @@ def auto_sync_wiki(
                 payload["mcp_write_request_path"] = applied.get("mcp_write_request_path")
             if applied.get("mcp_write_result_path"):
                 payload["mcp_write_result_path"] = applied.get("mcp_write_result_path")
+            if applied.get("mcp_write_ledger_path"):
+                payload["mcp_write_ledger_path"] = applied.get("mcp_write_ledger_path")
             payload["blocked_by_gate"] = applied.get("blocked_by_gate", payload.get("blocked_by_gate"))
             payload["next_action"] = "/quality-pilot publish wiki status"
             return payload

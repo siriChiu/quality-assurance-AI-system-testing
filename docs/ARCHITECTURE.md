@@ -4,7 +4,7 @@ AI Quality Pilot uses a deterministic-first close-loop pipeline. Agents and LLMs
 
 ```text
 +--------------------+
-| quality-pilot CLI        |
+| quality-pilot CLI  |
 +---------+----------+
           |
           v
@@ -24,7 +24,7 @@ AI Quality Pilot uses a deterministic-first close-loop pipeline. Agents and LLMs
                                       |
                                       v
                              +--------------------+
-                             | tracker adapters   |
+                             | MCP handoff files  |
                              +--------------------+
 ```
 
@@ -45,10 +45,11 @@ pipeline:
   - persist_state
 ```
 
-V1 implements the full deterministic order. Tracker pull/write steps are
-explicit no-op/dry-run stages unless a future adapter is enabled behind the
-write gate; they are still emitted in run summaries so automation can verify
-that no step was silently skipped.
+V1 implements the deterministic order with Hermes MCP handoff files for remote
+state. The engine validates, mirrors, plans, gates, and persists request/result
+JSON; it does not store tracker tokens or write directly through Gitea/Redmine
+HTTP. Hermes MCP applies only the gated request payloads for linked Gitea issue
+create/update and Wiki updates.
 
 ## SWQA policy pack
 
@@ -64,11 +65,19 @@ The policy pack is intentionally generic. It defines stable dimensions such as e
 
 `cases generate` requires `--init` or `--growing`; a bare command returns `explicit_generation_mode_required`.
 
-`cases generate --init` builds `.quality-pilot-project/state/init-context.json` from README presence, code inventory, package metadata, existing cases, runners, and rules. It writes `source.type: init` executable contracts for functional, positive, negative, boundary, side-effect-safe, and stress/timeout-risk coverage. Every generated contract gets a side-effect-safe `commands[].run` probe; lab fixtures are later enhancements, not init blockers.
+`cases generate --init` builds `.quality-pilot-project/state/init-context.json` from README presence, code inventory, package metadata, existing cases, runners, and rules. It writes `source.type: init` executable contracts for functional, positive, negative, boundary, side-effect-safe, and stress/timeout-risk coverage. Every generated contract gets a product-runtime `commands[].run`; lab fixtures are later enhancements, not init blockers.
 
 `cases generate --growing` builds `.quality-pilot-project/state/growth-context.json` from repo metadata, issue snapshots, PR references, latest run, publish plan, existing cases, runners, and rules. It then writes `source.type: growth` executable case contracts under `.quality-pilot-project/cases/`.
 
-`--generated_count <max>` is the explicit generation limit for users who want a smaller batch. `--fast` switches case generation to autonomous strict-safe defaults after the runtime profile has been confirmed. If the runtime profile is missing, case generation stops with `needs_input`; repo-only metadata checks remain readiness probes and are not written as placeholder testcase contracts.
+`--count <max>` is the explicit generation limit for users who want a smaller batch. `--init` is already autonomous high-standard mode; there is no public `--fast` option. If the runtime profile is missing, case generation stops with `needs_input`; repo-only metadata checks remain readiness checks and are not written as placeholder testcase contracts.
+
+Generated case commands must use the configured or inferred product binary/API/runner, or a user-confirmed runner. Repo-only metadata checks, `python3 -c`, `compileall`, synthetic invalid commands, `go test`, and `go run` are rejected as testcase commands unless the user explicitly configured them as the user-facing product runner.
+
+## Issue Sync And Fix Entry
+
+`issues sync` accepts Gitea issue snapshots and Redmine issue IDs. Redmine sync creates local Redmine mirrors, generates QA-focused summaries, and emits gated Gitea issue create/update requests. The canonical issue mapping ties Redmine ID, Gitea issue ID, case ID, evidence path, and PR linkage together.
+
+After sync, `issues fix --issue <id>` may start directly for feature/development issues even before a runnable case exists. That mode is marked `issue_driven_development`; PR creation remains blocked until acceptance cases/evidence are available.
 
 Hermes may use a separate growth session to analyze the context, but that session may only produce candidate JSON. AI Quality Pilot validates candidate schema, dedupe fingerprints, secret leakage, internal prompt leakage, dangerous `.qa` runtime paths, and command fields before writing YAML.
 

@@ -102,10 +102,10 @@ Analyze -> Normalize -> Generate -> Execute -> Report -> Fix -> Publish -> Re-en
 | A2 Issues Sync | `issues sync`, `issues status` | Redmine/Gitea mirrors, dedupe, gated Gitea issue create/update, canonical mapping audit |
 | A3 Case Generate | `cases generate --init/--growing/--redmine-issues ...` | Runtime-first, no placeholder cases when runtime missing |
 | A4 Case Run | `cases run [case_id]` | Evidence persisted with result metadata and contract hash |
-| A5 Issues Report | `report status/json`, roadmap for `issues report` | Human-readable per-issue report and Gitea evidence writeback still being hardened |
-| A6 Issues Fix | `issues fix ...`, `cases push-pr ...` | Repair/feature handoff exists after sync; PR issue-linkage and stricter retest loop roadmap pending |
+| A5 Issues Report | `issues report`, `report status/json` | Per-issue report exists and FAIL/BLOCK results create gated linked Gitea issue evidence update payloads; richer subagent wording and module session state remain roadmap work |
+| A6 Issues Fix | `issues fix ...`, `cases push-pr ...` | Repair/feature handoff exists after sync; PR bodies/linkage metadata now include issue/case/evidence paths; stricter post-fix retest loop remains roadmap work |
 | A7 Update Wiki | `publish wiki status/plan/apply` | Gated Wiki update, truth-source hardening in progress |
-| A8 Gitea Output | Hermes Gitea MCP request/result files | Issue create/update, evidence writeback, PR linkage, and Wiki write gates need one ledger |
+| A8 Gitea Output | Hermes Gitea MCP request/result files | One ledger records issue create/update, evidence writeback, PR linkage, and Wiki write gates first-pass; richer reconciliation remains roadmap work |
 
 Current status: partial close loop. The tool can already sync, generate, run, report, gate writes, and hand off fixes, but the full A0-A8 module contract, resumable session state, subagent result ledger, and one-command autonomous loop are still roadmap work.
 
@@ -268,6 +268,7 @@ Use:
 /quality-pilot issues sync
 /quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]
 /quality-pilot issues status
+/quality-pilot issues report
 /quality-pilot issues show <issue_id>
 /quality-pilot issues fix --all
 /quality-pilot issues fix --issue <id>
@@ -310,8 +311,9 @@ Use:
 | 修復缺失 config skeleton / overlay 目錄後再檢查 | `/quality-pilot doctor --fix` |
 | 只讀稽核 overlay semantic consistency | `/quality-pilot audit state` |
 | 同步 issues，內建 dedupe/prune | `/quality-pilot issues sync` |
-| 從 Redmine IDs 同步本地 mirrors 並經 gate 建立 Gitea issues | `/quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]` |
+| 從 Redmine IDs 同步本地 mirrors 並經 gate 建立/更新 linked Gitea issues | `/quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]` |
 | 看 issue sync、duplicate、fix queue、PR handoff | `/quality-pilot issues status` |
+| 產生每個 issue 的 QA report，並為 FAIL/BLOCK 產生 linked Gitea evidence update handoff | `/quality-pilot issues report` |
 | 從已同步 issue 直接開始修復或新功能開發 handoff | `/quality-pilot issues fix --issue <id>` |
 | 首次產生全 repo SWQA cases | `/quality-pilot cases generate --init` |
 | 限制初始 case 數量 | `/quality-pilot cases generate --init --count 5` |
@@ -373,7 +375,7 @@ risk_controls:
   requires_credentials: false
 ```
 
-Every runnable case must have `commands[].run`. If runtime is unknown, AI Quality Pilot must return `needs_input` and write no fake case. If a lab-only target, fixture, or credential is missing, it should generate a safe executable probe only when one can be proven safe, and record stronger lab checks as follow-up metadata.
+Every runnable case must have `commands[].run`. If runtime is unknown, AI Quality Pilot must return `needs_input` and write no fake case. If a lab-only target, fixture, or credential is missing, it should generate a product-runtime command only when one can be proven safe, and record stronger lab checks as follow-up metadata.
 
 ## Reports, Evidence, And Truth Gates
 
@@ -535,6 +537,7 @@ Contributions should preserve these invariants:
 - Closed issues are remote truth and must not be reopened/commented accidentally.
 - Wiki auto-sync is allowed only through the configured page and write gate.
 - Product PR creation stays behind explicit `issues fix --issue <id> --push-pr` or `cases push-pr <case_id>`.
+- PR handoff/body metadata must link the Gitea issue ID, Redmine ID when present, case IDs, and evidence paths.
 - `issues fix --issue <id>` may start from a synced issue even before a runnable case exists, but `--push-pr` requires acceptance cases/evidence first.
 - Subagents generate candidates only and cannot bypass validation or write gates.
 - Secrets are referenced by env var names, never stored raw.
@@ -551,7 +554,7 @@ Because generation has different modes. Use `--init` for first-time repo SWQA ma
 
 ### Do I need to review every generated testcase?
 
-No. `--init` and `--growing` should generate executable side-effect-safe probes after runtime is inferred or confirmed. Hermes should only ask category-level blocking questions when AI Quality Pilot returns `hermes_needs_input`.
+No. `--init` and `--growing` should generate executable product-runtime command contracts after runtime is inferred or confirmed. Hermes should only ask category-level blocking questions when AI Quality Pilot returns `hermes_needs_input`.
 
 ### Why did it ask for runtime or environment details?
 

@@ -7,6 +7,7 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from .command_policy import generated_contract_policy_violation_message, validate_generated_contract_commands
 from .config import ProjectConfig, find_raw_secret_paths, json_dumps
 from .contracts import ContractError, load_contracts
 from .issues import case_id_for_issue, load_issue_snapshot
@@ -77,6 +78,7 @@ def generate_cases_from_issues(
         if path.exists() and not force:
             skipped.append({"case_id": contract["case_id"], "path": _relative_or_str(path, config.root), "reason": "exists"})
             continue
+        _enforce_generated_contract_commands(config, contract)
         path.write_text(_dump_yaml(contract), encoding="utf-8")
         item_questions = contract.get("quality_pilot", {}).get("questions", [])
         if item_questions:
@@ -157,6 +159,7 @@ def generate_cases_from_scratch(
         if path.exists() and not force:
             skipped.append({"case_id": contract["case_id"], "path": _relative_or_str(path, config.root), "reason": "exists"})
             continue
+        _enforce_generated_contract_commands(config, contract)
         path.write_text(_dump_yaml(contract), encoding="utf-8")
         item_questions = contract.get("quality_pilot", {}).get("questions", [])
         if item_questions:
@@ -256,6 +259,7 @@ def generate_cases_init(
         if path.exists() and not force:
             skipped.append({"case_id": contract["case_id"], "path": _relative_or_str(path, config.root), "reason": "exists"})
             continue
+        _enforce_generated_contract_commands(config, contract)
         path.write_text(_dump_yaml(contract), encoding="utf-8")
         item_questions = contract.get("quality_pilot", {}).get("questions", [])
         if item_questions:
@@ -404,6 +408,7 @@ def generate_cases_growing(
         if path.exists() and not force:
             skipped.append({"case_id": contract["case_id"], "path": _relative_or_str(path, config.root), "reason": "exists"})
             continue
+        _enforce_generated_contract_commands(config, contract)
         path.write_text(_dump_yaml(contract), encoding="utf-8")
         item_questions = contract.get("quality_pilot", {}).get("questions", [])
         if item_questions:
@@ -597,6 +602,7 @@ def generate_cases_from_redmine_issues(
             else:
                 skipped.append({"case_id": contract["case_id"], "path": _relative_or_str(path, config.root), "reason": "exists"})
                 continue
+        _enforce_generated_contract_commands(config, contract)
         path.write_text(_dump_yaml(contract), encoding="utf-8")
         generated.append(
             {
@@ -638,6 +644,12 @@ def _is_stale_redmine_generic_probe(path: Path) -> bool:
         return False
     lowered = text.lower()
     return "__quality_pilot_invalid_command__" in text and ("redmine" in lowered or "redmine_issue_id" in lowered)
+
+
+def _enforce_generated_contract_commands(config: ProjectConfig, contract: dict[str, Any]) -> None:
+    violations = validate_generated_contract_commands(config, contract)
+    if violations:
+        raise CaseGenerationError(generated_contract_policy_violation_message(str(contract.get("case_id") or ""), violations))
 
 
 def build_growth_context(
