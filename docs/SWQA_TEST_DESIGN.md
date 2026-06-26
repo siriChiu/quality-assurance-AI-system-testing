@@ -102,7 +102,7 @@ growth_generation:
     - side_effect_boundary
 ```
 
-Do not invent a destructive or credentialed command when only the testing idea is known. AI Quality Pilot must still generate a runnable side-effect-safe probe, such as CLI help/parser, repo compile/build, invalid-command rejection, dry-run/no-op, or bounded baseline checks. Lab runners can replace or extend the safe probe after the user provides fixture, credential env names, and side-effect boundaries.
+Do not invent a destructive or credentialed command when only the testing idea is known. Repo-only metadata checks are readiness probes, not generated testcase contracts. If the runtime profile is missing, generation must stop with `needs_input` and write no placeholder case YAML. After runtime confirmation, AI Quality Pilot may generate runnable side-effect-safe probes only through the configured or inferred product entrypoint, such as CLI help/parser/version, dry-run/no-op, or bounded baseline checks. Synthetic invalid subcommands, static repo probes, `python3 -c` metadata checks, `compileall`, `go test`, and `go run` are not testcase commands unless the user explicitly configured them as the product runner. Lab runners can replace or extend the safe probe after the user provides fixture, credential env names, and side-effect boundaries.
 
 Hermes may use a separate growth session or agent for broader analysis, but that session may only produce candidate JSON. AI Quality Pilot remains the sole writer of case YAML and must validate schema, dedupe fingerprints, raw-secret leakage, internal prompt leakage, dangerous `.qa` runtime paths, and command fields before writing any contract.
 

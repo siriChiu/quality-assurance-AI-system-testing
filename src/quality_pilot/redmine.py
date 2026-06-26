@@ -21,6 +21,8 @@ REDMINE_GITEA_CANDIDATES_DIR = "gitea-candidates"
 GITEA_ISSUE_WRITE_REQUEST_NAME = "issue-write-request.json"
 GITEA_ISSUE_WRITE_RESULT_NAME = "issue-write-result.json"
 GITEA_ISSUE_WRITE_REQUEST_SCHEMA = "quality-pilot.gitea-mcp-issue-write-request.v1"
+REDMINE_MCP_SNAPSHOT_SCHEMA = "quality-pilot.redmine-mcp-issues.v1"
+REDMINE_MCP_SNAPSHOT_REQUIRED_INCLUDE = ("description", "custom_fields", "journals", "attachments")
 REDMINE_DESCRIPTION_KEYS = (
     "description",
     "description_text",
@@ -47,6 +49,64 @@ REDMINE_TEXT_KEYS = (
     "plain_text",
     "plainText",
     "raw",
+)
+REDMINE_SAFE_COMMAND_FIELD_HINTS = (
+    "safe probe command",
+    "safe test command",
+    "safe testcase command",
+    "safe runner command",
+    "safe runner",
+    "qa safe command",
+    "quality pilot safe probe",
+    "quality pilot safe command",
+    "verified safe command",
+    "read only test command",
+    "readonly test command",
+    "read-only test command",
+    "non destructive test command",
+    "non-destructive test command",
+)
+REDMINE_EXPECTED_EXIT_CODE_FIELD_HINTS = (
+    "expected exit code",
+    "expected rc",
+    "expected return code",
+    "safe probe expected exit code",
+)
+REDMINE_SAFE_FIXTURE_FIELD_HINTS = (
+    "fixture",
+    "environment",
+    "credential",
+    "login",
+    "config",
+    "lab",
+    "target",
+    "file",
+    "workspace",
+)
+REDMINE_SAFE_ORACLE_FIELD_HINTS = (
+    "oracle",
+    "pass fail",
+    "pass/fail",
+    "expected",
+    "acceptance",
+    "should",
+    "expected exit code",
+    "expected rc",
+    "expected return code",
+)
+REDMINE_SAFE_SIDE_EFFECT_FIELD_HINTS = (
+    "side effect",
+    "side-effect",
+    "sideeffect",
+    "safe boundary",
+    "side effect boundary",
+    "boundary",
+    "read only",
+    "read-only",
+    "readonly",
+    "non destructive",
+    "non-destructive",
+    "dry run",
 )
 
 
@@ -98,16 +158,33 @@ def redmine_readiness(config: ProjectConfig, *, requested_issue_ids: list[int] |
         )
     found_ids: list[int] = []
     missing_ids: list[int] = []
+    snapshot_validation: dict[str, Any] | None = None
     if path.exists() and requested_issue_ids:
         try:
-            found_ids = [int(item["id"]) for item in load_redmine_issues(config, issue_ids=requested_issue_ids)]
-        except RedmineError:
+            loaded = _read_redmine_mcp_snapshot(path)
+            snapshot_validation = validate_redmine_mcp_snapshot(config, loaded, issue_ids=requested_issue_ids, path=path)
+            if not snapshot_validation["valid"]:
+                blockers.append(str(snapshot_validation["error"]))
+                checks.append(
+                    {
+                        "name": "tracker.redmine.snapshot_contract",
+                        "status": "WARN",
+                        "error": snapshot_validation["error"],
+                        "message": snapshot_validation["message"],
+                        "path": _relative_or_str(path, config.root),
+                    }
+                )
+            else:
+                found_ids = list(snapshot_validation.get("requested_issue_ids", requested_issue_ids))
+        except RedmineError as exc:
             found_ids = []
+            blockers.append("redmine_mcp_snapshot_invalid")
+            checks.append({"name": "tracker.redmine.snapshot_contract", "status": "WARN", "message": str(exc)})
         missing_ids = [issue_id for issue_id in requested_issue_ids if issue_id not in found_ids]
-        if missing_ids:
+        if missing_ids and not snapshot_validation:
             blockers.append("redmine_issue_ids_missing")
             checks.append({"name": "tracker.redmine.issue_ids", "status": "WARN", "missing_issue_ids": missing_ids})
-        else:
+        elif snapshot_validation and snapshot_validation.get("valid"):
             checks.append({"name": "tracker.redmine.issue_ids", "status": "PASS", "requested_issue_ids": requested_issue_ids})
     return {
         "status": "ready" if not blockers else "blocked",
@@ -120,6 +197,7 @@ def redmine_readiness(config: ProjectConfig, *, requested_issue_ids: list[int] |
         "requested_issue_ids": requested_issue_ids or [],
         "found_issue_ids": found_ids,
         "missing_issue_ids": missing_ids,
+        "snapshot_validation": snapshot_validation,
         "blockers": sorted(set(blockers)),
         "checks": checks,
     }
@@ -161,6 +239,7 @@ def sync_redmine_issues(
         "imported_issue_ids": [issue["id"] for issue in issues],
         "mirror_paths": mirrors,
         "gitea_issue_candidate_mirror_paths": candidate_mirrors,
+        "qa_summary": build_redmine_qa_summary_payload(config, issues),
         "issues": issues,
     }
     import_path = config.paths.state / REDMINE_IMPORT_NAME
@@ -207,6 +286,7 @@ def import_redmine_issues(config: ProjectConfig, *, issue_ids: list[int]) -> dic
         "requested_issue_ids": issue_ids,
         "imported_issue_ids": [issue["id"] for issue in issues],
         "mirror_paths": mirrors,
+        "qa_summary": build_redmine_qa_summary_payload(config, issues),
         "issues": issues,
     }
     import_path = config.paths.state / REDMINE_IMPORT_NAME
@@ -222,10 +302,10 @@ def load_redmine_issues(config: ProjectConfig, *, issue_ids: list[int]) -> list[
             f"{_relative_or_str(path, config.root)}. Use Hermes Redmine MCP to write raw issues JSON there, "
             f"or set {REDMINE_MCP_ENV}."
         )
-    try:
-        loaded = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise RedmineError(f"redmine_mcp_snapshot_invalid: {path}") from exc
+    loaded = _read_redmine_mcp_snapshot(path)
+    validation = validate_redmine_mcp_snapshot(config, loaded, issue_ids=issue_ids, path=path)
+    if not validation["valid"]:
+        raise RedmineError(_redmine_snapshot_contract_error_message(config, validation, path))
     normalized = [normalize_redmine_issue(item) for item in _extract_issue_list(loaded)]
     requested = {int(issue_id) for issue_id in issue_ids}
     selected = [item for item in normalized if int(item["id"]) in requested]
@@ -233,6 +313,148 @@ def load_redmine_issues(config: ProjectConfig, *, issue_ids: list[int]) -> list[
     if missing:
         raise RedmineError(f"redmine_issue_ids_missing: {missing}")
     return selected
+
+
+def _read_redmine_mcp_snapshot(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RedmineError(f"redmine_mcp_snapshot_invalid: {path}") from exc
+
+
+def validate_redmine_mcp_snapshot(
+    config: ProjectConfig,
+    loaded: Any,
+    *,
+    issue_ids: list[int],
+    path: Path,
+) -> dict[str, Any]:
+    requested = sorted({int(issue_id) for issue_id in issue_ids})
+    if not isinstance(loaded, dict):
+        return _redmine_snapshot_validation(
+            False,
+            "redmine_mcp_snapshot_unverified",
+            "Redmine MCP snapshot must be a manifest object, not a bare issue list.",
+            requested_issue_ids=requested,
+            path=path,
+            root=config.root,
+        )
+
+    schema = str(loaded.get("schema") or "")
+    if schema != REDMINE_MCP_SNAPSHOT_SCHEMA:
+        return _redmine_snapshot_validation(
+            False,
+            "redmine_mcp_snapshot_unverified",
+            f"Redmine MCP snapshot must use schema {REDMINE_MCP_SNAPSHOT_SCHEMA}. Legacy/raw snapshots are not allowed for --redmine-issues.",
+            requested_issue_ids=requested,
+            path=path,
+            root=config.root,
+            actual_schema=schema or None,
+        )
+
+    source = str(loaded.get("source") or loaded.get("origin") or loaded.get("fetched_via") or "")
+    live_read = bool(loaded.get("live_read") or source in {"hermes_redmine_mcp_live_read", "redmine_mcp_live_read", "hermes_redmine_mcp"})
+    if not live_read:
+        return _redmine_snapshot_validation(
+            False,
+            "redmine_mcp_snapshot_unverified",
+            "Redmine MCP snapshot must declare a live Hermes Redmine MCP read for this handoff.",
+            requested_issue_ids=requested,
+            path=path,
+            root=config.root,
+            source=source or None,
+        )
+
+    fetched_at = str(loaded.get("fetched_at") or loaded.get("generated_at") or loaded.get("synced_at") or "").strip()
+    if not fetched_at:
+        return _redmine_snapshot_validation(
+            False,
+            "redmine_mcp_snapshot_unverified",
+            "Redmine MCP snapshot must include fetched_at so stale snapshots are visible.",
+            requested_issue_ids=requested,
+            path=path,
+            root=config.root,
+        )
+
+    manifest_ids = _manifest_issue_ids(loaded)
+    missing_manifest_ids = sorted(set(requested) - set(manifest_ids))
+    if missing_manifest_ids:
+        return _redmine_snapshot_validation(
+            False,
+            "redmine_mcp_snapshot_requested_ids_mismatch",
+            "Redmine MCP snapshot was not fetched for every requested issue id.",
+            requested_issue_ids=requested,
+            path=path,
+            root=config.root,
+            snapshot_issue_ids=manifest_ids,
+            missing_issue_ids=missing_manifest_ids,
+        )
+
+    include = _normalized_redmine_include_fields(loaded)
+    missing_include = [field for field in REDMINE_MCP_SNAPSHOT_REQUIRED_INCLUDE if field not in include]
+    if missing_include:
+        return _redmine_snapshot_validation(
+            False,
+            "redmine_mcp_snapshot_incomplete_payload",
+            "Redmine MCP snapshot must request full issue payload fields: description, custom_fields, journals, attachments.",
+            requested_issue_ids=requested,
+            path=path,
+            root=config.root,
+            include=sorted(include),
+            missing_include=missing_include,
+        )
+
+    if not _redmine_full_payload_declared(loaded):
+        return _redmine_snapshot_validation(
+            False,
+            "redmine_mcp_snapshot_incomplete_payload",
+            "Redmine MCP snapshot must declare payload_completeness: full or full_payload: true.",
+            requested_issue_ids=requested,
+            path=path,
+            root=config.root,
+        )
+
+    raw_issues = _extract_issue_list(loaded)
+    selected = [item for item in raw_issues if (_raw_redmine_issue_id(item) in set(requested))]
+    missing_payload_ids = sorted(set(requested) - {_raw_redmine_issue_id(item) for item in selected if _raw_redmine_issue_id(item) is not None})
+    if missing_payload_ids:
+        return _redmine_snapshot_validation(
+            False,
+            "redmine_issue_ids_missing",
+            "Redmine MCP snapshot payload does not contain every requested issue id.",
+            requested_issue_ids=requested,
+            path=path,
+            root=config.root,
+            missing_issue_ids=missing_payload_ids,
+        )
+
+    incomplete = []
+    for item in selected:
+        gaps = _redmine_issue_payload_gaps(item)
+        if gaps:
+            incomplete.append({"id": _raw_redmine_issue_id(item), "missing": gaps})
+    if incomplete:
+        return _redmine_snapshot_validation(
+            False,
+            "redmine_mcp_snapshot_incomplete_payload",
+            "Redmine MCP snapshot contains issue entries without the required full payload fields.",
+            requested_issue_ids=requested,
+            path=path,
+            root=config.root,
+            incomplete_issues=incomplete,
+        )
+
+    return _redmine_snapshot_validation(
+        True,
+        None,
+        "Redmine MCP snapshot is a verified full live-read handoff.",
+        requested_issue_ids=requested,
+        path=path,
+        root=config.root,
+        fetched_at=fetched_at,
+        include=sorted(include),
+        snapshot_issue_ids=manifest_ids,
+    )
 
 
 def normalize_redmine_issue(raw: dict[str, Any]) -> dict[str, Any]:
@@ -455,6 +677,7 @@ def build_redmine_gitea_sync_plan(config: ProjectConfig, issues: list[dict[str, 
     for issue in issues:
         title = f"[Redmine #{issue['id']}] {issue['subject']}"
         body = render_gitea_candidate_body(issue)
+        qa_summary = redmine_issue_qa_summary(issue)
         fingerprint = issue_fingerprint(issue["subject"], issue.get("description", ""))
         existing = _find_existing_gitea_issue(issue, fingerprint, snapshot_items, write_result_items)
         labels = ["redmine", "needs-triage", "needs-reproduction"]
@@ -466,6 +689,8 @@ def build_redmine_gitea_sync_plan(config: ProjectConfig, issues: list[dict[str, 
                 "title": title,
                 "body": body,
                 "labels": labels,
+                "qa_summary": qa_summary,
+                "qa_text_generation": text_generation_handoff(config, "redmine_issue_summary"),
                 "text_generation": text_generation_handoff(config, "gitea_issue_body"),
                 "dedupe_fingerprint": fingerprint,
                 "idempotency_key": _issue_create_idempotency_key(issue["id"], fingerprint),
@@ -568,6 +793,8 @@ def build_gitea_issue_write_request(config: ProjectConfig, plan: dict[str, Any])
                 "title": candidate.get("title"),
                 "body": candidate.get("body"),
                 "labels": labels,
+                "qa_summary": candidate.get("qa_summary"),
+                "qa_text_generation": candidate.get("qa_text_generation"),
                 "text_generation": candidate.get("text_generation"),
                 "requested_labels": labels,
                 "applied_labels": [],
@@ -672,6 +899,10 @@ def render_gitea_candidate_body(issue: dict[str, Any]) -> str:
         f"- Updated at: {issue.get('updated_at') or '-'}",
         f"- URL: {issue.get('url') or '-'}",
         "",
+        "## QA Focus",
+        "",
+        render_redmine_qa_focus(issue),
+        "",
         "## Full Description From Redmine",
         "",
         description or "_No Redmine description was provided._",
@@ -693,6 +924,92 @@ def render_gitea_candidate_body(issue: dict[str, Any]) -> str:
         _render_human_redmine_context(issue),
     ]
     return "\n".join(lines) + "\n"
+
+
+def build_redmine_qa_summary_payload(config: ProjectConfig, issues: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "schema": "quality-pilot.redmine-qa-summary.v1",
+        "generated_at": utc_now(),
+        "text_generation": text_generation_handoff(config, "redmine_issue_summary"),
+        "issues": [redmine_issue_qa_summary(issue) for issue in issues],
+    }
+
+
+def redmine_issue_qa_summary(issue: dict[str, Any]) -> dict[str, Any]:
+    missing = redmine_case_missing_inputs(issue)
+    return {
+        "redmine_issue_id": int(issue["id"]),
+        "title": str(issue.get("subject") or ""),
+        "status": str(issue.get("status") or ""),
+        "updated_at": str(issue.get("updated_at") or ""),
+        "problem": _clip_summary(_first_paragraph(str(issue.get("description") or "")) or str(issue.get("subject") or "")),
+        "environment": _redmine_environment_hints(issue),
+        "reproduction": _clip_summary(_render_reproduction_details(issue), limit=900),
+        "observed": _clip_summary(_render_observed_result(issue), limit=700),
+        "expected": _clip_summary(_render_expected_result(issue), limit=700),
+        "evidence": _redmine_evidence_hints(issue),
+        "missing_for_executable_case": missing,
+        "human_review_required": bool(missing),
+    }
+
+
+def render_redmine_qa_focus(issue: dict[str, Any]) -> str:
+    summary = redmine_issue_qa_summary(issue)
+    lines = [
+        f"- Problem to verify: {summary['problem'] or issue.get('subject') or '-'}",
+        f"- Reproduction path: {summary['reproduction'] or '-'}",
+        f"- Observed result: {summary['observed'] or '-'}",
+        f"- Expected result: {summary['expected'] or '-'}",
+    ]
+    environment = summary.get("environment") if isinstance(summary.get("environment"), list) else []
+    if environment:
+        lines.append(f"- Environment hints: {'; '.join(str(item) for item in environment[:5])}")
+    evidence = summary.get("evidence") if isinstance(summary.get("evidence"), list) else []
+    if evidence:
+        lines.append(f"- Evidence to check: {'; '.join(str(item) for item in evidence[:5])}")
+    missing = summary.get("missing_for_executable_case") if isinstance(summary.get("missing_for_executable_case"), list) else []
+    if missing:
+        lines.append(f"- Missing before an executable testcase: {'; '.join(str(item) for item in missing)}")
+    return "\n".join(lines)
+
+
+def redmine_safe_probe_command(issue: dict[str, Any]) -> dict[str, Any] | None:
+    raw = issue.get("raw") if isinstance(issue.get("raw"), dict) else {}
+    expected_exit = _redmine_expected_exit(raw)
+    for name, value in _custom_field_entries(raw):
+        normalized = _normalized_field_name(name)
+        if not any(hint in normalized for hint in REDMINE_SAFE_COMMAND_FIELD_HINTS):
+            continue
+        command = _clean_redmine_command_value(value)
+        if command:
+            runner_inputs = _redmine_safe_runner_inputs(issue, command_source=name, expected_exit=expected_exit)
+            return {
+                "run": command,
+                "source": name,
+                "expected_exit_code": expected_exit["code"],
+                "expected_exit_code_source": expected_exit.get("source"),
+                "user_confirmed_inputs": runner_inputs,
+            }
+    return None
+
+
+def redmine_case_missing_inputs(issue: dict[str, Any]) -> list[str]:
+    missing: list[str] = []
+    safe_command = redmine_safe_probe_command(issue)
+    if safe_command is None:
+        missing.append("user-confirmed safe command or runner path")
+        missing.append("fixtures, environment, credentials, and side-effect boundaries")
+        if not _redmine_has_explicit_expected(issue):
+            missing.append("pass/fail oracle or expected result")
+        return _unique_strings(missing)
+    confirmed = safe_command.get("user_confirmed_inputs") if isinstance(safe_command.get("user_confirmed_inputs"), dict) else {}
+    if not confirmed.get("fixtures_environment"):
+        missing.append("fixtures, environment, credentials, or explicit none-required note")
+    if not confirmed.get("oracle"):
+        missing.append("pass/fail oracle or expected result")
+    if not confirmed.get("side_effect_boundaries"):
+        missing.append("side-effect boundaries")
+    return _unique_strings(missing)
 
 
 def _render_reproduction_details(issue: dict[str, Any]) -> str:
@@ -720,6 +1037,142 @@ def _render_reproduction_details(issue: dict[str, Any]) -> str:
         "No dedicated reproduction command or step list was synced from Redmine. "
         "Start from the full description and Redmine comments below, then confirm exact steps with the reporter before changing behavior."
     )
+
+
+def _clip_summary(value: str, *, limit: int = 500) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _redmine_environment_hints(issue: dict[str, Any]) -> list[str]:
+    entries = _matching_custom_fields(
+        issue,
+        ("environment", "model", "platform", "version", "fw", "firmware", "bmc", "os", "server", "system", "lab", "target", "board"),
+    )
+    hints = [f"{name}: {_clip_summary(value, limit=180)}" for name, value in entries]
+    hints.extend(
+        line[2:]
+        for line in _description_lines_matching(
+            issue,
+            ("environment:", "model:", "platform:", "version:", "firmware:", "bmc:", "lab:", "target:"),
+        )
+    )
+    return _unique_strings([hint for hint in hints if hint.strip()])[:8]
+
+
+def _redmine_evidence_hints(issue: dict[str, Any]) -> list[str]:
+    raw = issue.get("raw") if isinstance(issue.get("raw"), dict) else {}
+    hints: list[str] = []
+    for line in _human_attachment_lines(raw):
+        text = line[2:] if line.startswith("- ") else line
+        if text.strip():
+            hints.append(_clip_summary(text, limit=220))
+    journals = raw.get("journals")
+    if not isinstance(journals, list) or not journals:
+        journals = raw.get("comments")
+    if isinstance(journals, list):
+        for journal in journals[:3]:
+            if isinstance(journal, dict):
+                note = _render_redmine_text_value(journal.get("notes") if "notes" in journal else journal.get("body", ""))
+            else:
+                note = _render_redmine_text_value(journal)
+            note = _clip_summary(note, limit=220)
+            if note:
+                hints.append(note)
+    return _unique_strings(hints)[:8]
+
+
+def _redmine_has_explicit_expected(issue: dict[str, Any]) -> bool:
+    if _matching_custom_fields(issue, ("expected", "acceptance", "target", "should")):
+        return True
+    return bool(_description_lines_matching(issue, ("expected:", "expected result:", "should ")))
+
+
+def _redmine_expected_exit(raw: dict[str, Any]) -> dict[str, Any]:
+    for name, value in _custom_field_entries(raw):
+        normalized = _normalized_field_name(name)
+        if not any(hint in normalized for hint in REDMINE_EXPECTED_EXIT_CODE_FIELD_HINTS):
+            continue
+        match = re.search(r"-?\d+", str(value))
+        if match:
+            try:
+                return {"code": int(match.group(0)), "source": name}
+            except ValueError:
+                return {"code": 0, "source": name}
+    return {"code": 0, "source": None}
+
+
+def _redmine_expected_exit_code(raw: dict[str, Any]) -> int:
+    return int(_redmine_expected_exit(raw)["code"])
+
+
+def _redmine_safe_runner_inputs(issue: dict[str, Any], *, command_source: str, expected_exit: dict[str, Any]) -> dict[str, Any]:
+    fixtures = _safe_input_fields(issue, REDMINE_SAFE_FIXTURE_FIELD_HINTS, exclude_names={command_source})
+    oracle = _safe_input_fields(issue, REDMINE_SAFE_ORACLE_FIELD_HINTS, exclude_names={command_source})
+    side_effects = _safe_input_fields(issue, REDMINE_SAFE_SIDE_EFFECT_FIELD_HINTS, exclude_names={command_source})
+    if expected_exit.get("source"):
+        oracle.append({"field": str(expected_exit["source"]), "value": f"expected exit code {expected_exit['code']}"})
+    if not oracle and _redmine_has_explicit_expected(issue):
+        oracle.extend(
+            {"field": name, "value": value}
+            for name, value in _matching_custom_fields(issue, ("expected", "acceptance", "target", "should"))
+            if name != command_source
+        )
+    return {
+        "command_source": command_source,
+        "expected_exit_code": int(expected_exit.get("code", 0)),
+        "expected_exit_code_source": expected_exit.get("source"),
+        "fixtures_environment": _unique_field_values(fixtures),
+        "oracle": _unique_field_values(oracle),
+        "side_effect_boundaries": _unique_field_values(side_effects),
+    }
+
+
+def _safe_input_fields(issue: dict[str, Any], hints: tuple[str, ...], *, exclude_names: set[str]) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    excluded = {_normalized_field_name(name) for name in exclude_names}
+    raw = issue.get("raw") if isinstance(issue.get("raw"), dict) else {}
+    for name, value in _custom_field_entries(raw):
+        normalized = _normalized_field_name(name)
+        if normalized in excluded:
+            continue
+        if any(hint in normalized for hint in hints):
+            out.append({"field": name, "value": value})
+    return out
+
+
+def _unique_field_values(items: list[dict[str, str]]) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in items:
+        key = (str(item.get("field") or ""), str(item.get("value") or ""))
+        if key in seen or not key[1].strip():
+            continue
+        seen.add(key)
+        out.append({"field": key[0], "value": key[1]})
+    return out
+
+
+def _normalized_field_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def _clean_redmine_command_value(value: str) -> str:
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return ""
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    if text.startswith("`") and text.endswith("`") and len(text) >= 2:
+        text = text[1:-1].strip()
+    return text
 
 
 def _render_observed_result(issue: dict[str, Any]) -> str:
@@ -1003,6 +1456,112 @@ def _int_or_none(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _redmine_snapshot_validation(
+    valid: bool,
+    error: str | None,
+    message: str,
+    *,
+    requested_issue_ids: list[int],
+    path: Path,
+    root: Path,
+    **details: Any,
+) -> dict[str, Any]:
+    return {
+        "valid": valid,
+        "error": error,
+        "message": message,
+        "schema": REDMINE_MCP_SNAPSHOT_SCHEMA,
+        "path": _relative_or_str(path, root),
+        "requested_issue_ids": requested_issue_ids,
+        **{key: value for key, value in details.items() if value not in (None, [], {})},
+    }
+
+
+def _redmine_snapshot_contract_error_message(config: ProjectConfig, validation: dict[str, Any], path: Path) -> str:
+    requested = " ".join(str(item) for item in validation.get("requested_issue_ids", [])) or "<redmine_issue_id> [<redmine_issue_id> ...]"
+    missing = validation.get("missing_issue_ids") or validation.get("missing_include") or validation.get("incomplete_issues") or []
+    missing_text = f" details={json_dumps(missing)}" if missing else ""
+    return (
+        f"{validation.get('error')}: {validation.get('message')} "
+        f"path={_relative_or_str(path, config.root)} requested_issue_ids=[{requested}].{missing_text} "
+        "Refresh through Hermes Redmine MCP live read before rerunning. The snapshot must be a JSON object with "
+        f"schema={REDMINE_MCP_SNAPSHOT_SCHEMA}, source=hermes_redmine_mcp_live_read, fetched_at, "
+        "requested_issue_ids, include=[description, custom_fields, journals, attachments], "
+        "payload_completeness=full, and issues containing full description, updated_on, custom_fields, journals/comments, and attachments."
+    )
+
+
+def _manifest_issue_ids(loaded: dict[str, Any]) -> list[int]:
+    for key in ("requested_issue_ids", "issue_ids", "redmine_issue_ids"):
+        value = loaded.get(key)
+        if isinstance(value, list):
+            ids = [_int_or_none(item) for item in value]
+            return sorted(item for item in ids if item is not None)
+    manifest = loaded.get("manifest") if isinstance(loaded.get("manifest"), dict) else {}
+    for key in ("requested_issue_ids", "issue_ids", "redmine_issue_ids"):
+        value = manifest.get(key)
+        if isinstance(value, list):
+            ids = [_int_or_none(item) for item in value]
+            return sorted(item for item in ids if item is not None)
+    return []
+
+
+def _normalized_redmine_include_fields(loaded: dict[str, Any]) -> set[str]:
+    raw = loaded.get("include") or loaded.get("fields") or loaded.get("requested_fields") or []
+    manifest = loaded.get("manifest") if isinstance(loaded.get("manifest"), dict) else {}
+    if not raw:
+        raw = manifest.get("include") or manifest.get("fields") or manifest.get("requested_fields") or []
+    values = raw if isinstance(raw, list) else [raw]
+    normalized = {_normalize_redmine_include_field(item) for item in values}
+    normalized.discard("")
+    if "comments" in normalized:
+        normalized.add("journals")
+    return normalized
+
+
+def _normalize_redmine_include_field(value: Any) -> str:
+    text = str(value or "").strip().lower().replace("-", "_")
+    if text in {"journal", "journals", "comment", "comments", "notes"}:
+        return "journals"
+    if text in {"attachment", "attachments", "files"}:
+        return "attachments"
+    if text in {"custom_field", "custom_fields", "fields"}:
+        return "custom_fields"
+    if text in {"description", "body", "full_description", "description_text"}:
+        return "description"
+    return text
+
+
+def _redmine_full_payload_declared(loaded: dict[str, Any]) -> bool:
+    completeness = str(loaded.get("payload_completeness") or loaded.get("completeness") or "").strip().lower()
+    if completeness in {"full", "complete", "full_payload"}:
+        return True
+    return bool(loaded.get("full_payload") or loaded.get("complete_payload") or loaded.get("full_issue_payload"))
+
+
+def _raw_redmine_issue_id(raw: dict[str, Any]) -> int | None:
+    return _int_or_none(raw.get("id") or raw.get("issue_id") or raw.get("number"))
+
+
+def _redmine_issue_payload_gaps(raw: dict[str, Any]) -> list[str]:
+    gaps: list[str] = []
+    description, _ = _redmine_description(raw)
+    if not description:
+        gaps.append("description")
+    if not (raw.get("updated_on") or raw.get("updated_at")):
+        gaps.append("updated_on")
+    if "custom_fields" not in raw or not isinstance(raw.get("custom_fields"), list):
+        gaps.append("custom_fields")
+    if not (
+        ("journals" in raw and isinstance(raw.get("journals"), list))
+        or ("comments" in raw and isinstance(raw.get("comments"), list))
+    ):
+        gaps.append("journals")
+    if "attachments" not in raw or not isinstance(raw.get("attachments"), list):
+        gaps.append("attachments")
+    return gaps
 
 
 def _extract_issue_list(loaded: Any) -> list[dict[str, Any]]:

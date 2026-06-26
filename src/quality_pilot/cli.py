@@ -5,10 +5,12 @@ import json
 import re
 import subprocess
 import sys
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 from urllib import parse
 
+from . import config as config_module
 from .config import (
     CONFIG_FILE,
     DEFAULT_PROJECT_WORKSPACE,
@@ -34,14 +36,17 @@ from .case_generation import (
 from .contracts import ContractError, list_contract_paths, load_contract, load_contracts, select_contracts
 from .fix_issues import FixIssueError, fix_status, plan_fix_issue, run_fix_issue, submit_fix_pr
 from .gitea import GiteaError
-from .hermes_mcp import hermes_mcp_readiness
+from .hermes_mcp import hermes_mcp_readiness, persist_hermes_mcp_status_from_env
 from .issues import IssueSyncError, dedupe_issues, issue_status, issue_sync_readiness, show_issue, sync_issues
 from .pipeline import PIPELINE_ORDER, run_close_loop
 from .publishing import PublishError, apply_publish_plan, plan_publish, publish_status
 from .redmine import RedmineError, redmine_readiness, sync_redmine_issues
-from .reports import load_latest_results, render_status_report
+from .reports import load_latest_payload, load_latest_results, render_status_report
 from .runner import RunContext, run_case, utc_now
+from .runtime_profile import runtime_profile_status
+from .state_audit import audit_project_state, audit_summary
 from .subagents import (
+    DEFAULT_OPEN_WEBUI_API_KEY_ENV,
     DEFAULT_OPEN_WEBUI_ENDPOINT,
     DEFAULT_SUBAGENT_PROFILE,
     DEFAULT_SUBAGENT_PROVIDER,
@@ -153,6 +158,7 @@ def cmd_init_project(args: argparse.Namespace) -> int:
     issue_sync = None
     wiki_sync = None
     subagents = None
+    runtime_profile = None
     config_error = None
     if paths.config.exists():
         try:
@@ -160,6 +166,7 @@ def cmd_init_project(args: argparse.Namespace) -> int:
             issue_sync = issue_sync_readiness(config)
             wiki_sync = wiki_readiness(config)
             subagents = subagent_status(config)
+            runtime_profile = runtime_profile_status(config)
         except QAConfigError as exc:
             config_error = {"error": exc.error, "message": exc.message, **exc.details}
 
@@ -172,6 +179,7 @@ def cmd_init_project(args: argparse.Namespace) -> int:
         "issue_sync": issue_sync,
         "wiki_sync": wiki_sync,
         "subagents": subagents,
+        "runtime_profile": runtime_profile,
         "config_error": config_error,
         "embedded_tool_checkout_detected": is_quality_pilot_source_checkout(root / LEGACY_PROJECT_WORKSPACE),
     }
@@ -284,13 +292,17 @@ def cmd_status(args: argparse.Namespace) -> int:
     issue_sync = None
     wiki_sync = None
     config_error = None
+    runtime_profile = None
     if config_exists:
         try:
             config = load_project_config(root)
             issue_sync = issue_sync_readiness(config)
             wiki_sync = wiki_readiness(config)
             subagents = subagent_status(config)
+            runtime_profile = runtime_profile_status(config)
             if not issue_sync.get("issue_sync_ready"):
+                payload_status = "warn"
+            if runtime_profile.get("needs_user_input"):
                 payload_status = "warn"
         except QAConfigError as exc:
             payload_status = "error"
@@ -324,6 +336,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         "issue_sync": issue_sync,
         "wiki_sync": wiki_sync,
         "subagents": subagents,
+        "runtime_profile": runtime_profile,
     }
     return print_json(attach_readiness(payload, build_readiness(issue_sync=issue_sync, wiki_sync=wiki_sync)))
 
@@ -331,13 +344,17 @@ def cmd_status(args: argparse.Namespace) -> int:
 def cmd_doctor(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
     checks: list[dict[str, Any]] = []
+    fix_result = {"requested": False, "applied": False, "actions": []}
     try:
+        if args.fix:
+            fix_result = _doctor_fix_config(root, args.config)
         config = load_project_config(root, args.config)
         checks.append({"name": "config", "status": "PASS", "path": str(config.path)})
         for name, path in config.paths.as_dict().items():
             if name in {"root", "config"}:
                 continue
             checks.append({"name": f"path.{name}", "status": "PASS" if path.exists() else "WARN", "path": str(path)})
+        hermes_status_persist = persist_hermes_mcp_status_from_env(config)
         hermes_ready = hermes_mcp_readiness(config)
         checks.extend(hermes_ready.get("checks", []))
         readiness = issue_sync_readiness(config)
@@ -346,6 +363,29 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         checks.extend(redmine_ready.get("checks", []))
         subagents = subagent_status(config)
         checks.extend(subagents.get("checks", []))
+        runtime_profile = runtime_profile_status(config)
+        checks.append({
+            "name": "runtime.profile",
+            "status": "WARN" if runtime_profile.get("needs_user_input") else "PASS",
+            "message": (
+                "Runtime profile needs user confirmation after repo analysis."
+                if runtime_profile.get("needs_user_input")
+                else "Runtime profile is configured."
+            ),
+            "missing_fields": runtime_profile.get("missing_fields", []),
+            "suggested_primary_entrypoint": runtime_profile.get("repo_analysis", {}).get("suggested_primary_entrypoint"),
+        })
+        state_audit = audit_project_state(config)
+        if state_audit.get("semantic_valid"):
+            checks.append({"name": "state.audit", "status": "PASS", "message": "Overlay state is semantically consistent."})
+        else:
+            checks.append({
+                "name": "state.audit",
+                "status": "WARN",
+                "message": "Overlay state has semantic blockers or warnings.",
+                "finding_counts": state_audit.get("finding_counts", {}),
+                "blockers": state_audit.get("blockers", []),
+            })
         wiki_ready = wiki_readiness(config)
         if wiki_ready.get("remote_write_ready"):
             checks.append({"name": "wiki.remote_write", "status": "PASS", "page": wiki_ready.get("page")})
@@ -364,14 +404,190 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             "tool": "quality-pilot",
             "checks": checks,
             "hermes_mcp": hermes_ready,
+            "hermes_mcp_status_persist": hermes_status_persist,
             "issue_sync": readiness,
             "redmine_sync": redmine_ready,
             "subagents": subagents,
+            "runtime_profile": runtime_profile,
+            "state_audit": audit_summary(state_audit),
             "wiki_sync": wiki_ready,
+            "fix": fix_result,
         }
+        if runtime_profile.get("needs_user_input"):
+            payload["input_required"] = True
+            payload["interaction"] = {
+                "type": "needs_input",
+                "title": "Runtime profile setup",
+                "field": "payload.hermes_needs_input",
+                "handler": "clarify",
+            }
+            payload["hermes_needs_input"] = {
+                "status": "required",
+                "title": "Runtime profile setup",
+                "language": "zh-Hant",
+                "mode": "questionnaire",
+                "reason": "runtime_profile_missing",
+                "preferred_mechanism": "clarify",
+                "clarify": {
+                    "tool": "clarify",
+                    "mode": "one_question_at_a_time",
+                    "question_field": "prompt",
+                },
+                "questions": runtime_profile.get("questions", []),
+                "answer_format": (
+                    "請用條列式回覆，例如：\n"
+                    "- binary/runner/API: ...\n"
+                    "- fixture/config: ...\n"
+                    "- credential env: ...\n"
+                    "- target/resource: ...\n"
+                    "- side-effect boundary: ..."
+                ),
+                "ui_hint": "Call Hermes clarify after repo analysis; do not ask before repo_analysis is available.",
+                "repo_analysis": runtime_profile.get("repo_analysis", {}),
+            }
         return print_json(attach_readiness(payload, build_readiness(issue_sync=readiness, wiki_sync=wiki_ready, redmine_sync=redmine_ready, hermes_mcp=hermes_ready)))
     except QAConfigError as exc:
-        return print_json({"status": "FAIL", "error": exc.error, "message": exc.message, **exc.details}, exit_code=2)
+        return print_json({"status": "FAIL", "error": exc.error, "message": exc.message, **exc.details, "fix": fix_result}, exit_code=2)
+
+
+def _doctor_fix_config(root: Path, config_path: str | Path | None) -> dict[str, Any]:
+    if config_module.yaml is None:
+        raise QAConfigError("yaml_required", "PyYAML is required for doctor --fix")
+    path = Path(config_path).resolve() if config_path else root / CONFIG_FILE
+    actions: list[dict[str, Any]] = []
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_doctor_default_config(root, DEFAULT_PROJECT_WORKSPACE), encoding="utf-8")
+        actions.append({"id": "config_created", "changed": True, "path": _relative_or_str(path, root)})
+    else:
+        data = load_yaml(path)
+        workspace = _config_workspace(data)
+        defaults = _doctor_default_config_data(root, workspace)
+        repaired = deepcopy(data)
+        _merge_missing_config(repaired, defaults, actions)
+        _ensure_config_scalar(repaired, ["project", "name"], root.name or "example-project", actions)
+        _ensure_config_scalar(repaired, ["project", "default_branch"], detect_default_branch(root) or "main", actions)
+        _ensure_config_scalar(repaired, ["tracker", "provider"], "hermes_mcp", actions)
+        for key, value in _default_path_values(workspace).items():
+            _ensure_config_scalar(repaired, ["paths", key], value, actions)
+        policy = repaired.setdefault("policy", {})
+        if not isinstance(policy, dict):
+            policy = deepcopy(defaults.get("policy", {}))
+            repaired["policy"] = policy
+            actions.append({"id": "config_section_repaired", "changed": True, "path": "policy"})
+        if policy.get("require_write_gate") is not True:
+            policy["require_write_gate"] = True
+            actions.append({"id": "config_value_repaired", "changed": True, "path": "policy.require_write_gate"})
+        _merge_missing_config(repaired, defaults, actions)
+        _repair_invalid_env_references(repaired, actions)
+        if repaired != data:
+            path.write_text(config_module.yaml.safe_dump(repaired, allow_unicode=True, sort_keys=False), encoding="utf-8")
+            actions.append({"id": "config_updated", "changed": True, "path": _relative_or_str(path, root)})
+    config = load_project_config(root, path)
+    for name, target in config.paths.as_dict().items():
+        if name in {"root", "config"}:
+            continue
+        if not target.exists():
+            target.mkdir(parents=True, exist_ok=True)
+            actions.append({"id": "path_created", "changed": True, "name": name, "path": _relative_or_str(target, root)})
+    return {
+        "requested": True,
+        "applied": any(bool(action.get("changed")) for action in actions),
+        "actions": actions,
+        "config_path": _relative_or_str(path, root),
+        "note": "doctor --fix repairs config skeleton and directories only; Open WebUI model/API settings remain user-owned.",
+    }
+
+
+def _repair_invalid_env_references(data: Any, actions: list[dict[str, Any]], path: str = "") -> None:
+    if isinstance(data, dict):
+        for key, value in list(data.items()):
+            child_path = f"{path}.{key}" if path else str(key)
+            key_text = str(key)
+            if _is_env_reference_key(key_text) and isinstance(value, str) and value and not config_module.ENV_NAME_RE.match(value):
+                data[key] = _default_env_reference(child_path)
+                actions.append({
+                    "id": "secret_reference_repaired",
+                    "changed": True,
+                    "path": child_path,
+                    "replacement": data[key],
+                    "redacted_original": True,
+                })
+                continue
+            _repair_invalid_env_references(value, actions, child_path)
+    elif isinstance(data, list):
+        for index, item in enumerate(data):
+            _repair_invalid_env_references(item, actions, f"{path}[{index}]")
+
+
+def _is_env_reference_key(key: str) -> bool:
+    lowered = key.lower()
+    return lowered.endswith("_env") or lowered.endswith("-env") or lowered in {"api_token_env", "api_key_env"}
+
+
+def _default_env_reference(path: str) -> str:
+    if path.endswith(".api_key_env") and ".subagents.profiles." in f".{path}":
+        return DEFAULT_OPEN_WEBUI_API_KEY_ENV
+    return "QUALITY_PILOT_SECRET"
+
+
+def _doctor_default_config(root: Path, workspace: str) -> str:
+    return default_config(
+        workspace,
+        project_name=root.name or "example-project",
+        default_branch=detect_default_branch(root) or "main",
+        tracker_provider="hermes_mcp",
+    )
+
+
+def _doctor_default_config_data(root: Path, workspace: str) -> dict[str, Any]:
+    loaded = config_module.yaml.safe_load(_doctor_default_config(root, workspace)) or {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _config_workspace(data: dict[str, Any]) -> str:
+    paths = data.get("paths") if isinstance(data.get("paths"), dict) else {}
+    workspace = str(paths.get("workspace") or DEFAULT_PROJECT_WORKSPACE)
+    return workspace
+
+
+def _default_path_values(workspace: str) -> dict[str, str]:
+    return {
+        "workspace": workspace,
+        "cases": f"{workspace}/cases",
+        "runners": f"{workspace}/runners",
+        "rules": f"{workspace}/rules",
+        "issues": f"{workspace}/issues",
+        "state": f"{workspace}/state",
+        "evidence": f"{workspace}/evidence",
+        "reports": f"{workspace}/reports",
+    }
+
+
+def _merge_missing_config(target: dict[str, Any], defaults: dict[str, Any], actions: list[dict[str, Any]], prefix: str = "") -> None:
+    for key, value in defaults.items():
+        path = f"{prefix}.{key}" if prefix else str(key)
+        if key not in target or target[key] is None:
+            target[key] = deepcopy(value)
+            actions.append({"id": "config_value_added", "changed": True, "path": path})
+            continue
+        if isinstance(target[key], dict) and isinstance(value, dict):
+            _merge_missing_config(target[key], value, actions, path)
+
+
+def _ensure_config_scalar(data: dict[str, Any], path: list[str], default: str, actions: list[dict[str, Any]]) -> None:
+    current: dict[str, Any] = data
+    for key in path[:-1]:
+        value = current.get(key)
+        if not isinstance(value, dict):
+            value = {}
+            current[key] = value
+            actions.append({"id": "config_section_repaired", "changed": True, "path": key})
+        current = value
+    leaf = path[-1]
+    if not str(current.get(leaf) or "").strip():
+        current[leaf] = default
+        actions.append({"id": "config_value_repaired", "changed": True, "path": ".".join(path)})
 
 
 def cmd_config_validate(args: argparse.Namespace) -> int:
@@ -456,12 +672,23 @@ def cmd_issues_status(args: argparse.Namespace) -> int:
     try:
         config = load_project_config(Path(args.root), args.config)
         payload = issue_status(config)
+        state_audit = audit_project_state(config)
+        payload["state_audit"] = audit_summary(state_audit)
         duplicates = dedupe_issues(config)
         payload["duplicate_count"] = duplicates.get("duplicate_count", 0)
         payload["duplicates"] = duplicates.get("duplicates", [])
         payload["fix"] = fix_status(config)
         payload = attach_readiness(payload, build_readiness(issue_sync=payload.get("issue_sync", {})))
     except (QAConfigError, IssueSyncError) as exc:
+        return _error_payload(exc)
+    return print_json(payload)
+
+
+def cmd_audit_state(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        payload = audit_project_state(config)
+    except QAConfigError as exc:
         return _error_payload(exc)
     return print_json(payload)
 
@@ -582,7 +809,8 @@ def cmd_cases_generate(args: argparse.Namespace) -> int:
                 fast=True,
                 force=args.force,
             )
-        payload = _with_auto_wiki(config, payload, event="case_generation")
+        if payload.get("status") != "needs_input":
+            payload = _with_auto_wiki(config, payload, event="case_generation")
     except (QAConfigError, CaseGenerationError, IssueSyncError, RedmineError) as exc:
         return _error_payload(exc)
     return print_json(payload, exit_code=0 if payload.get("status") != "error" else 2)
@@ -853,8 +1081,9 @@ def cmd_report_status(args: argparse.Namespace) -> int:
         config = load_project_config(Path(args.root), args.config)
     except QAConfigError as exc:
         return _error_payload(exc)
-    results = load_latest_results(config.paths.state)
-    report_path = render_status_report(results, config.paths.reports / "status.md")
+    latest_payload = load_latest_payload(config.paths.state)
+    results = list(latest_payload.get("results", [])) if isinstance(latest_payload, dict) and isinstance(latest_payload.get("results"), list) else load_latest_results(config.paths.state)
+    report_path = render_status_report(results, config.paths.reports / "status.md", latest_run=latest_payload)
     return print_json({"status": "ok", "report_path": str(report_path), "case_count": len(results)})
 
 
@@ -907,6 +1136,9 @@ def cmd_subagent_configure(args: argparse.Namespace) -> int:
             profile=args.profile,
             provider=args.provider,
             endpoint=args.endpoint,
+            model=args.model,
+            api_key_env=args.api_key_env,
+            api_base=args.api_base,
             force=args.force,
         )
     except (QAConfigError, SubagentConfigError) as exc:
@@ -918,21 +1150,24 @@ def _persist_qa_test_run(config: Any, *, status: str, results: list[dict[str, An
     run_id = utc_now().replace(":", "").replace(".", "")
     config.paths.state.mkdir(parents=True, exist_ok=True)
     counts = {"PASS": 0, "FAIL": 0, "BLOCK": 0, "ABORT": 0, "NOT_RUN": 0}
+    partial_counts = {"PASS": 0, "FAIL": 0, "BLOCK": 0, "ABORT": 0, "NOT_RUN": 0}
     for result in results:
         key = str(result.get("status", "BLOCK"))
-        counts[key] = counts.get(key, 0) + 1
-    report_path = render_status_report(results, config.paths.reports / "status.md")
+        target = partial_counts if result.get("partial_probe") else counts
+        target[key] = target.get(key, 0) + 1
     latest_run_json = config.paths.state / "latest-run.json"
     payload = {
         "status": status,
         "run_id": run_id,
         "case_counts": counts,
+        "partial_probe_counts": partial_counts,
         "results": results,
         "latest_run_json": _relative_or_str(latest_run_json, config.root),
-        "report_path": _relative_or_str(report_path, config.root),
         "tracker_writes": {"created": 0, "updated": 0, "blocked_by_gate": 0},
         "source": "cases",
     }
+    report_path = render_status_report(results, config.paths.reports / "status.md", latest_run=payload)
+    payload["report_path"] = _relative_or_str(report_path, config.root)
     latest_run_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     return payload
 
@@ -982,6 +1217,8 @@ PUBLIC_COMMANDS = [
     "/quality-pilot help",
     "/quality-pilot setup",
     "/quality-pilot doctor",
+    "/quality-pilot doctor --fix",
+    "/quality-pilot audit state",
     "/quality-pilot issues sync",
     "/quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]",
     "/quality-pilot issues status",
@@ -1058,7 +1295,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = sub.add_parser("doctor", help="Check install, config, paths, and secret references")
     _add_root_config(doctor)
+    doctor.add_argument("--fix", action="store_true", help="Repair missing safe config skeleton and overlay directories before checking")
     doctor.set_defaults(func=cmd_doctor)
+
+    audit = sub.add_parser("audit", help="Audit local overlay state consistency")
+    audit_sub = audit.add_subparsers(dest="audit_command", required=True, parser_class=QualityPilotArgumentParser)
+    audit_state = audit_sub.add_parser("state", help="Show semantic blockers across cases, issues, evidence, reports, MCP, and subagents")
+    _add_root_config(audit_state)
+    audit_state.set_defaults(func=cmd_audit_state)
 
     issues = sub.add_parser("issues", help="Issue sync, status, show, and fix commands")
     issues_sub = issues.add_subparsers(dest="issues_command", required=True, parser_class=QualityPilotArgumentParser)
@@ -1151,8 +1395,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_root_config(subagent_configure_cmd)
     subagent_configure_cmd.add_argument("--profile", default=DEFAULT_SUBAGENT_PROFILE, help="Subagent profile name")
     subagent_configure_cmd.add_argument("--provider", default=DEFAULT_SUBAGENT_PROVIDER, choices=["open_webui"], help="Subagent provider type")
-    subagent_configure_cmd.add_argument("--endpoint", default=DEFAULT_OPEN_WEBUI_ENDPOINT, help="Open WebUI endpoint for the profile")
-    subagent_configure_cmd.add_argument("--force", action="store_true", help="Reset user-owned subagent content fields to blanks")
+    subagent_configure_cmd.add_argument("--endpoint", default=None, help="Open WebUI endpoint; may include ?model=<name>")
+    subagent_configure_cmd.add_argument("--model", default=None, help="Optional model name when not supplied in the endpoint query")
+    subagent_configure_cmd.add_argument("--api-base", default=None, help="Optional Open WebUI/OpenAI-compatible API base URL")
+    subagent_configure_cmd.add_argument("--api-key-env", default=None, help="Optional environment variable name containing the Open WebUI API key")
+    subagent_configure_cmd.add_argument("--force", action="store_true", help="Reset user-owned subagent model/API fields to blanks")
     subagent_configure_cmd.set_defaults(func=cmd_subagent_configure)
 
     publish = sub.add_parser("publish", help="Plan or apply gated Gitea wiki/issues writes")

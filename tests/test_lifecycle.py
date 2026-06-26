@@ -8,8 +8,10 @@ from io import StringIO
 from pathlib import Path
 
 from quality_pilot import hermes
+from quality_pilot import config as config_module
 from quality_pilot.cli import main
 from quality_pilot.config import load_project_config, load_yaml
+from quality_pilot.case_generation import generate_cases_from_issues
 from quality_pilot.fix_issues import submit_fix_pr
 from quality_pilot.policy_pack import policy_pack
 
@@ -24,6 +26,7 @@ class LifecycleTest(unittest.TestCase):
     def init_gitea_project(self, tmp: str) -> Path:
         root = Path(tmp)
         self.run_cli(["setup", "--root", tmp])
+        self.write_runtime_profile(root)
         self.write_hermes_mcp_status(root)
         return root
 
@@ -34,6 +37,28 @@ class LifecycleTest(unittest.TestCase):
         status_path = root / ".quality-pilot-project" / "state" / "hermes-mcp" / "status.json"
         status_path.parent.mkdir(parents=True, exist_ok=True)
         status_path.write_text(json.dumps({"servers": servers or ["gitea", "redmine"]}), encoding="utf-8")
+
+    def write_runtime_profile(self, root: Path, *, entrypoint: str = "python3") -> None:
+        config_path = root / ".quality-pilot.yaml"
+        data = load_yaml(config_path)
+        data["runtime"] = {
+            "primary_entrypoint": entrypoint,
+            "binary_env": "QUALITY_PILOT_BINARY",
+            "target_host_env": "QUALITY_PILOT_TARGET_HOST",
+            "fixture_paths": [],
+            "credential_envs": [],
+            "side_effect_boundary": "Read-only local smoke probes only; no network, tracker, source, or lab writes.",
+        }
+        config_path.write_text(config_module.yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+    def assert_no_placeholder_command(self, command: str) -> None:
+        self.assertNotIn("__quality_pilot_invalid_command__", command)
+        self.assertNotIn("repo-only probe", command)
+        self.assertNotIn("AI Quality Pilot safe repo probe", command)
+        self.assertNotIn("python3 -c", command)
+        self.assertNotIn("compileall", command)
+        self.assertNotIn("go test", command)
+        self.assertNotIn("go run", command)
 
     def write_issues(self, root: Path) -> Path:
         issues = [
@@ -56,6 +81,23 @@ class LifecycleTest(unittest.TestCase):
             },
         ]
         path = root / "issues.json"
+        path.write_text(json.dumps(issues), encoding="utf-8")
+        return path
+
+    def write_feature_issues(self, root: Path) -> Path:
+        issues = [
+            {
+                "number": 7,
+                "state": "open",
+                "title": "Add CSV export mode",
+                "body": "Feature request: support exporting diagnostic output as CSV.",
+                "html_url": "https://git.example.test/Redfish/irctool/issues/7",
+                "updated_at": "2026-06-08T00:00:00Z",
+                "labels": [{"name": "enhancement"}],
+                "comments": [],
+            }
+        ]
+        path = root / "feature-issues.json"
         path.write_text(json.dumps(issues), encoding="utf-8")
         return path
 
@@ -108,11 +150,27 @@ class LifecycleTest(unittest.TestCase):
                 "project": {"name": "IRCTool"},
                 "updated_on": "2026-06-08T13:00:00Z",
                 "url": "https://redmine.example.test/issues/144693",
+                "custom_fields": [],
+                "journals": [],
+                "attachments": [],
             },
         ]
         path = root / ".quality-pilot-project" / "state" / "redmine-mcp" / "issues.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"content": [{"type": "text", "text": json.dumps({"issues": issues})}]}), encoding="utf-8")
+        path.write_text(
+            json.dumps(
+                {
+                    "schema": "quality-pilot.redmine-mcp-issues.v1",
+                    "source": "hermes_redmine_mcp_live_read",
+                    "fetched_at": "2026-06-08T13:05:00Z",
+                    "requested_issue_ids": [144780, 144693],
+                    "include": ["description", "custom_fields", "journals", "attachments"],
+                    "payload_completeness": "full",
+                    "issues": issues,
+                }
+            ),
+            encoding="utf-8",
+        )
         return path
 
     def write_issue_case(self, root: Path) -> None:
@@ -132,6 +190,128 @@ expected: CLI help path remains callable.
 """,
             encoding="utf-8",
         )
+
+    def test_setup_and_doctor_analyze_repo_before_runtime_questions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pyproject.toml").write_text(
+                """[project]
+name = "demo"
+
+[project.scripts]
+democtl = "demo.cli:main"
+""",
+                encoding="utf-8",
+            )
+
+            code, setup = self.run_cli(["setup", "--root", tmp, "--json"])
+
+            self.assertEqual(code, 0)
+            runtime = setup["runtime_profile"]
+            self.assertEqual(runtime["status"], "needs_user_confirmation")
+            self.assertEqual(runtime["repo_analysis"]["suggested_primary_entrypoint"], "democtl")
+            self.assertIn("primary_entrypoint", runtime["missing_fields"])
+            config_yaml = load_yaml(root / ".quality-pilot.yaml")
+            self.assertIn("runtime", config_yaml)
+            self.assertEqual(config_yaml["runtime"]["binary_env"], "QUALITY_PILOT_BINARY")
+
+            code, doctor = self.run_cli(["doctor", "--root", tmp, "--json"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(doctor["runtime_profile"]["repo_analysis"]["suggested_primary_entrypoint"], "democtl")
+            check = next(item for item in doctor["checks"] if item["name"] == "runtime.profile")
+            self.assertEqual(check["status"], "WARN")
+            self.assertEqual(doctor["hermes_needs_input"]["reason"], "runtime_profile_missing")
+            prompts = [item["prompt"] for item in doctor["hermes_needs_input"]["questions"]]
+            self.assertTrue(any("democtl" in prompt for prompt in prompts))
+            self.assertTrue(any("\n- " in prompt for prompt in prompts))
+
+    def test_cases_generate_uses_inferred_repo_executable_without_asking_for_entrypoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "go.mod").write_text("module example.test/demo\n\ngo 1.22\n", encoding="utf-8")
+            (root / "cmd" / "democtl").mkdir(parents=True)
+            binary = root / "cmd" / "democtl" / "democtl"
+            binary.write_text("#!/bin/sh\nprintf 'democtl help\\n'\n", encoding="utf-8")
+            binary.chmod(0o755)
+
+            code, setup = self.run_cli(["setup", "--root", tmp, "--json"])
+            self.assertEqual(code, 0)
+            self.assertEqual(setup["runtime_profile"]["status"], "ready_inferred")
+            self.assertFalse(setup["runtime_profile"]["needs_user_input"])
+            self.assertEqual(setup["runtime_profile"]["effective"]["primary_entrypoint"], "cmd/democtl/democtl")
+
+            code, generated = self.run_cli([
+                "cases",
+                "generate",
+                "--root",
+                tmp,
+                "--init",
+                "--profile",
+                "cli",
+                "--count",
+                "1",
+                "--json",
+            ])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(generated["status"], "ok")
+            self.assertEqual(generated["generated_count"], 1)
+            self.assertNotIn("hermes_needs_input", generated)
+            case_yaml = load_yaml(root / generated["generated"][0]["path"])
+            command = case_yaml["commands"][0]["run"]
+            self.assertIn("cmd/democtl/democtl", command)
+            self.assert_no_placeholder_command(command)
+
+    def test_issue_case_generation_uses_runtime_binary_not_developer_or_repo_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.init_gitea_project(tmp)
+            (root / "cmd" / "democtl").mkdir(parents=True)
+            binary = root / "cmd" / "democtl" / "democtl"
+            binary.write_text("#!/bin/sh\nprintf 'democtl help\\n'\n", encoding="utf-8")
+            binary.chmod(0o755)
+            self.write_runtime_profile(root, entrypoint="cmd/democtl/democtl")
+            issues = [
+                {
+                    "number": 8,
+                    "state": "open",
+                    "title": "Runtime command fails after export",
+                    "body": "Command: go test ./internal/export -run TestCSVExport\n\nPlease verify this through the user-facing binary.",
+                    "html_url": "https://git.example.test/Redfish/irctool/issues/8",
+                    "updated_at": "2026-06-26T00:00:00Z",
+                    "labels": [{"name": "bug"}],
+                    "comments": [],
+                }
+            ]
+            issues_json = root / "issue-with-dev-command.json"
+            issues_json.write_text(json.dumps(issues), encoding="utf-8")
+            self.run_cli(["issues", "sync", "--root", tmp, "--issues-json", str(issues_json)])
+
+            payload = generate_cases_from_issues(load_project_config(root), issue_id=8)
+
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(len(payload["generated"]), 1)
+            case_yaml = load_yaml(root / payload["generated"][0]["path"])
+            command = case_yaml["commands"][0]["run"]
+            self.assertIn("cmd/democtl/democtl", command)
+            self.assert_no_placeholder_command(command)
+            self.assertEqual(case_yaml["quality_pilot"]["executable_scope"], "runtime_binary_safe_probe")
+            self.assertEqual(case_yaml["quality_pilot"]["safe_command_source"], "runtime_profile_primary_entrypoint")
+            self.assertIn("go test ./internal/export", case_yaml["quality_pilot"]["rejected_repro_command"])
+
+    def test_issue_case_generation_requires_runtime_profile_instead_of_repo_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.run_cli(["setup", "--root", tmp])
+            issues_json = self.write_feature_issues(root)
+            self.run_cli(["issues", "sync", "--root", tmp, "--issues-json", str(issues_json)])
+
+            payload = generate_cases_from_issues(load_project_config(root), issue_id=7)
+
+            self.assertEqual(payload["status"], "needs_input")
+            self.assertEqual(payload["generated_count"], 0)
+            self.assertEqual(payload["interaction_scope"], "runtime_profile_required")
+            self.assertFalse(any((root / ".quality-pilot-project" / "cases").glob("ISSUE-*.yaml")))
 
     def test_issues_sync_removes_closed_mirror_and_writes_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -185,6 +365,35 @@ expected: CLI help path remains callable.
             self.assertIn("QUALITY_PILOT_GITEA_MCP_ISSUES_JSON", payload["message"])
             self.assertNotIn("QUALITY_PILOT_" + "TRACKER_TOKEN", payload["message"])
 
+    def test_redmine_sync_rejects_legacy_or_trimmed_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.init_gitea_project(tmp)
+            path = root / ".quality-pilot-project" / "state" / "redmine-mcp" / "issues.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(
+                    {
+                        "issues": [
+                            {
+                                "id": 145085,
+                                "subject": "Sensor list fails after cold boot",
+                                "description": "Short stale summary only.",
+                                "updated_on": "2026-06-24T06:17:57Z",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            code, payload = self.run_cli(["issues", "sync", "--root", tmp, "--redmine-issues", "145085", "--json"])
+
+            self.assertEqual(code, 2)
+            self.assertEqual(payload["error"], "RedmineError")
+            self.assertIn("redmine_mcp_snapshot_unverified", payload["message"])
+            self.assertIn("schema=quality-pilot.redmine-mcp-issues.v1", payload["message"])
+            self.assertFalse((root / ".quality-pilot-project" / "issues" / "redmine-145085.md").exists())
+
     def test_issues_sync_redmine_issues_writes_local_mirrors_and_gitea_create_request(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self.init_gitea_project(tmp)
@@ -209,6 +418,9 @@ expected: CLI help path remains callable.
             self.assertEqual(payload["gitea_issue_candidate_count"], 2)
             self.assertEqual(payload["remote_write"], "needs_mcp_apply")
             self.assertEqual(payload["blocked_by_gate"], 0)
+            self.assertEqual(payload["qa_summary"]["text_generation"]["task"], "redmine_issue_summary")
+            self.assertEqual(payload["qa_summary"]["issues"][0]["redmine_issue_id"], 144780)
+            self.assertIn("irctool sensors --login lab.yaml", payload["qa_summary"]["issues"][0]["reproduction"])
             self.assertTrue((root / ".quality-pilot-project" / "issues" / "redmine-144780.md").exists())
             self.assertTrue((root / ".quality-pilot-project" / "issues" / "gitea-candidates" / "redmine-144780.md").exists())
             self.assertTrue((root / ".quality-pilot-project" / "state" / "redmine-import.json").exists())
@@ -216,8 +428,13 @@ expected: CLI help path remains callable.
             self.assertEqual(state["schema"], "quality-pilot.redmine-gitea-sync-state.v1")
             self.assertEqual(state["issue_candidates"][0]["action"], "create_gitea_issue_candidate")
             self.assertTrue(state["issue_candidates"][0]["write_gate_result"]["allowed"])
+            self.assertEqual(state["issue_candidates"][0]["qa_text_generation"]["task"], "redmine_issue_summary")
+            self.assertEqual(state["issue_candidates"][0]["qa_summary"]["redmine_issue_id"], 144780)
             body = state["issue_candidates"][0]["body"]
             self.assertIn("## Problem", body)
+            self.assertIn("## QA Focus", body)
+            self.assertIn("Problem to verify", body)
+            self.assertIn("Missing before an executable testcase", body)
             self.assertIn("## Steps to Reproduce", body)
             self.assertIn("## Expected Result", body)
             self.assertIn("Redmine #144780", body)
@@ -247,14 +464,17 @@ expected: CLI help path remains callable.
             self.assertEqual(request["safety"]["allowed_targets"], ["issues"])
             self.assertEqual(request["actions"][0]["operation"], "gitea.issue.create")
             self.assertEqual(request["actions"][0]["redmine_issue_id"], 144780)
+            self.assertEqual(request["actions"][0]["qa_text_generation"]["task"], "redmine_issue_summary")
+            self.assertEqual(request["actions"][0]["qa_summary"]["redmine_issue_id"], 144780)
             self.assertIn("Full journal note: cold boot reproduces after AC cycle; do not shorten this text.", request["actions"][0]["body"])
             self.assertIn("Steps to reproduce:", request["actions"][0]["body"])
             self.assertNotIn("AI Quality Pilot", request["actions"][0]["body"])
             self.assertFalse((root / ".quality-pilot-project" / "cases" / "REDMINE-144780.yaml").exists())
 
-    def test_cases_generate_redmine_issues_uses_multiple_ids_directly_without_gitea_plan(self) -> None:
+    def test_cases_generate_redmine_issues_derives_safe_probes_without_user_input(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self.init_gitea_project(tmp)
+            self.write_runtime_profile(root, entrypoint="./irctool")
             self.write_redmine_issues(root)
 
             code, payload = self.run_cli([
@@ -274,13 +494,87 @@ expected: CLI help path remains callable.
             self.assertEqual(payload["imported_issue_ids"], [144780, 144693])
             self.assertEqual(payload["generated_count"], 2)
             self.assertEqual(payload["remote_write"], "not_applicable")
+            self.assertFalse(payload.get("input_required", False))
+            self.assertNotIn("interaction", payload)
+            self.assertNotIn("case_generation_blockers", payload)
+            self.assertEqual(payload["generated"][0]["safe_command_source"], "AI-derived product binary command from Redmine reproduction steps")
+            self.assertEqual(payload["generated"][0]["safe_command_source_type"], "ai_derived")
+            self.assertEqual(payload["generated"][0]["automation_confidence"], "medium")
+            self.assertTrue(payload["generated"][0]["requires_prepared_environment"])
+            self.assertEqual(payload["qa_summary"]["text_generation"]["task"], "redmine_issue_summary")
+            self.assertEqual(payload["qa_summary"]["issues"][0]["redmine_issue_id"], 144780)
             self.assertNotIn("gitea_sync_plan_path", payload)
             self.assertNotIn("gitea_sync_state_path", payload)
             self.assertNotIn("gitea_issue_candidates", payload)
-            self.assertTrue((root / ".quality-pilot-project" / "cases" / "REDMINE-144780.yaml").exists())
-            self.assertTrue((root / ".quality-pilot-project" / "cases" / "REDMINE-144693.yaml").exists())
+            case_path = root / ".quality-pilot-project" / "cases" / "REDMINE-144780.yaml"
+            self.assertTrue(case_path.exists())
+            case_yaml = load_yaml(case_path)
+            self.assertEqual(case_yaml["quality_pilot"]["safe_command_source_type"], "ai_derived")
+            self.assertEqual(case_yaml["quality_pilot"]["executable_scope"], "redmine_ai_derived_safe_probe")
+            self.assertIn("product binary", case_yaml["quality_pilot"]["safe_command_source"])
+            self.assertTrue(case_yaml["quality_pilot"]["requires_prepared_environment"])
+            self.assertTrue(any("QUALITY_PILOT_BINARY" in item for item in case_yaml["quality_pilot"]["environment_requirements"]))
+            self.assertIn('${QUALITY_PILOT_BINARY:-./irctool}', case_yaml["commands"][0]["run"])
+            self.assertIn("sensors --login", case_yaml["commands"][0]["run"])
+            self.assertIn("QUALITY_PILOT_LOGIN_FILE", case_yaml["commands"][0]["run"])
+            self.assertIn("Exact lab reproduction remains advisory", case_yaml["quality_pilot"]["follow_up_needed"][-1])
+            self.assert_no_placeholder_command(case_yaml["commands"][0]["run"])
+            second_case_yaml = load_yaml(root / ".quality-pilot-project" / "cases" / "REDMINE-144693.yaml")
+            self.assertIn("./irctool", second_case_yaml["commands"][0]["run"])
+            self.assert_no_placeholder_command(second_case_yaml["commands"][0]["run"])
+
+            chat = hermes.dispatch_chat_command("/quality-pilot cases generate --redmine-issues 144780 144693", root=root)
+            self.assertEqual(chat["exit_code"], 0)
+            self.assertEqual(chat["payload"]["status"], "ok")
+            self.assertNotIn("hermes_needs_input", chat["payload"])
+            self.assertNotIn("需要補充資訊", chat["chat_response"])
+
+    def test_cases_generate_redmine_issues_uses_user_confirmed_safe_probe_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.init_gitea_project(tmp)
+            snapshot_path = self.write_redmine_issues(root)
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            for issue in snapshot["issues"]:
+                if issue["id"] == 144780:
+                    issue["custom_fields"].append({"id": 9, "name": "Safe Probe Command", "value": "irctool --version"})
+                    issue["custom_fields"].append({"id": 10, "name": "Expected Exit Code", "value": "0"})
+                    issue["custom_fields"].append({"id": 11, "name": "Safe Probe Fixture / Environment", "value": "No lab fixture required; local Python interpreter only."})
+                    issue["custom_fields"].append({"id": 12, "name": "Pass/Fail Oracle", "value": "Command exits 0 and prints Python version."})
+                    issue["custom_fields"].append({"id": 13, "name": "Side Effect Boundary", "value": "Read-only local version check; no network, hardware, or file writes."})
+            snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+            code, payload = self.run_cli([
+                "cases",
+                "generate",
+                "--root",
+                tmp,
+                "--redmine-issues",
+                "144780",
+                "--json",
+            ])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["generated_count"], 1)
+            self.assertFalse(payload.get("input_required", False))
+            case_path = root / ".quality-pilot-project" / "cases" / "REDMINE-144780.yaml"
+            self.assertTrue(case_path.exists())
             case_yaml = load_yaml(root / ".quality-pilot-project" / "cases" / "REDMINE-144780.yaml")
             self.assertEqual(case_yaml["source"]["redmine_issue_id"], 144780)
+            self.assertEqual(case_yaml["source"]["qa_summary"]["redmine_issue_id"], 144780)
+            self.assertIn("environment", case_yaml["source"]["qa_summary"])
+            self.assertIn("reproduction", case_yaml["source"]["qa_summary"])
+            self.assertIn("observed", case_yaml["source"]["qa_summary"])
+            self.assertIn("expected", case_yaml["source"]["qa_summary"])
+            self.assertIn("evidence", case_yaml["source"]["qa_summary"])
+            self.assertIn("missing_for_executable_case", case_yaml["source"]["qa_summary"])
+            self.assertEqual(case_yaml["source"]["safe_runner"]["command"], "irctool --version")
+            self.assertEqual(case_yaml["source"]["safe_runner"]["command_source"], "Safe Probe Command")
+            self.assertEqual(case_yaml["source"]["safe_runner"]["expected_exit_code"], 0)
+            confirmed = case_yaml["source"]["safe_runner"]["user_confirmed_inputs"]
+            self.assertTrue(any("No lab fixture required" in item["value"] for item in confirmed["fixtures_environment"]))
+            self.assertTrue(any("prints Python version" in item["value"] for item in confirmed["oracle"]))
+            self.assertTrue(any("Read-only local version check" in item["value"] for item in confirmed["side_effect_boundaries"]))
             self.assertIn("Steps to reproduce:", case_yaml["source"]["redmine_message"])
             self.assertIn("Expected: populated sensor inventory should be returned after cold boot.", case_yaml["source"]["redmine_message"])
             self.assertIn("Full journal note: cold boot reproduces after AC cycle; do not shorten this text.", case_yaml["source"]["redmine_message"])
@@ -288,7 +582,127 @@ expected: CLI help path remains callable.
             self.assertIn("cold-boot-sensors.log", case_yaml["source"]["redmine_message"])
             self.assertIn("### Raw Redmine JSON", case_yaml["source"]["redmine_message"])
             self.assertNotIn("gitea_sync_plan", case_yaml["source"])
+            self.assertEqual(case_yaml["quality_pilot"]["executable_scope"], "redmine_user_confirmed_safe_probe")
+            self.assertEqual(case_yaml["quality_pilot"]["safe_command_source"], "Safe Probe Command")
+            self.assertEqual(case_yaml["quality_pilot"]["safe_runner"]["command"], "irctool --version")
             self.assertEqual(case_yaml["commands"][0]["id"], "safe_probe")
+            self.assertEqual(case_yaml["commands"][0]["run"], "irctool --version")
+            self.assertNotIn("__quality_pilot_invalid_command__", case_yaml["commands"][0]["run"])
+
+    def test_cases_generate_redmine_issues_keeps_incomplete_safe_runner_as_follow_up(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.init_gitea_project(tmp)
+            snapshot_path = self.write_redmine_issues(root)
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            for issue in snapshot["issues"]:
+                if issue["id"] == 144780:
+                    issue["custom_fields"].append({"id": 9, "name": "Safe Probe Command", "value": "irctool --version"})
+            snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+            code, payload = self.run_cli([
+                "cases",
+                "generate",
+                "--root",
+                tmp,
+                "--redmine-issues",
+                "144780",
+                "--json",
+            ])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["generated_count"], 1)
+            case_path = root / ".quality-pilot-project" / "cases" / "REDMINE-144780.yaml"
+            self.assertTrue(case_path.exists())
+            case_yaml = load_yaml(case_path)
+            self.assertEqual(case_yaml["quality_pilot"]["safe_command_source_type"], "user_confirmed")
+            self.assertEqual(case_yaml["commands"][0]["run"], "irctool --version")
+            follow_up = case_yaml["quality_pilot"]["follow_up_needed"]
+            self.assertIn("fixtures, environment, credentials, or explicit none-required note", follow_up)
+            self.assertIn("pass/fail oracle or expected result", follow_up)
+            self.assertIn("side-effect boundaries", follow_up)
+            self.assertNotIn("__quality_pilot_invalid_command__", case_yaml["commands"][0]["run"])
+
+    def test_cases_generate_redmine_issues_rejects_developer_safe_command_and_uses_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.init_gitea_project(tmp)
+            snapshot_path = self.write_redmine_issues(root)
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            for issue in snapshot["issues"]:
+                if issue["id"] == 144780:
+                    issue["custom_fields"].append(
+                        {
+                            "id": 9,
+                            "name": "Safe Probe Command",
+                            "value": "go test ./internal/diaglog -run TestCollectAndFindEntry_ValidatesWaitConfigBeforeResourceInUse -count=1",
+                        }
+                    )
+            snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+            code, payload = self.run_cli([
+                "cases",
+                "generate",
+                "--root",
+                tmp,
+                "--redmine-issues",
+                "144780",
+                "--json",
+            ])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["generated_count"], 1)
+            case_path = root / ".quality-pilot-project" / "cases" / "REDMINE-144780.yaml"
+            case_yaml = load_yaml(case_path)
+            self.assertEqual(case_yaml["quality_pilot"]["safe_command_source_type"], "ai_derived")
+            self.assertEqual(case_yaml["quality_pilot"]["safe_runner"]["rejected_safe_command"]["source"], "Safe Probe Command")
+            self.assertIn("go test ./internal/diaglog", case_yaml["quality_pilot"]["safe_runner"]["rejected_safe_command"]["run"])
+            self.assertIn('${QUALITY_PILOT_BINARY:-./irctool}', case_yaml["commands"][0]["run"])
+            self.assertIn("sensors --login", case_yaml["commands"][0]["run"])
+            self.assertIn("QUALITY_PILOT_LOGIN_FILE", case_yaml["commands"][0]["run"])
+            self.assertNotIn("go test", case_yaml["commands"][0]["run"])
+            self.assertNotIn("go run", case_yaml["commands"][0]["run"])
+            self.assertTrue(any("Build or install the product binary" in item for item in case_yaml["quality_pilot"]["environment_requirements"]))
+
+    def test_cases_generate_redmine_issues_regenerates_stale_generic_probe_without_force(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.init_gitea_project(tmp)
+            self.write_redmine_issues(root)
+            case_path = root / ".quality-pilot-project" / "cases" / "REDMINE-144780.yaml"
+            case_path.write_text(
+                """case_id: REDMINE-144780
+title: Stale generic Redmine probe
+source:
+  type: redmine
+  provider: redmine
+  redmine_issue_id: 144780
+commands:
+  - id: safe_probe
+    run: sh -c 'go run ./cmd/irctool __quality_pilot_invalid_command__ >/dev/null 2>&1; test $? -ne 0'
+    expected_exit_code: 0
+""",
+                encoding="utf-8",
+            )
+
+            code, payload = self.run_cli([
+                "cases",
+                "generate",
+                "--root",
+                tmp,
+                "--redmine-issues",
+                "144780",
+                "--json",
+            ])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["generated_count"], 1)
+            self.assertEqual(payload["skipped_count"], 0)
+            self.assertTrue(payload["generated"][0]["regenerated_from_stale_generic_probe"])
+            case_yaml = load_yaml(case_path)
+            self.assertTrue(case_yaml["quality_pilot"]["regenerated_from_stale_generic_probe"])
+            self.assertEqual(case_yaml["quality_pilot"]["regeneration_reason"], "redmine_generic_invalid_command_probe")
+            self.assertNotIn("__quality_pilot_invalid_command__", case_yaml["commands"][0]["run"])
 
     def test_submit_fix_pr_title_includes_purpose_summary_and_issue_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -312,6 +726,35 @@ expected: CLI help path remains callable.
             self.assertIn("- ISSUE-1", body)
             self.assertNotIn("AI Quality Pilot", body)
             self.assertNotIn("/quality-pilot", body)
+
+    def test_issues_fix_supports_issue_driven_handoff_after_sync_without_case(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.init_gitea_project(tmp)
+            issues_json = self.write_feature_issues(root)
+            self.run_cli(["issues", "sync", "--root", tmp, "--issues-json", str(issues_json)])
+
+            code, payload = self.run_cli(["issues", "fix", "--root", tmp, "--issue", "7", "--json"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["status"], "handoff")
+            self.assertEqual(payload["workflow_mode"], "issue_driven_development")
+            self.assertEqual(payload["case_ids"], [])
+            self.assertEqual(payload["push_pr_blockers"], ["verification_case_required_before_pr"])
+            self.assertTrue(any("/quality-pilot cases generate --growing" in item for item in payload["instructions"]))
+
+    def test_issue_driven_fix_blocks_push_pr_until_verification_case_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.init_gitea_project(tmp)
+            issues_json = self.write_feature_issues(root)
+            self.run_cli(["issues", "sync", "--root", tmp, "--issues-json", str(issues_json)])
+
+            code, payload = self.run_cli(["issues", "fix", "--root", tmp, "--issue", "7", "--push-pr", "--json"])
+
+            self.assertEqual(code, 4)
+            self.assertEqual(payload["status"], "blocked")
+            self.assertEqual(payload["error"], "verification_case_required_before_pr")
+            self.assertEqual(payload["push_pr_blockers"], ["verification_case_required_before_pr"])
+            self.assertEqual(payload["plan"]["workflow_mode"], "issue_driven_development")
 
     def test_cases_generate_growing_review_validate_and_runs_safe_probe(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -373,6 +816,7 @@ expected: CLI help path remains callable.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self.run_cli(["setup", "--root", tmp])
+            self.write_runtime_profile(root)
             (root / "README.md").write_text(
                 """# Demo
 
@@ -435,6 +879,11 @@ democtl = "demo.cli:main"
             self.assertTrue(first_yaml["quality_pilot"]["executable"])
             self.assertEqual(first_yaml["quality_pilot"]["questions"], [])
             self.assertEqual(first_yaml["commands"][0]["id"], "safe_probe")
+            for item in generated["generated"]:
+                case_yaml = load_yaml(root / item["path"])
+                command = case_yaml["commands"][0]["run"]
+                self.assertIn("QUALITY_PILOT_BINARY", command)
+                self.assert_no_placeholder_command(command)
             self.assertIn("risk_controls", first_yaml)
             self.assertIn("init_seed", first_yaml)
 
@@ -473,6 +922,38 @@ democtl = "demo.cli:main"
             self.assertEqual(code, 0)
             self.assertEqual(second["generated_count"], 0)
             self.assertGreaterEqual(second["deduped_count"], 1)
+
+    def test_cases_generate_init_requires_runtime_profile_instead_of_placeholder_cases(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.run_cli(["setup", "--root", tmp])
+            (root / "go.mod").write_text("module example.test/demo\n\ngo 1.22\n", encoding="utf-8")
+            (root / "cmd" / "democtl").mkdir(parents=True)
+            (root / "cmd" / "democtl" / "main.go").write_text(
+                "package main\n\nfunc main() {}\n",
+                encoding="utf-8",
+            )
+
+            code, generated = self.run_cli([
+                "cases",
+                "generate",
+                "--root",
+                tmp,
+                "--init",
+                "--profile",
+                "cli",
+                "--count",
+                "1",
+                "--json",
+            ])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(generated["status"], "needs_input")
+            self.assertEqual(generated["generated_count"], 0)
+            self.assertEqual(generated["interaction_scope"], "runtime_profile_required")
+            self.assertEqual(generated["hermes_needs_input"]["reason"], "runtime_profile_missing")
+            self.assertEqual(generated["runtime_profile"]["repo_analysis"]["suggested_primary_entrypoint"], "democtl")
+            self.assertFalse(any((root / ".quality-pilot-project" / "cases").glob("GEN-*.yaml")))
 
     def test_cases_generate_init_default_uses_full_seed_dimension_map(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -636,10 +1117,10 @@ democtl = "demo.cli:main"
             code, payload = self.run_cli(["publish", "wiki", "plan", "--root", tmp, "--json"])
 
             self.assertEqual(code, 0)
-            self.assertEqual(payload["page"], "Test status (Siri)")
+            self.assertEqual(payload["page"], "Quality Pilot Test Status")
             report = (root / ".quality-pilot-project" / "reports" / "wiki-status.md").read_text(encoding="utf-8")
             for heading in [
-                "# Test status (Siri)",
+                "# Quality Pilot Test Status",
                 "## 總覽",
                 "## 測試結果明細",
                 "## 補充 partial probes（不併入正式 case counters）",
@@ -655,6 +1136,7 @@ democtl = "demo.cli:main"
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self.run_cli(["setup", "--root", tmp])
+            self.write_runtime_profile(root)
 
             code, payload = self.run_cli(["cases", "generate", "--root", tmp, "--init", "--count", "2", "--json"])
 
@@ -681,6 +1163,39 @@ democtl = "demo.cli:main"
             report = (root / ".quality-pilot-project" / "reports" / "wiki-status.md").read_text(encoding="utf-8")
             self.assertIn("| EXAMPLE-001 | CLI Smoke | PASS |", report)
 
+    def test_partial_probes_do_not_count_as_official_case_results(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.run_cli(["setup", "--root", tmp])
+            partial_path = root / ".quality-pilot-project" / "cases" / "PARTIAL-001.yaml"
+            partial_path.write_text(
+                """case_id: PARTIAL-001
+title: "Supplemental version probe"
+partial_probe: true
+commands:
+  - id: version
+    run: python3 --version
+    expected_exit_code: 0
+""",
+                encoding="utf-8",
+            )
+
+            code, payload = self.run_cli(["cases", "run", "--root", tmp, "--json"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["case_counts"]["PASS"], 1)
+            self.assertEqual(payload["partial_probe_counts"]["PASS"], 1)
+            partial_result = next(item for item in payload["results"] if item["case_id"] == "PARTIAL-001")
+            self.assertTrue(partial_result["partial_probe"])
+
+            code, report_payload = self.run_cli(["report", "status", "--root", tmp, "--json"])
+            self.assertEqual(code, 0)
+            report = Path(report_payload["report_path"]).read_text(encoding="utf-8")
+            self.assertIn("## Official Case Counters", report)
+            self.assertIn("## Partial Probes", report)
+            self.assertIn("Partial probes are supplemental diagnostics", report)
+            self.assertIn("| PARTIAL-001 | PASS |", report)
+
     def test_publish_wiki_apply_mcp_backend_creates_gated_handoff(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self.init_gitea_mcp_project(tmp)
@@ -705,7 +1220,7 @@ democtl = "demo.cli:main"
             self.assertEqual(request["operation"], "gitea.wiki.update_page")
             self.assertIsNone(request["repo"])
             self.assertEqual(request["repo_source"], "hermes_session")
-            self.assertEqual(request["page"], "Test status (Siri)")
+            self.assertEqual(request["page"], "Quality Pilot Test Status")
             self.assertIn("## 總覽", request["body"])
             self.assertEqual(request["safety"]["allowed_targets"], ["wiki"])
 
@@ -762,7 +1277,9 @@ democtl = "demo.cli:main"
             sync = hermes.dispatch_chat_command(f"/quality-pilot issues sync --issues-json {issues_json}", root=root)
             self.assertEqual(sync["status"], "ok")
             self.assertEqual(sync["payload"]["open_count"], 1)
-            self.assertEqual(sync["payload"]["next_actions"][0]["command"], "/quality-pilot cases generate --growing")
+            sync_actions = [item["command"] for item in sync["payload"]["next_actions"]]
+            self.assertEqual(sync_actions[0], "/quality-pilot issues fix --issue <id>")
+            self.assertIn("/quality-pilot cases generate --growing", sync_actions)
 
             renamed = hermes.dispatch_chat_command("/quality-pilot cases generate --from-issues", root=root)
             self.assertEqual(renamed["status"], "error")

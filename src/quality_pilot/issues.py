@@ -389,6 +389,8 @@ def build_traceability(config: ProjectConfig, snapshot: dict[str, Any]) -> list[
         issue_id = item.get("issue_id")
         case_id = str(item.get("case_id") or "")
         runnable_case_id = case_id if case_id in contracts else _case_for_issue(contracts, issue_id, item)
+        contract = contracts.get(runnable_case_id or "")
+        coverage = _coverage_for_issue(item, snapshot_case_id=case_id, runnable_case_id=runnable_case_id, contract=contract)
         result = latest.get(runnable_case_id or "")
         rows.append(
             {
@@ -397,6 +399,9 @@ def build_traceability(config: ProjectConfig, snapshot: dict[str, Any]) -> list[
                 "case_id": runnable_case_id,
                 "snapshot_case_id": case_id or None,
                 "case_runnable": bool(runnable_case_id),
+                "coverage_status": coverage["status"],
+                "coverage_reason": coverage["reason"],
+                "repair_action": coverage["repair_action"],
                 "latest_status": result.get("status") if isinstance(result, dict) else None,
                 "latest_evidence": result.get("evidence", []) if isinstance(result, dict) else [],
                 "title": item.get("title"),
@@ -452,6 +457,70 @@ def _case_for_issue(contracts: dict[str, Any], issue_id: Any, issue: dict[str, A
         if _int_or_none(source.get("redmine_issue_id")) in redmine_refs:
             return case_id
     return None
+
+
+def _coverage_for_issue(
+    issue: dict[str, Any],
+    *,
+    snapshot_case_id: str,
+    runnable_case_id: str | None,
+    contract: Any | None,
+) -> dict[str, Any]:
+    redmine_refs = _redmine_refs(issue)
+    if not runnable_case_id or contract is None:
+        return {
+            "status": "no_case",
+            "reason": "No runnable case contract exists for this active issue.",
+            "repair_action": _repair_action_for_issue(redmine_refs),
+        }
+    qa = contract.raw.get("quality_pilot") if isinstance(getattr(contract, "raw", {}).get("quality_pilot"), dict) else {}
+    questions = qa.get("questions") if isinstance(qa.get("questions"), list) else []
+    if qa.get("review_required_before_run") or questions:
+        return {
+            "status": "needs_input",
+            "reason": "The linked case exists but requires user input or review before execution.",
+            "repair_action": "/quality-pilot cases review",
+        }
+    if _contract_has_stale_redmine_probe(contract):
+        return {
+            "status": "stale_case",
+            "reason": "The linked Redmine case still uses a generic probe and is not a confirmed reproduction contract.",
+            "repair_action": _repair_action_for_issue(redmine_refs) or f"/quality-pilot cases generate --redmine-issues {_redmine_from_case_id(contract.case_id)}",
+        }
+    if snapshot_case_id and snapshot_case_id != runnable_case_id and snapshot_case_id.startswith("ISSUE-"):
+        return {
+            "status": "covered",
+            "reason": f"Recovered canonical runnable case {runnable_case_id} from stale snapshot alias {snapshot_case_id}.",
+            "repair_action": "/quality-pilot issues sync",
+        }
+    return {
+        "status": "covered",
+        "reason": "A runnable linked case contract exists.",
+        "repair_action": None,
+    }
+
+
+def _contract_has_stale_redmine_probe(contract: Any) -> bool:
+    if not str(getattr(contract, "case_id", "")).upper().startswith("REDMINE-"):
+        source = contract.raw.get("source") if isinstance(getattr(contract, "raw", {}).get("source"), dict) else {}
+        if "redmine" not in " ".join(str(source.get(key) or "") for key in ("type", "provider", "redmine_issue_id")).lower():
+            return False
+    qa = contract.raw.get("quality_pilot") if isinstance(getattr(contract, "raw", {}).get("quality_pilot"), dict) else {}
+    if str(qa.get("executable_scope") or "") == "side_effect_safe_probe" and not str(qa.get("safe_command_source") or "").strip():
+        return True
+    return any("__quality_pilot_invalid_command__" in command.run for command in getattr(contract, "commands", []))
+
+
+def _repair_action_for_issue(redmine_refs: list[int]) -> str | None:
+    if redmine_refs:
+        joined = " ".join(str(item) for item in redmine_refs)
+        return f"/quality-pilot cases generate --redmine-issues {joined}"
+    return "/quality-pilot cases generate --growing"
+
+
+def _redmine_from_case_id(case_id: str) -> str:
+    match = re.search(r"REDMINE-(\d+)", case_id, flags=re.IGNORECASE)
+    return match.group(1) if match else "<redmine_issue_id>"
 
 
 def _redmine_refs(issue: dict[str, Any]) -> list[int]:

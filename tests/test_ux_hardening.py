@@ -30,6 +30,20 @@ class UxHardeningTest(unittest.TestCase):
             status_path.write_text(json.dumps({"servers": ["gitea", "redmine"]}), encoding="utf-8")
         return root
 
+    def write_ready_mcp_snapshots(self, root: Path) -> None:
+        gitea_path = root / ".quality-pilot-project" / "state" / "gitea-mcp" / "issues.json"
+        gitea_path.parent.mkdir(parents=True, exist_ok=True)
+        gitea_path.write_text(
+            json.dumps({"schema": "quality-pilot.gitea-mcp.issues.v1", "items": []}),
+            encoding="utf-8",
+        )
+        redmine_path = root / ".quality-pilot-project" / "state" / "redmine-mcp" / "issues.json"
+        redmine_path.parent.mkdir(parents=True, exist_ok=True)
+        redmine_path.write_text(
+            json.dumps({"schema": "quality-pilot.redmine-mcp.issues.v1", "issues": []}),
+            encoding="utf-8",
+        )
+
     def write_issue_snapshot(self, root: Path, *, issue_id: int = 99, redmine_id: int = 145085, case_id: str = "ISSUE-99") -> None:
         path = root / ".quality-pilot-project" / "state" / "issues-snapshot.json"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -92,8 +106,25 @@ expected: Safe probe remains runnable.
             "status": {"name": "New"},
             "tracker": {"name": "Bug"},
             "project": {"name": "IRCTool"},
+            "updated_on": "2026-06-24T09:19:43Z",
+            "custom_fields": [],
+            "journals": [],
+            "attachments": [],
         }
-        path.write_text(json.dumps({"issues": [issue]}), encoding="utf-8")
+        path.write_text(
+            json.dumps(
+                {
+                    "schema": "quality-pilot.redmine-mcp-issues.v1",
+                    "source": "hermes_redmine_mcp_live_read",
+                    "fetched_at": "2026-06-24T09:20:00Z",
+                    "requested_issue_ids": [redmine_id],
+                    "include": ["description", "custom_fields", "journals", "attachments"],
+                    "payload_completeness": "full",
+                    "issues": [issue],
+                }
+            ),
+            encoding="utf-8",
+        )
 
     def test_t1_typo_tolerance_returns_recovery_and_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -164,6 +195,18 @@ expected: Safe probe remains runnable.
             self.assertEqual(code, 0)
             self.assertIn(payload["readiness"]["mode"], {"WRITE_READY", "WRITE_BLOCKED_MCP", "SYNC_BLOCKED", "READ_ONLY_READY"})
             self.assertIn("remote_write_ready", payload["readiness"])
+
+    def test_t6_doctor_write_ready_warn_does_not_claim_mcp_not_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.init_project(tmp)
+            self.write_ready_mcp_snapshots(root)
+
+            code, payload = self.run_cli(["doctor", "--root", tmp, "--json"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["status"], "WARN")
+            self.assertEqual(payload["readiness"]["mode"], "WRITE_READY")
+            self.assertNotIn("ux_recovery", payload)
 
     def test_t7_publish_wiki_plan_with_mcp_unknown_fails_fast_with_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

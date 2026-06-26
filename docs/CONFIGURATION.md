@@ -23,7 +23,7 @@ paths:
 
 tracker:
   provider: hermes_mcp
-  wiki_page: "Test status (Siri)"
+  wiki_page: "Quality Pilot Test Status"
   mcp:
     required_servers:
       - gitea
@@ -34,6 +34,14 @@ tracker:
     wiki_write_request_json: .quality-pilot-project/state/gitea-mcp/wiki-write-request.json
     wiki_write_result_json: .quality-pilot-project/state/gitea-mcp/wiki-write-result.json
 
+runtime:
+  primary_entrypoint: ""
+  binary_env: QUALITY_PILOT_BINARY
+  target_host_env: QUALITY_PILOT_TARGET_HOST
+  fixture_paths: []
+  credential_envs: []
+  side_effect_boundary: ""
+
 subagents:
   enabled: true
   default_profile: open-webui
@@ -42,11 +50,8 @@ subagents:
       provider: open_webui
       endpoint: "https://172.17.20.220/"
       model: ""
+      api_base: ""
       api_key_env: ""
-      workspace: ""
-      system_prompt: ""
-      user_instructions: ""
-      review_notes: ""
   text_generation:
     mode: subagent_handoff
     review_required: true
@@ -57,13 +62,7 @@ subagents:
       case_candidate_analysis: open-webui
       redmine_issue_summary: open-webui
       reviewer_notes: open-webui
-    task_prompts:
-      gitea_issue_body: ""
-      pull_request_body: ""
-      wiki_status_summary: ""
-      case_candidate_analysis: ""
-      redmine_issue_summary: ""
-      reviewer_notes: ""
+    task_prompts: {}
 
 policy:
   deterministic_first: true
@@ -77,9 +76,24 @@ policy:
   require_side_effect_safe_repro: true
 ```
 
+## Runtime Profile
+
+`runtime` is intentionally user-overridable, but AI Quality Pilot analyzes the repo first and infers it when possible. If a product executable is found under common output paths such as `cmd/<name>/<name>`, `bin/<name>`, `dist/<name>`, or the repo root, `runtime_profile.status` becomes `ready_inferred` and no entrypoint question is asked.
+
+Use these fields to prepare automation once:
+
+- `primary_entrypoint`: the user-facing runner, binary, API command, or repo-only health entrypoint.
+- `binary_env`: env var pointing to the built product binary when applicable; default `QUALITY_PILOT_BINARY`.
+- `target_host_env`: env var for a prepared target/lab resource when applicable; default `QUALITY_PILOT_TARGET_HOST`.
+- `fixture_paths`: non-secret fixture/config paths required for tests.
+- `credential_envs`: names of env vars that hold credentials; never store raw secret values.
+- `side_effect_boundary`: what the runner may and may not touch during unattended execution.
+
+`doctor` exposes `runtime_profile.repo_analysis` before asking anything. Clarify prompts are bullet-listed and ask only for details the repo analysis could not infer, such as missing runner path, credential env names, target resources, fixture/config paths, or side-effect boundaries for non-parser tests.
+
 ## Hermes MCP Readiness
 
-`/quality-pilot setup` creates the MCP-only config. `/quality-pilot doctor` then checks whether Hermes has exposed the required MCP servers.
+`/quality-pilot setup` creates the MCP-only config. `/quality-pilot doctor` then checks whether Hermes has exposed the required MCP servers. `/quality-pilot doctor --fix` repairs a missing or incomplete safe config skeleton and overlay directories before running the same checks.
 
 AI Quality Pilot accepts either:
 
@@ -113,14 +127,16 @@ Gitea issue sync is a two-step MCP handoff:
 
 Redmine import has two explicit paths:
 
-1. Hermes reads requested Redmine IDs through Redmine MCP.
-2. Hermes writes the snapshot to `tracker.mcp.redmine_issues_json`.
+1. Hermes live-reads requested Redmine IDs through Redmine MCP.
+2. Hermes writes a verified `quality-pilot.redmine-mcp-issues.v1` manifest to `tracker.mcp.redmine_issues_json`, including `fetched_at`, `requested_issue_ids`, `include: [description, custom_fields, journals, attachments]`, `payload_completeness: full`, and issue entries with full description, `updated_on`, custom fields, journals/comments, and attachments.
 3. AI Quality Pilot runs `/quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]` when those Redmine tickets should be mirrored locally and created as gated Gitea issues through Hermes MCP.
 4. AI Quality Pilot runs `/quality-pilot cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]` when linked testcase contracts should be generated directly. This command does not create a Gitea sync plan.
 
+Legacy/raw/trimmed Redmine snapshots are rejected for `--redmine-issues`; this prevents stale local snapshot data from masking newer live Redmine descriptions, journals, or attachments.
+
 ## Wiki Status
 
-`/quality-pilot setup` creates `.quality-pilot-project/rules/wiki-categories.yaml` and defaults `tracker.wiki_page` to `Test status (Siri)`.
+`/quality-pilot setup` creates `.quality-pilot-project/rules/wiki-categories.yaml` and defaults `tracker.wiki_page` to `Quality Pilot Test Status`.
 
 Wiki auto-sync is enabled by default through `policy.auto_publish_wiki: true`. It runs after case generation, test execution, close-loop execution, and successful gated write summaries.
 
@@ -146,16 +162,31 @@ AI Quality Pilot must not use MCP to create issue comments, create issues, creat
 https://172.17.20.220/
 ```
 
-AI Quality Pilot writes the endpoint and routing defaults, but leaves model, prompt, task prompt, workspace, and review note fields blank for the user to fill. This keeps project wording and reviewer expectations user-owned.
+AI Quality Pilot writes the endpoint and routing defaults. The only required user-owned model setting is either:
+
+```yaml
+endpoint: "https://172.17.20.220/?model=qwen3.6-chat-direct"
+```
+
+or:
+
+```yaml
+endpoint: "https://172.17.20.220/"
+model: "qwen3.6-chat-direct"
+api_key_env: "OPEN_WEBUI_API_KEY"
+```
+
+`api_key_env` stores only an environment variable name, never the raw API key. `task_prompts` are optional overrides for advanced users; blank task prompts do not block subagent readiness.
 
 Use:
 
 ```text
 /quality-pilot subagent status
 /quality-pilot subagent configure
+/quality-pilot doctor --fix
 ```
 
-Configured subagents may draft candidate text for Gitea issue bodies, PR bodies, Wiki summaries, Redmine summaries, case candidate analysis, and reviewer notes. They must not write files, create issues, edit Wiki pages, open PRs, close issues, or bypass AI Quality Pilot validation/write gates.
+`doctor --fix` and `subagent configure` can create the Open WebUI routing skeleton, but model/API settings remain user-owned. Configured subagents may draft candidate text for Gitea issue bodies, PR bodies, Wiki summaries, Redmine summaries, case candidate analysis, and reviewer notes. They must not write files, create issues, edit Wiki pages, open PRs, close issues, or bypass AI Quality Pilot validation/write gates.
 
 ## Policy Fields
 

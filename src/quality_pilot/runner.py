@@ -80,6 +80,7 @@ def run_case(contract: CaseContract, context: RunContext, *, dry_run: bool = Fal
         "case_id": contract.case_id,
         "title": contract.title,
         "status": "NOT_RUN" if dry_run else status,
+        "partial_probe": _is_partial_probe(contract),
         "commands": command_results,
         "evidence": sorted(_relative_or_str(path, context.root) for path in case_evidence_dir.glob("*")),
         "contract_hash": contract.contract_hash,
@@ -97,6 +98,12 @@ def run_case(contract: CaseContract, context: RunContext, *, dry_run: bool = Fal
 def _review_required_before_run(contract: CaseContract) -> bool:
     qa = contract.raw.get("quality_pilot") if isinstance(contract.raw.get("quality_pilot"), dict) else {}
     return bool(qa.get("review_required_before_run"))
+
+
+def _is_partial_probe(contract: CaseContract) -> bool:
+    qa = contract.raw.get("quality_pilot") if isinstance(contract.raw.get("quality_pilot"), dict) else {}
+    wiki = contract.raw.get("wiki") if isinstance(contract.raw.get("wiki"), dict) else {}
+    return bool(contract.raw.get("partial_probe") or qa.get("partial_probe") or wiki.get("partial_probe"))
 
 
 def evaluate_swqa_gate(contract: CaseContract, command_results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -152,6 +159,7 @@ def _blocked_case(contract: CaseContract, root: Path, evidence_dir: Path, starte
         "case_id": contract.case_id,
         "title": contract.title,
         "status": "BLOCK",
+        "partial_probe": _is_partial_probe(contract),
         "commands": command_results,
         "evidence": [],
         "contract_hash": contract.contract_hash,

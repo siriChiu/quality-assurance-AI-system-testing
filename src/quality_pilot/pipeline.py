@@ -66,9 +66,10 @@ def run_close_loop(config: ProjectConfig, *, case_id: str | None = None, dry_run
         _mark(steps, "deduplicate_issues", "PASS", {"planned_writes": 0})
         _mark(steps, "write_gate", "PASS", {"blocked_by_gate": blocked_by_gate})
         _mark(steps, "publish_wiki_status", "PASS", {"mode": "wiki_status_board"})
-        report_path = render_status_report(results, config.paths.reports / "status.md")
+        payload = _summary_payload(run_id, status, steps, results, config.paths.reports / "status.md", blocked_by_gate, gate_results)
+        report_path = render_status_report(results, config.paths.reports / "status.md", latest_run=payload)
+        payload["report_path"] = str(report_path)
         _mark(steps, "render_reports", "PASS", {"report_path": str(report_path)})
-        payload = _summary_payload(run_id, status, steps, results, report_path, blocked_by_gate, gate_results)
         latest_run_json = config.paths.state / "latest-run.json"
         payload["latest_run_json"] = _relative_or_str(latest_run_json, config.root)
         _mark(steps, "persist_state", "PASS", {"latest_run_json": payload["latest_run_json"]})
@@ -105,12 +106,16 @@ def _summary_payload(
     gate_results: list[dict[str, Any]],
 ) -> dict[str, Any]:
     counts = {"PASS": 0, "FAIL": 0, "BLOCK": 0, "ABORT": 0, "NOT_RUN": 0}
+    partial_counts = {"PASS": 0, "FAIL": 0, "BLOCK": 0, "ABORT": 0, "NOT_RUN": 0}
     for result in results:
-        counts[str(result.get("status", "BLOCK"))] = counts.get(str(result.get("status", "BLOCK")), 0) + 1
+        key = str(result.get("status", "BLOCK"))
+        target = partial_counts if result.get("partial_probe") else counts
+        target[key] = target.get(key, 0) + 1
     return {
         "status": status,
         "run_id": run_id,
         "case_counts": counts,
+        "partial_probe_counts": partial_counts,
         "steps": steps,
         "results": results,
         "latest_run_json": None,

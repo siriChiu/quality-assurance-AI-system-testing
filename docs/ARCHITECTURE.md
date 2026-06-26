@@ -68,11 +68,11 @@ The policy pack is intentionally generic. It defines stable dimensions such as e
 
 `cases generate --growing` builds `.quality-pilot-project/state/growth-context.json` from repo metadata, issue snapshots, PR references, latest run, publish plan, existing cases, runners, and rules. It then writes `source.type: growth` executable case contracts under `.quality-pilot-project/cases/`.
 
-`--generated_count <max>` is the explicit generation limit for users who want a smaller batch. `--fast` switches case generation to autonomous strict-safe defaults: AI Quality Pilot asks no interactive category questions, records its assumptions, and chooses repo-only/help/parser/build probes before any state-changing operation.
+`--generated_count <max>` is the explicit generation limit for users who want a smaller batch. `--fast` switches case generation to autonomous strict-safe defaults after the runtime profile has been confirmed. If the runtime profile is missing, case generation stops with `needs_input`; repo-only metadata checks remain readiness probes and are not written as placeholder testcase contracts.
 
 Hermes may use a separate growth session to analyze the context, but that session may only produce candidate JSON. AI Quality Pilot validates candidate schema, dedupe fingerprints, secret leakage, internal prompt leakage, dangerous `.qa` runtime paths, and command fields before writing YAML.
 
-Long human-facing text can also be delegated to a configured subagent as candidate-only generation. The default profile is Open WebUI at `https://172.17.20.220/`, with model and prompt content intentionally left blank for the user to fill. Subagents may draft Gitea issue bodies, PR bodies, Wiki summaries, Redmine summaries, case candidate analysis, and reviewer notes; they must not write files, create tracker records, update Wiki pages, open PRs, or bypass validation/write gates.
+Long human-facing text can also be delegated to a configured subagent as candidate-only generation. The default profile is Open WebUI at `https://172.17.20.220/`; the user only needs to provide a model through `?model=<name>` in the endpoint or the separate `model` field. Optional API credentials are referenced through `api_key_env`, never stored as raw secrets. Subagents may draft Gitea issue bodies, PR bodies, Wiki summaries, Redmine summaries, case candidate analysis, and reviewer notes; they must not write files, create tracker records, update Wiki pages, open PRs, or bypass validation/write gates.
 
 ## Invariants
 

@@ -31,6 +31,8 @@ def plan_fix_issue(config: ProjectConfig, *, issue_id: int) -> dict[str, Any]:
     branch = f"{gitea.branch_prefix}{issue_id}"
     case_ids = _case_ids_for_issue(config, issue_id, issue)
     recovered_case_ids = _recoverable_case_ids(config, issue_id, issue)
+    declared_case_id = str(issue.get("case_id") or "").strip() if isinstance(issue, dict) else ""
+    workflow_mode = "case_driven_fix" if case_ids else "issue_driven_development"
     blockers: list[str] = []
     if not snapshot.get("synced_at"):
         blockers.append("issue_sync_required")
@@ -38,27 +40,29 @@ def plan_fix_issue(config: ProjectConfig, *, issue_id: int) -> dict[str, Any]:
         blockers.append("issue_not_open_or_not_synced")
     if duplicate_issue_ids:
         blockers.append("duplicate_issue_candidates")
-    if issue is not None and not case_ids:
+    if issue is not None and declared_case_id and not case_ids and not _can_start_issue_driven_without_case(issue, issue_id):
         blockers.append("handoff_case_id_not_runnable")
+    push_pr_blockers = [] if case_ids else ["verification_case_required_before_pr"]
 
     plan = {
         "schema": "quality-pilot.fix-plan.v1",
         "status": "blocked" if blockers else "ready",
+        "workflow_mode": workflow_mode,
         "issue_id": issue_id,
         "issue": issue,
         "case_ids": case_ids,
         "recovered_case_ids": recovered_case_ids,
+        "push_pr_blockers": push_pr_blockers,
         "branch": branch,
         "base_branch": config.data.get("project", {}).get("default_branch", "main"),
         "blockers": blockers,
         "duplicate_issue_ids": duplicate_issue_ids,
-        "preflight": [
-            "/quality-pilot issues sync",
-            f"/quality-pilot cases run {case_ids[0]}" if case_ids else "/quality-pilot cases generate --growing",
-            "/quality-pilot publish wiki status",
-            "/quality-pilot publish wiki plan",
-        ],
-        "handoff": "Hermes may perform the minimal code change only after this plan is ready.",
+        "preflight": _fix_preflight(case_ids),
+        "handoff": (
+            "Hermes may perform issue-driven implementation after this plan is ready; create or confirm acceptance cases before push-pr."
+            if workflow_mode == "issue_driven_development"
+            else "Hermes may perform the minimal code change only after this plan is ready."
+        ),
     }
     path = fix_plan_path(config)
     config.paths.state.mkdir(parents=True, exist_ok=True)
@@ -82,16 +86,12 @@ def run_fix_issue(config: ProjectConfig, *, issue_id: int) -> dict[str, Any]:
     payload = {
         "schema": "quality-pilot.fix-run-handoff.v1",
         "status": "handoff",
+        "workflow_mode": plan.get("workflow_mode"),
         "issue_id": issue_id,
         "branch": plan["branch"],
         "case_ids": plan["case_ids"],
-        "instructions": [
-            "Create or switch to the planned branch.",
-            "Make the minimal product code change needed for the synced open issue.",
-            "Run the linked AI Quality Pilot case contracts.",
-            "Check /quality-pilot publish wiki status, then run /quality-pilot publish wiki plan before any issue remote write.",
-            "Run /quality-pilot issues fix --issue <id> --push-pr only after tests and gate pass.",
-        ],
+        "push_pr_blockers": plan.get("push_pr_blockers", []),
+        "instructions": _fix_handoff_instructions(plan),
     }
     path = config.paths.state / FIX_RUN_NAME
     path.write_text(json_dumps(payload) + "\n", encoding="utf-8")
@@ -102,6 +102,15 @@ def submit_fix_pr(config: ProjectConfig, *, issue_id: int, dry_run: bool = False
     plan = plan_fix_issue(config, issue_id=issue_id)
     if plan["status"] != "ready":
         return {"status": "blocked", "error": "fix_plan_blocked", "plan": plan}
+    if plan.get("push_pr_blockers"):
+        return {
+            "status": "blocked",
+            "error": "verification_case_required_before_pr",
+            "issue_id": issue_id,
+            "push_pr_blockers": plan.get("push_pr_blockers", []),
+            "message": "Create or confirm acceptance cases/evidence before creating a product PR from an issue-driven handoff.",
+            "plan": plan,
+        }
     latest_report = config.paths.reports / "status.md"
     title = render_pr_title(plan)
     body = render_pr_body(plan, latest_report)
@@ -143,6 +152,42 @@ def fix_status(config: ProjectConfig) -> dict[str, Any]:
         **{name: _relative_or_str(path, config.root) for name, path in paths.items()},
         **{name.replace("_path", "_exists"): path.exists() for name, path in paths.items()},
     }
+
+
+def _fix_preflight(case_ids: list[str]) -> list[str]:
+    commands = ["/quality-pilot issues sync"]
+    if case_ids:
+        commands.append(f"/quality-pilot cases run {case_ids[0]}")
+    else:
+        commands.extend([
+            "/quality-pilot cases generate --growing",
+            "/quality-pilot cases run",
+        ])
+    commands.extend([
+        "/quality-pilot publish wiki status",
+        "/quality-pilot publish wiki plan",
+    ])
+    return commands
+
+
+def _fix_handoff_instructions(plan: dict[str, Any]) -> list[str]:
+    base = [
+        "Create or switch to the planned branch.",
+        "Make the minimal product code change needed for the synced open issue.",
+    ]
+    if plan.get("case_ids"):
+        base.append("Run the linked AI Quality Pilot case contracts.")
+    else:
+        base.extend([
+            "Treat this as issue-driven development because no runnable linked case exists yet.",
+            "Derive acceptance coverage from the synced issue, then run /quality-pilot cases generate --growing or add a focused case contract.",
+            "Run the new or relevant AI Quality Pilot cases before requesting PR creation.",
+        ])
+    base.extend([
+        "Check /quality-pilot publish wiki status, then run /quality-pilot publish wiki plan before any issue remote write.",
+        "Run /quality-pilot issues fix --issue <id> --push-pr only after tests and gate pass.",
+    ])
+    return base
 
 
 def render_pr_body(plan: dict[str, Any], report_path: Path) -> str:
@@ -294,6 +339,21 @@ def _recoverable_case_ids(config: ProjectConfig, issue_id: int, issue: dict[str,
     except Exception:
         pass
     return sorted(set(recovered))
+
+
+def _can_start_issue_driven_without_case(issue: dict[str, Any], issue_id: int) -> bool:
+    declared = str(issue.get("case_id") or "").strip()
+    if declared and declared != f"ISSUE-{issue_id}":
+        return False
+    labels = {str(label).strip().lower() for label in issue.get("labels", []) if str(label).strip()}
+    text = f"{issue.get('title') or ''}\n{issue.get('body') or ''}".lower()
+    feature_signals = {"feature", "enhancement", "task", "story", "new-feature", "request"}
+    bug_signals = {"bug", "regression", "defect", "failure"}
+    if labels & feature_signals:
+        return True
+    if labels & bug_signals:
+        return False
+    return any(token in text for token in ("feature", "enhancement", "add ", "implement ", "support "))
 
 
 def _available_case_ids(config: ProjectConfig) -> set[str]:

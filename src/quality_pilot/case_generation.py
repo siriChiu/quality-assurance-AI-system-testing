@@ -11,8 +11,15 @@ from .config import ProjectConfig, find_raw_secret_paths, json_dumps
 from .contracts import ContractError, load_contracts
 from .issues import case_id_for_issue, load_issue_snapshot
 from .policy_pack import common_questions, dimension_specs, policy_pack
-from .redmine import RedmineError, import_redmine_issues
+from .redmine import (
+    RedmineError,
+    build_redmine_qa_summary_payload,
+    import_redmine_issues,
+    redmine_issue_qa_summary,
+    redmine_safe_probe_command,
+)
 from .runner import utc_now
+from .runtime_profile import primary_runtime_binary, runtime_profile_status
 
 try:
     import yaml
@@ -47,9 +54,25 @@ def generate_cases_from_issues(
     generated: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     questions: list[dict[str, Any]] = []
+    runtime_profile = runtime_profile_status(config)
+    if runtime_profile.get("needs_user_input"):
+        return _runtime_profile_required_generation_payload(
+            source="issues",
+            mode="issues",
+            context={"issue_id": issue_id, "item_count": len(items)},
+            context_path=config.paths.state / "issues-snapshot.json",
+            root=config.root,
+            context_path_key="snapshot_path",
+            candidates=[],
+            runtime_profile=runtime_profile,
+            message=(
+                "Runtime profile must be confirmed before issue-linked executable case contracts are generated. "
+                "No placeholder case YAML was written."
+            ),
+        )
 
     for item in items:
-        contract = draft_contract_for_issue(item)
+        contract = draft_contract_for_issue(config, item)
         path = config.paths.cases / f"{contract['case_id']}.yaml"
         if path.exists() and not force:
             skipped.append({"case_id": contract["case_id"], "path": _relative_or_str(path, config.root), "reason": "exists"})
@@ -97,6 +120,23 @@ def generate_cases_from_scratch(
     resolved_profile = _resolve_profile(profile, signals)
     feature_name = _feature_name(config, feature, signals)
     policy = policy_pack()
+    runtime_profile = runtime_profile_status(config)
+    if runtime_profile.get("needs_user_input"):
+        return _runtime_profile_required_generation_payload(
+            source="from_scratch",
+            mode="from_scratch",
+            context={"feature": feature_name, "profile": profile, "repo_signals": signals},
+            context_path=config.paths.state / "scratch-context.json",
+            root=config.root,
+            context_path_key="scratch_context_path",
+            candidates=[],
+            runtime_profile=runtime_profile,
+            count=count,
+            message=(
+                "Runtime profile must be confirmed before executable scratch case contracts are generated. "
+                "No placeholder case YAML was written."
+            ),
+        )
 
     generated: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
@@ -174,6 +214,24 @@ def generate_cases_init(
     context_path.write_text(json_dumps(context) + "\n", encoding="utf-8")
 
     candidates = build_init_candidates(context, count=count)
+    runtime_profile = runtime_profile_status(config)
+    if runtime_profile.get("needs_user_input"):
+        return _runtime_profile_required_generation_payload(
+            source="init",
+            mode="init",
+            context=context,
+            context_path=context_path,
+            root=config.root,
+            context_path_key="init_context_path",
+            candidates=candidates,
+            runtime_profile=runtime_profile,
+            count=count,
+            fast=fast,
+            message=(
+                "Runtime profile must be confirmed before executable init case contracts are generated. "
+                "No placeholder case YAML was written."
+            ),
+        )
     generated: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     deduped: list[dict[str, Any]] = []
@@ -300,6 +358,28 @@ def generate_cases_growing(
         candidates = build_growth_candidates(context, count=count)
         candidate_source = "deterministic_growth_generator"
 
+    runtime_profile = runtime_profile_status(config)
+    if runtime_profile.get("needs_user_input"):
+        payload = _runtime_profile_required_generation_payload(
+            source="growth",
+            mode="growing",
+            context=context,
+            context_path=context_path,
+            root=config.root,
+            context_path_key="growth_context_path",
+            candidates=candidates,
+            runtime_profile=runtime_profile,
+            count=count,
+            fast=fast,
+            message=(
+                "Runtime profile must be confirmed before executable growth case contracts are generated. "
+                "No placeholder case YAML was written."
+            ),
+        )
+        payload["growth_seed_count"] = len(context["growth_seeds"])
+        payload["candidate_source"] = candidate_source
+        return payload
+
     generated: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     deduped: list[dict[str, Any]] = []
@@ -388,6 +468,96 @@ def generate_cases_growing(
     }
 
 
+def _runtime_profile_required_generation_payload(
+    *,
+    source: str,
+    mode: str,
+    context: dict[str, Any],
+    context_path: Path,
+    root: Path,
+    context_path_key: str,
+    candidates: list[dict[str, Any]],
+    runtime_profile: dict[str, Any],
+    count: int | None = None,
+    fast: bool = False,
+    message: str = "",
+) -> dict[str, Any]:
+    questions = runtime_profile.get("questions") if isinstance(runtime_profile.get("questions"), list) else []
+    missing_inputs = [str(item.get("prompt") or item.get("id") or "") for item in questions if isinstance(item, dict)]
+    payload = {
+        "status": "needs_input",
+        "source": source,
+        "mode": mode,
+        "fast": bool(fast),
+        "interaction_scope": "runtime_profile_required",
+        "generation_strategy": "blocked_until_runtime_profile_confirmed",
+        "generation_limit": "all_init_seed_dimension_pairs" if mode == "init" and count is None else "manual_generated_count_cap",
+        "generated_count_limit": count,
+        "requested_generated_count": count,
+        "requested_count": count,
+        "assumption_policy": (
+            "AI Quality Pilot analyzed the repo but will not create placeholder executable cases until the runtime profile is confirmed."
+        ),
+        "fast_mode_assumptions": context.get("fast_mode_assumptions", []),
+        "feature": context.get("feature"),
+        "requested_profile": context.get("requested_profile"),
+        "resolved_profile": context.get("resolved_profile"),
+        context_path_key: _relative_or_str(context_path, root),
+        "analyzed_files_count": context.get("repo_inventory", {}).get("analyzed_files_count", 0),
+        "candidate_count": len(candidates),
+        "generated": [],
+        "skipped": [],
+        "deduped": [],
+        "generated_count": 0,
+        "skipped_count": 0,
+        "deduped_count": 0,
+        "questions": [],
+        "missing_inputs": [item for item in missing_inputs if item],
+        "missing_input_count": len([item for item in missing_inputs if item]),
+        "advisory_inputs": [],
+        "advisory_input_count": 0,
+        "runtime_profile": runtime_profile,
+        "repo_analysis": runtime_profile.get("repo_analysis", {}),
+        "input_required": True,
+        "interaction": {
+            "type": "needs_input",
+            "title": "Runtime profile setup",
+            "field": "payload.hermes_needs_input",
+            "handler": "clarify",
+        },
+        "hermes_needs_input": {
+            "status": "required",
+            "title": "Runtime profile setup",
+            "language": "zh-Hant",
+            "mode": "questionnaire",
+            "reason": "runtime_profile_missing",
+            "preferred_mechanism": "clarify",
+            "clarify": {
+                "tool": "clarify",
+                "mode": "one_question_at_a_time",
+                "question_field": "prompt",
+            },
+            "questions": questions,
+            "answer_format": (
+                "請用條列式回覆，例如：\n"
+                "- binary/runner/API: ...\n"
+                "- fixture/config: ...\n"
+                "- credential env: ...\n"
+                "- target/resource: ...\n"
+                "- side-effect boundary: ..."
+            ),
+            "ui_hint": "Do not generate placeholder executable cases. Ask once for the runtime profile after repo analysis.",
+            "repo_analysis": runtime_profile.get("repo_analysis", {}),
+        },
+        "message": message,
+    }
+    if isinstance(context.get("policy_pack"), dict):
+        payload["policy_pack"] = context["policy_pack"].get("name")
+        payload["policy_dimensions"] = context["policy_pack"].get("swqa_dimensions", [])
+        payload["closed_loop_steps"] = context["policy_pack"].get("closed_loop_steps", [])
+    return payload
+
+
 def generate_cases_from_redmine_issues(
     config: ProjectConfig,
     *,
@@ -397,6 +567,23 @@ def generate_cases_from_redmine_issues(
     if not issue_ids:
         raise CaseGenerationError("--redmine-issues requires at least one issue id")
     imported = import_redmine_issues(config, issue_ids=issue_ids)
+    qa_summary = build_redmine_qa_summary_payload(config, imported["issues"])
+    runtime_profile = runtime_profile_status(config)
+    if runtime_profile.get("needs_user_input") and any(not _has_user_confirmed_redmine_runner(issue) for issue in imported["issues"]):
+        return _runtime_profile_required_generation_payload(
+            source="redmine_issues",
+            mode="redmine_issues",
+            context={"redmine_issue_ids": issue_ids, "qa_summary": qa_summary},
+            context_path=config.paths.state / "redmine-mcp" / "issues.json",
+            root=config.root,
+            context_path_key="redmine_mcp_issues_json",
+            candidates=[],
+            runtime_profile=runtime_profile,
+            message=(
+                "Runtime profile or a user-confirmed Redmine safe runner is required before Redmine executable case contracts are generated. "
+                "No placeholder case YAML was written."
+            ),
+        )
     config.paths.cases.mkdir(parents=True, exist_ok=True)
     generated: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
@@ -404,8 +591,12 @@ def generate_cases_from_redmine_issues(
         contract = draft_contract_for_redmine_issue(config, issue)
         path = config.paths.cases / f"{contract['case_id']}.yaml"
         if path.exists() and not force:
-            skipped.append({"case_id": contract["case_id"], "path": _relative_or_str(path, config.root), "reason": "exists"})
-            continue
+            if _is_stale_redmine_generic_probe(path):
+                contract.setdefault("quality_pilot", {})["regenerated_from_stale_generic_probe"] = True
+                contract.setdefault("quality_pilot", {})["regeneration_reason"] = "redmine_generic_invalid_command_probe"
+            else:
+                skipped.append({"case_id": contract["case_id"], "path": _relative_or_str(path, config.root), "reason": "exists"})
+                continue
         path.write_text(_dump_yaml(contract), encoding="utf-8")
         generated.append(
             {
@@ -415,6 +606,11 @@ def generate_cases_from_redmine_issues(
                 "draft": False,
                 "question_count": 0,
                 "swqa_dimensions": contract.get("swqa_dimensions", []),
+                "safe_command_source": contract.get("quality_pilot", {}).get("safe_command_source"),
+                "safe_command_source_type": contract.get("quality_pilot", {}).get("safe_command_source_type"),
+                "automation_confidence": contract.get("quality_pilot", {}).get("automation_confidence"),
+                "requires_prepared_environment": bool(contract.get("quality_pilot", {}).get("requires_prepared_environment")),
+                "regenerated_from_stale_generic_probe": bool(contract.get("quality_pilot", {}).get("regenerated_from_stale_generic_probe")),
             }
         )
     return {
@@ -426,12 +622,22 @@ def generate_cases_from_redmine_issues(
         "redmine_import_path": imported["import_path"],
         "mirror_paths": imported.get("mirror_paths", []),
         "remote_write": "not_applicable",
+        "qa_summary": qa_summary,
         "generated": generated,
         "skipped": skipped,
         "generated_count": len(generated),
         "skipped_count": len(skipped),
-        "message": "Redmine MCP issues were read directly and executable linked cases were generated.",
+        "message": "Redmine MCP issues were analyzed and executable linked cases were generated with user-confirmed or AI-derived product-binary probes and explicit environment requirements.",
     }
+
+
+def _is_stale_redmine_generic_probe(path: Path) -> bool:
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+    lowered = text.lower()
+    return "__quality_pilot_invalid_command__" in text and ("redmine" in lowered or "redmine_issue_id" in lowered)
 
 
 def build_growth_context(
@@ -825,14 +1031,16 @@ def validate_generated_cases(config: ProjectConfig) -> dict[str, Any]:
     }
 
 
-def draft_contract_for_issue(item: dict[str, Any]) -> dict[str, Any]:
+def draft_contract_for_issue(config: ProjectConfig, item: dict[str, Any]) -> dict[str, Any]:
     case_id = case_id_for_issue(item)
     issue_id = int(item.get("issue_id"))
     title = str(item.get("title") or f"Gitea issue #{issue_id}")
     body = str(item.get("body") or "")
     command = extract_repro_command(body)
     questions: list[str] = []
-    run = command or f"python3 -c \"print('AI Quality Pilot safe issue probe for Gitea issue #{issue_id}: no repro command was provided')\""
+    runtime_binary = primary_runtime_binary(config)
+    command_uses_runtime = bool(command and _command_uses_runtime_binary(command, runtime_binary))
+    run = command if command_uses_runtime else _runtime_binary_help_command(runtime_binary)
     policy = policy_pack()
     return {
         "case_id": case_id,
@@ -848,7 +1056,14 @@ def draft_contract_for_issue(item: dict[str, Any]) -> dict[str, Any]:
             "questions": questions,
             "review_required_before_run": False,
             "executable": True,
-            "executable_scope": "side_effect_safe_probe" if not command else "issue_reproduction_command",
+            "executable_scope": "issue_reproduction_command" if command_uses_runtime else "runtime_binary_safe_probe",
+            "safe_command_source": "issue_reproduction_command" if command_uses_runtime else "runtime_profile_primary_entrypoint",
+            "rejected_repro_command": command if command and not command_uses_runtime else "",
+            "follow_up_needed": (
+                []
+                if command_uses_runtime
+                else ["Exact issue reproduction command was missing or did not use the configured product executable; add a focused acceptance command before claiming issue coverage."]
+            ),
             "policy_pack": policy["name"],
             "closed_loop_steps": policy["closed_loop_steps"],
         },
@@ -885,12 +1100,25 @@ def draft_contract_for_issue(item: dict[str, Any]) -> dict[str, Any]:
 def draft_contract_for_redmine_issue(config: ProjectConfig, issue: dict[str, Any]) -> dict[str, Any]:
     policy = policy_pack()
     case_id = f"REDMINE-{int(issue['id'])}"
-    candidate = {
-        "feature": f"Redmine #{issue['id']}",
-        "title": issue["subject"],
-        "swqa_dimensions": ["exact_reproduction", "functional", "negative", "boundary", "side_effect_safe"],
-        "init_seed": {"surface": f"Redmine #{issue['id']}", "title": issue["subject"]},
+    safe_command = _redmine_safe_probe_or_ai_default(config, issue)
+    qa_summary = redmine_issue_qa_summary(issue)
+    safe_runner = {
+        "command": str(safe_command["run"]),
+        "command_source": safe_command.get("source"),
+        "source_type": safe_command.get("source_type", "user_confirmed"),
+        "expected_exit_code": int(safe_command.get("expected_exit_code", 0)),
+        "expected_exit_code_source": safe_command.get("expected_exit_code_source"),
+        "user_confirmed_inputs": safe_command.get("user_confirmed_inputs", {}),
+        "ai_analysis": safe_command.get("ai_analysis", {}),
+        "automation_confidence": safe_command.get("automation_confidence", "medium"),
+        "follow_up_needed": safe_command.get("follow_up_needed", []),
+        "environment_requirements": safe_command.get("environment_requirements", []),
+        "rejected_safe_command": safe_command.get("rejected_safe_command"),
     }
+    source_type = str(safe_command.get("source_type") or "user_confirmed")
+    executable_scope = "redmine_user_confirmed_safe_probe" if source_type == "user_confirmed" else "redmine_ai_derived_safe_probe"
+    environment_requirements = safe_runner["environment_requirements"]
+    requires_prepared_environment = bool(safe_command.get("requires_prepared_environment", environment_requirements))
     return {
         "case_id": case_id,
         "title": f"Redmine #{issue['id']}: {issue['subject']}",
@@ -900,6 +1128,8 @@ def draft_contract_for_redmine_issue(config: ProjectConfig, issue: dict[str, Any
             "redmine_issue_id": int(issue["id"]),
             "redmine_url": issue.get("url") or "",
             "redmine_message": issue.get("full_message") or issue.get("description") or "",
+            "qa_summary": qa_summary,
+            "safe_runner": safe_runner,
         },
         "profile": "auto",
         "feature": f"Redmine #{issue['id']}",
@@ -910,29 +1140,483 @@ def draft_contract_for_redmine_issue(config: ProjectConfig, issue: dict[str, Any
             "generation_mode": "redmine_issues",
             "review_required_before_run": False,
             "executable": True,
-            "executable_scope": "side_effect_safe_probe",
+            "executable_scope": executable_scope,
+            "safe_command_source": safe_command.get("source"),
+            "safe_command_source_type": source_type,
+            "safe_runner": safe_runner,
+            "automation_confidence": safe_runner["automation_confidence"],
+            "follow_up_needed": safe_runner["follow_up_needed"],
+            "environment_requirements": environment_requirements,
+            "requires_prepared_environment": requires_prepared_environment,
             "questions": [],
             "policy_pack": policy["name"],
             "closed_loop_steps": policy["closed_loop_steps"],
             "gates": policy["gates"],
             "triage_categories": policy["triage_categories"],
         },
-        "swqa_dimensions": candidate["swqa_dimensions"],
+        "swqa_dimensions": ["exact_reproduction", "functional", "side_effect_safe"],
         "commands": [
             {
                 "id": "safe_probe",
-                "run": _safe_probe_command(config, candidate=candidate, context={"repo_signals": inspect_repo_signals(config)}),
-                "expected_exit_code": 0,
+                "run": str(safe_command["run"]),
+                "expected_exit_code": int(safe_command.get("expected_exit_code", 0)),
+                "requires_prepared_environment": requires_prepared_environment,
             }
         ],
-        "expected": "The Redmine-reported behavior is covered first by a side-effect-safe probe, then can be strengthened with a lab runner after review.",
+        "expected": qa_summary.get("expected")
+        or "The Redmine-reported behavior is covered by the binary-based probe after the required test environment is prepared.",
         "risk_controls": [
             "redmine_mcp_snapshot_must_be_valid",
-            "gitea_issue_candidate_requires_write_gate",
-            "side_effect_safe_probe_first",
-            "do_not_publish_until_write_gate_passes",
+            "redmine_safe_probe_must_use_product_binary_or_runner",
+            "prefer_user_confirmed_safe_probe_when_present",
+            "developer_unit_test_commands_are_implementation_hints_only",
+            "environment_requirements_must_be_visible_before_free_hand_execution",
+            "record_follow_up_gaps_instead_of_blocking_generation",
         ],
     }
+
+
+def _redmine_safe_probe_or_ai_default(config: ProjectConfig, issue: dict[str, Any]) -> dict[str, Any]:
+    confirmed = redmine_safe_probe_command(issue)
+    if confirmed is not None:
+        if _is_developer_test_command(str(confirmed.get("run") or "")):
+            derived = _ai_derived_redmine_safe_probe(config, issue)
+            derived["rejected_safe_command"] = {
+                "run": confirmed.get("run"),
+                "source": confirmed.get("source"),
+                "reason": "Developer-level unit/build command is not accepted as a Redmine QA binary contract.",
+            }
+            derived.setdefault("follow_up_needed", []).append(
+                "Redmine safe command was a developer test command; provide a product binary runner only if the derived binary command is not the intended QA entrypoint."
+            )
+            derived["follow_up_needed"] = _unique_text(derived["follow_up_needed"])
+            derived.setdefault("ai_analysis", {})["rejected_safe_command"] = derived["rejected_safe_command"]
+            return derived
+        out = dict(confirmed)
+        out["source_type"] = "user_confirmed"
+        out["automation_confidence"] = "high"
+        out["environment_requirements"] = _redmine_environment_requirements(config, issue, command=str(out.get("run") or ""))
+        out["requires_prepared_environment"] = bool(out["environment_requirements"])
+        out["ai_analysis"] = {
+            "strategy": "use_redmine_user_confirmed_safe_probe",
+            "reason": "Redmine payload includes a safe probe command field.",
+        }
+        out["follow_up_needed"] = _redmine_follow_up_needed(issue, confirmed=True)
+        return out
+    return _ai_derived_redmine_safe_probe(config, issue)
+
+
+def _has_user_confirmed_redmine_runner(issue: dict[str, Any]) -> bool:
+    confirmed = redmine_safe_probe_command(issue)
+    return bool(confirmed and not _is_developer_test_command(str(confirmed.get("run") or "")))
+
+
+def _ai_derived_redmine_safe_probe(config: ProjectConfig, issue: dict[str, Any]) -> dict[str, Any]:
+    qa_summary = redmine_issue_qa_summary(issue)
+    commands = _redmine_issue_command_hints(issue)
+    command_hint = next((command for command in commands if not _is_developer_test_command(command)), commands[0] if commands else "")
+    command, analysis = _derive_side_effect_safe_command(config, issue, command_hint)
+    oracle = qa_summary.get("expected") or "AI-derived probe exits with the expected return code and exercises the safest available issue-related surface."
+    environment = qa_summary.get("environment") if isinstance(qa_summary.get("environment"), list) else []
+    evidence = qa_summary.get("evidence") if isinstance(qa_summary.get("evidence"), list) else []
+    return {
+        "run": command,
+        "source": analysis["source"],
+        "source_type": "ai_derived",
+        "expected_exit_code": 0,
+        "expected_exit_code_source": "AI-derived safe probe default",
+        "user_confirmed_inputs": {
+            "command_source": analysis["source"],
+            "expected_exit_code": 0,
+            "expected_exit_code_source": "AI-derived safe probe default",
+            "fixtures_environment": [{"field": "AI-derived", "value": value} for value in environment[:5]],
+            "oracle": [{"field": "AI-derived expected behavior", "value": str(oracle)}],
+            "side_effect_boundaries": [
+                {
+                    "field": "AI-derived safety boundary",
+                    "value": "Probe is restricted to help/parser/static repo checks and must not contact lab hardware, credentials, or external services.",
+                }
+            ],
+            "evidence_hints": [{"field": "Redmine evidence", "value": value} for value in evidence[:5]],
+        },
+        "ai_analysis": analysis,
+        "automation_confidence": analysis["automation_confidence"],
+        "environment_requirements": _redmine_environment_requirements(config, issue, command=command, analysis=analysis),
+        "requires_prepared_environment": True,
+        "follow_up_needed": _redmine_follow_up_needed(issue, confirmed=False),
+    }
+
+
+def _derive_side_effect_safe_command(config: ProjectConfig, issue: dict[str, Any], command_hint: str) -> tuple[str, dict[str, Any]]:
+    binary_hint = _redmine_binary_hint(config, command_hint)
+    if binary_hint:
+        command, binary_analysis = _redmine_binary_command_from_hint(binary_hint, command_hint)
+        if command:
+            return command, binary_analysis
+    subcommand = _subcommand_from_redmine_command(command_hint)
+    if command_hint:
+        executable = _first_command_token(command_hint)
+        if executable and not _is_developer_tool_name(executable):
+            command = _redmine_binary_help_command(executable, subcommand=subcommand)
+            return command, {
+                "strategy": "installed_or_local_binary_help_probe_from_redmine_command",
+                "source": "AI-derived product binary from Redmine reproduction command",
+                "redmine_command_hint": command_hint,
+                "selected_surface": subcommand or executable,
+                "binary": executable,
+                "automation_confidence": "low",
+                "reason": "The issue names a product executable; the generated contract requires a prebuilt binary and uses a non-mutating help probe.",
+            }
+    raise CaseGenerationError("runtime_profile_required_for_redmine_case_generation")
+
+
+def _redmine_binary_hint(config: ProjectConfig, command_hint: str) -> dict[str, Any] | None:
+    if command_hint and not _is_developer_test_command(command_hint):
+        try:
+            tokens = shlex.split(command_hint)
+        except ValueError:
+            tokens = command_hint.split()
+        if tokens:
+            executable = Path(tokens[0]).name
+            if executable and not _is_developer_tool_name(executable):
+                return {"binary": executable, "tokens": tokens, "source": "redmine_command"}
+    runtime_binary = primary_runtime_binary(config)
+    if runtime_binary and not _is_developer_tool_name(runtime_binary):
+        return {"binary": runtime_binary, "tokens": [], "source": "runtime_profile_or_repo_analysis"}
+    return None
+
+
+def _redmine_binary_command_from_hint(binary_hint: dict[str, Any], command_hint: str) -> tuple[str, dict[str, Any]]:
+    binary = str(binary_hint["binary"])
+    tokens = binary_hint.get("tokens") if isinstance(binary_hint.get("tokens"), list) else []
+    args = [str(token) for token in tokens[1:]]
+    subcommand = _subcommand_from_redmine_command(command_hint)
+    if args and _redmine_args_look_read_only(args):
+        command = _redmine_binary_exec_command(binary, args)
+        return command, {
+            "strategy": "binary_reproduction_from_redmine_command",
+            "source": "AI-derived product binary command from Redmine reproduction steps",
+            "redmine_command_hint": command_hint,
+            "selected_surface": subcommand or binary,
+            "binary": binary,
+            "binary_source": binary_hint.get("source"),
+            "automation_confidence": "medium",
+            "reason": "The Redmine reproduction command uses a product binary and appears read-only; the contract keeps the binary command and makes environment preparation explicit.",
+        }
+    command = _redmine_binary_help_command(binary, subcommand=subcommand)
+    return command, {
+        "strategy": "binary_help_probe_from_redmine_or_repo",
+        "source": "AI-derived product binary help probe",
+        "redmine_command_hint": command_hint,
+        "selected_surface": subcommand or binary,
+        "binary": binary,
+        "binary_source": binary_hint.get("source"),
+        "automation_confidence": "medium" if binary_hint.get("source") == "repo_cli" else "low",
+        "reason": "The exact Redmine command was not proven side-effect-safe, so the generated command uses the product binary help surface and records the missing runtime details.",
+    }
+
+
+def _redmine_binary_exec_command(binary: str, args: list[str]) -> str:
+    args_text = " ".join(_redmine_shell_arg_fragments(args))
+    script = f'binary="${{QUALITY_PILOT_BINARY:-./{binary}}}"; test -x "$binary"; exec "$binary"'
+    if args_text:
+        script += f" {args_text}"
+    return _shell_command(script)
+
+
+def _redmine_shell_arg_fragments(args: list[str]) -> list[str]:
+    fragments: list[str] = []
+    i = 0
+    while i < len(args):
+        arg = str(args[i])
+        lowered = arg.lower()
+        next_value = str(args[i + 1]) if i + 1 < len(args) else ""
+        if lowered in {"--passwd", "--password", "--pass"} and next_value:
+            fragments.append(shlex.quote(arg))
+            fragments.append('"${QUALITY_PILOT_TEST_PASSWORD:?set QUALITY_PILOT_TEST_PASSWORD}"')
+            i += 2
+            continue
+        if lowered in {"--user", "--username"} and next_value:
+            fragments.append(shlex.quote(arg))
+            fragments.append(f'"${{QUALITY_PILOT_TEST_USER:-{_shell_default_value(next_value)}}}"')
+            i += 2
+            continue
+        if lowered in {"--host", "--hostname", "--target", "--bmc"} and next_value:
+            fragments.append(shlex.quote(arg))
+            fragments.append(f'"${{QUALITY_PILOT_TARGET_HOST:-{_shell_default_value(next_value)}}}"')
+            i += 2
+            continue
+        if lowered in {"--login", "--config", "--config-file", "--fixture"} and next_value:
+            fragments.append(shlex.quote(arg))
+            fragments.append(f'"${{QUALITY_PILOT_LOGIN_FILE:-{_shell_default_value(next_value)}}}"')
+            i += 2
+            continue
+        fragments.append(shlex.quote(arg))
+        i += 1
+    return fragments
+
+
+def _shell_default_value(value: str) -> str:
+    return str(value).replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
+
+
+def _redmine_binary_help_command(binary: str, *, subcommand: str = "") -> str:
+    args = [subcommand, "--help"] if subcommand else ["--help"]
+    return _redmine_binary_exec_command(binary, args)
+
+
+def _redmine_args_look_read_only(args: list[str]) -> bool:
+    mutating = {
+        "add",
+        "apply",
+        "boot",
+        "clear",
+        "create",
+        "delete",
+        "disable",
+        "enable",
+        "flash",
+        "format",
+        "mount",
+        "power",
+        "push",
+        "reboot",
+        "remove",
+        "reset",
+        "restart",
+        "set",
+        "start",
+        "stop",
+        "update",
+        "upload",
+        "write",
+    }
+    meaningful = [arg.lower() for arg in args if arg and not arg.startswith("-")]
+    return not any(arg in mutating for arg in meaningful)
+
+
+def _is_developer_test_command(command: str) -> bool:
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.split()
+    if not tokens:
+        return False
+    normalized = [Path(token).name.lower() for token in tokens[:3]]
+    if normalized[:2] in (["go", "test"], ["go", "run"]):
+        return True
+    if normalized[:3] == ["python", "-m", "pytest"] or normalized[:3] == ["python3", "-m", "pytest"]:
+        return True
+    if normalized[0] in {"pytest", "go"} and (len(normalized) == 1 or normalized[1] in {"test", "run"}):
+        return True
+    return False
+
+
+def _is_developer_tool_name(name: str) -> bool:
+    return Path(name).name.lower() in {
+        "go",
+        "pytest",
+        "python",
+        "python3",
+        "sh",
+        "bash",
+        "make",
+        "cmake",
+        "ninja",
+    }
+
+
+def _redmine_environment_requirements(
+    config: ProjectConfig,
+    issue: dict[str, Any],
+    *,
+    command: str,
+    analysis: dict[str, Any] | None = None,
+) -> list[str]:
+    qa_summary = redmine_issue_qa_summary(issue)
+    requirements: list[str] = []
+    binary = ""
+    if analysis and analysis.get("binary"):
+        binary = str(analysis["binary"])
+    else:
+        command_token = _first_command_token(command)
+        if command_token and not _is_developer_tool_name(command_token):
+            binary = command_token
+        else:
+            binary = primary_runtime_binary(config)
+    if binary:
+        requirements.append(
+            f"Build or install the product binary `{binary}` before running; set QUALITY_PILOT_BINARY to its path or place it at `./{binary}`."
+        )
+    if "QUALITY_PILOT_TEST_PASSWORD" in command:
+        requirements.append("Set QUALITY_PILOT_TEST_PASSWORD for the prepared test account; do not store the raw password in the case YAML.")
+    if "QUALITY_PILOT_TEST_USER" in command:
+        requirements.append("Set QUALITY_PILOT_TEST_USER when the prepared test account differs from the issue example user.")
+    if "QUALITY_PILOT_TARGET_HOST" in command:
+        requirements.append("Set QUALITY_PILOT_TARGET_HOST to the prepared test system/BMC address.")
+    if "QUALITY_PILOT_LOGIN_FILE" in command:
+        requirements.append("Set QUALITY_PILOT_LOGIN_FILE to the prepared login/config fixture path.")
+    environment = qa_summary.get("environment") if isinstance(qa_summary.get("environment"), list) else []
+    for item in environment[:5]:
+        requirements.append(f"Prepare Redmine test environment/resource: {item}")
+    reproduction = str(qa_summary.get("reproduction") or "").strip()
+    if reproduction:
+        requirements.append(f"Prepare fixtures and credentials referenced by Redmine reproduction steps: {reproduction}")
+    evidence = qa_summary.get("evidence") if isinstance(qa_summary.get("evidence"), list) else []
+    for item in evidence[:3]:
+        requirements.append(f"Keep Redmine evidence available for oracle comparison: {item}")
+    requirements.append("Confirm the command is safe to run in the prepared test system before enabling unattended/free-hand execution.")
+    return _unique_text(requirements)
+
+
+def _redmine_issue_command_hints(issue: dict[str, Any]) -> list[str]:
+    raw = issue.get("raw") if isinstance(issue.get("raw"), dict) else {}
+    hints: list[str] = []
+    for item in raw.get("custom_fields", []) if isinstance(raw.get("custom_fields"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").lower()
+        if any(word in name for word in ("command", "procedure", "reproduce", "reproduction", "step")):
+            value = str(item.get("value") or "").strip()
+            if value:
+                hints.append(value)
+    text = "\n".join(
+        str(value or "")
+        for value in (
+            issue.get("description"),
+            issue.get("description_text"),
+            issue.get("full_message"),
+            raw.get("description"),
+            raw.get("description_text"),
+        )
+    )
+    text = _normalize_redmine_command_text(text)
+    for block in re.findall(r"<pre[^>]*>(.*?)</pre>", text, flags=re.IGNORECASE | re.DOTALL):
+        for line in block.splitlines():
+            command = _command_line_from_redmine_text(line)
+            if command:
+                hints.append(command)
+    for match in re.finditer(r"`([^`\n]*(?:[A-Za-z0-9_-]+)\s+[^`\n]+)`", text):
+        hints.append(match.group(1).strip())
+    for line in text.splitlines():
+        command = _command_line_from_redmine_text(line)
+        if command:
+            hints.append(command)
+            continue
+        stripped = line.strip().lstrip("-*0123456789. ")
+        if stripped.lower().startswith("run "):
+            hints.append(stripped[4:].strip("` "))
+    return _unique_text(hints)
+
+
+def _normalize_redmine_command_text(text: str) -> str:
+    normalized = str(text or "")
+    replacements = {
+        "\\r\\n": "\n",
+        "\\n": "\n",
+        "\\r": "\n",
+        "\\u003c": "<",
+        "\\u003e": ">",
+        "\\u0026": "&",
+    }
+    for src, dst in replacements.items():
+        normalized = normalized.replace(src, dst)
+        normalized = normalized.replace(src.upper(), dst)
+    return normalized
+
+
+def _command_line_from_redmine_text(line: str) -> str:
+    stripped = line.strip().strip("`")
+    if not stripped:
+        return ""
+    stripped = re.sub(r"^(?:[$#>]\s*)", "", stripped)
+    stripped = stripped.lstrip("-*0123456789. ")
+    lowered = stripped.lower()
+    if stripped.startswith("|") or stripped.count("|") >= 2 or re.fullmatch(r"[-+\s|]+", stripped):
+        return ""
+    if lowered.startswith(("run ", "execute ")):
+        stripped = stripped.split(maxsplit=1)[1].strip("` ") if len(stripped.split(maxsplit=1)) > 1 else ""
+    if not stripped or stripped.startswith("<") or stripped.endswith(":"):
+        return ""
+    try:
+        tokens = shlex.split(stripped)
+    except ValueError:
+        tokens = stripped.split()
+    if len(tokens) < 2:
+        return ""
+    first = tokens[0]
+    first_name = Path(first).name.lower()
+    has_option = any(token.startswith("-") for token in tokens[1:])
+    if not re.fullmatch(r"[a-z0-9_.-]+", first_name):
+        return ""
+    if first.startswith(("./", "/")) or (has_option and first_name not in {"the", "this", "that", "when", "expected", "observed"}):
+        return stripped
+    return ""
+
+
+def _subcommand_from_redmine_command(command: str) -> str:
+    if not command:
+        return ""
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.split()
+    if not tokens:
+        return ""
+    if len(tokens) >= 3 and tokens[0] == "go" and tokens[1] == "run":
+        tokens = tokens[3:]
+    else:
+        tokens = tokens[1:]
+    for token in tokens:
+        if token.startswith("-"):
+            continue
+        if "/" in token or "\\" in token or "." in token:
+            continue
+        if "=" in token:
+            continue
+        return token
+    return ""
+
+
+def _first_command_token(command: str) -> str:
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.split()
+    if not tokens:
+        return ""
+    if len(tokens) >= 3 and tokens[0] == "go" and tokens[1] == "run":
+        return "go"
+    return Path(tokens[0]).name
+
+
+def _redmine_search_terms(issue: dict[str, Any]) -> list[str]:
+    text = " ".join(str(issue.get(key) or "") for key in ("subject", "description", "description_text", "full_message"))
+    words = re.findall(r"[A-Za-z][A-Za-z0-9_-]{3,}", text)
+    ignored = {"after", "before", "with", "from", "this", "that", "should", "would", "could", "expected", "observed"}
+    terms = [word for word in words if word.lower() not in ignored]
+    return _unique_text(terms)[:8] or [f"Redmine {issue.get('id')}"]
+
+
+def _redmine_follow_up_needed(issue: dict[str, Any], *, confirmed: bool) -> list[str]:
+    qa_summary = redmine_issue_qa_summary(issue)
+    missing = qa_summary.get("missing_for_executable_case") if isinstance(qa_summary.get("missing_for_executable_case"), list) else []
+    out = [str(item) for item in missing if str(item).strip()]
+    if not confirmed:
+        out.append("Exact lab reproduction remains advisory until a user-confirmed runner/fixture boundary is provided.")
+    return _unique_text(out)
+
+
+def _unique_text(values: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
 
 
 def draft_contract_from_scratch(
@@ -1540,55 +2224,59 @@ def safe_commands_for_generated_case(
 
 def _safe_probe_command(config: ProjectConfig, *, candidate: dict[str, Any], context: dict[str, Any]) -> str:
     dimensions = {str(item) for item in candidate.get("swqa_dimensions", []) if item}
-    go_cli = _first_go_cli_package(config)
-    if go_cli:
-        package = go_cli["package"]
-        command_name = go_cli["name"]
-        if dimensions & {"negative", "invalid_input"}:
-            return _shell_command(f"go run {shlex.quote(package)} __quality_pilot_invalid_command__ >/dev/null 2>&1; test $? -ne 0")
+    runtime_binary = primary_runtime_binary(config)
+    if runtime_binary:
         if "stress_timeout_risk" in dimensions:
-            return _shell_command(f"for i in 1 2 3; do go run {shlex.quote(package)} --help >/dev/null || exit 1; done")
+            return _runtime_binary_help_command(runtime_binary)
         if "sibling_surface" in dimensions:
-            subcommands = _readme_help_subcommands(config, command_name)
+            subcommands = _readme_help_subcommands(config, runtime_binary)
             if subcommands:
                 checks = " && ".join(
-                    f"go run {shlex.quote(package)} {shlex.quote(subcommand)} --help >/dev/null"
+                    _runtime_binary_help_fragment(runtime_binary, subcommand=subcommand)
                     for subcommand in subcommands[:3]
                 )
                 return _shell_command(checks)
-        return f"go run {shlex.quote(package)} --help"
+        return _runtime_binary_help_command(runtime_binary)
 
-    if (config.root / "go.mod").exists():
-        return "go test ./... -run '^$'"
-
-    python_targets = _python_compile_targets(config)
-    if python_targets:
-        return "python3 -m compileall -q " + " ".join(shlex.quote(target) for target in python_targets)
-
-    seed = candidate.get("init_seed") if isinstance(candidate.get("init_seed"), dict) else candidate.get("growth_seed")
-    surface = str(seed.get("surface") or "") if isinstance(seed, dict) else ""
-    if surface and (config.root / surface).exists():
-        code = f"from pathlib import Path; assert Path({surface!r}).exists(); print('AI Quality Pilot safe probe: {surface}')"
-        return "python3 -c " + shlex.quote(code)
-
-    repo_probe_targets = ["README.md", "README.rst", "README.txt", "go.mod", "pyproject.toml", "package.json", ".quality-pilot.yaml"]
-    code = (
-        "from pathlib import Path; "
-        f"targets={repo_probe_targets!r}; "
-        "assert any(Path(item).exists() for item in targets); "
-        "print('AI Quality Pilot safe repo probe ok')"
-    )
-    return "python3 -c " + shlex.quote(code)
+    raise CaseGenerationError("runtime_profile_required_for_executable_command")
 
 
-def _first_go_cli_package(config: ProjectConfig) -> dict[str, str] | None:
-    cmd_dir = config.root / "cmd"
-    if not cmd_dir.exists():
-        return None
-    for child in sorted(cmd_dir.iterdir()):
-        if child.is_dir() and (child / "main.go").exists():
-            return {"name": child.name, "package": f"./cmd/{child.name}"}
-    return None
+def _runtime_binary_exec_command(binary: str, args: list[str]) -> str:
+    args_text = " ".join(_redmine_shell_arg_fragments(args))
+    script = f'binary="${{QUALITY_PILOT_BINARY:-{binary}}}"; command -v "$binary" >/dev/null 2>&1 || test -x "$binary"; exec "$binary"'
+    if args_text:
+        script += f" {args_text}"
+    return _shell_command(script)
+
+
+def _runtime_binary_help_command(binary: str, *, subcommand: str = "") -> str:
+    args = [subcommand, "--help"] if subcommand else ["--help"]
+    return _runtime_binary_exec_command(binary, args)
+
+
+def _runtime_binary_help_fragment(binary: str, *, subcommand: str = "") -> str:
+    args = [subcommand, "--help"] if subcommand else ["--help"]
+    args_text = " ".join(_redmine_shell_arg_fragments(args))
+    return f'binary="${{QUALITY_PILOT_BINARY:-{binary}}}"; command -v "$binary" >/dev/null 2>&1 || test -x "$binary"; "$binary" {args_text} >/dev/null'
+
+
+def _command_uses_runtime_binary(command: str, runtime_binary: str) -> bool:
+    text = str(command or "").strip()
+    binary = str(runtime_binary or "").strip()
+    if not text or not binary:
+        return False
+    if "QUALITY_PILOT_BINARY" in text:
+        return True
+    binary_names = {binary, Path(binary).name}
+    try:
+        tokens = shlex.split(text)
+    except ValueError:
+        tokens = text.split()
+    for token in tokens[:6]:
+        cleaned = token.strip("'\"")
+        if cleaned in binary_names or Path(cleaned).name in binary_names:
+            return True
+    return False
 
 
 def _readme_help_subcommands(config: ProjectConfig, command_name: str) -> list[str]:
@@ -1607,31 +2295,8 @@ def _readme_help_subcommands(config: ProjectConfig, command_name: str) -> list[s
     return out
 
 
-def _python_compile_targets(config: ProjectConfig) -> list[str]:
-    ignored = {".git", ".quality-pilot", ".quality-pilot-project", ".qa-project", "__pycache__", ".venv", "venv", "node_modules"}
-    targets: list[str] = []
-    for child in sorted(config.root.iterdir()):
-        if child.name in ignored or child.name.startswith("."):
-            continue
-        if child.is_file() and child.suffix == ".py":
-            targets.append(child.name)
-        elif child.is_dir() and any(path.suffix == ".py" for path in child.rglob("*.py")):
-            targets.append(child.name)
-        if len(targets) >= 6:
-            break
-    return targets
-
-
 def _shell_command(script: str) -> str:
     return "sh -c " + shlex.quote(script)
-
-
-def _draft_blocker_command(case_id: str) -> str:
-    return (
-        "python3 -c \"import sys; "
-        f"sys.stderr.write('AI Quality Pilot draft {case_id} requires cases review before execution\\\\n'); "
-        "sys.exit(2)\""
-    )
 
 
 def _priority_for_spec(key: str) -> str:
@@ -1710,7 +2375,7 @@ def _detect_profile(
 
 def _dump_yaml(data: dict[str, Any]) -> str:
     if yaml is not None:
-        return yaml.safe_dump(data, allow_unicode=True, sort_keys=False)
+        return yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=4096)
     return json_dumps(data) + "\n"
 
 

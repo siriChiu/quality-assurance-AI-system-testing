@@ -24,7 +24,7 @@ WIKI_REPORT_NAME = "wiki-status.md"
 WIKI_CATEGORIES_NAME = "wiki-categories.yaml"
 WIKI_MCP_REQUEST_NAME = "wiki-write-request.json"
 WIKI_MCP_RESULT_NAME = "wiki-write-result.json"
-DEFAULT_WIKI_PAGE = "Test status (Siri)"
+DEFAULT_WIKI_PAGE = "Quality Pilot Test Status"
 WIKI_SCHEMA = "quality-pilot.wiki-plan.v1"
 WIKI_MCP_REQUEST_SCHEMA = "quality-pilot.gitea-mcp-wiki-write-request.v1"
 
@@ -440,9 +440,12 @@ def render_wiki_body(
             "## Release Readiness",
             "",
             f"- Status：{_release_readiness(counts, cases, latest_run)}",
-            "",
         ]
     )
+    stale_reason = _stale_report_reason(counts, cases, latest_run)
+    if stale_reason:
+        lines.append(f"- Stale report warning：{stale_reason}")
+    lines.append("")
 
     lines.extend([
         "## 測試結果明細",
@@ -808,11 +811,27 @@ def _release_readiness(counts: dict[str, int], cases: list[dict[str, Any]], late
         return "NOT_READY_EXECUTION_RISK"
     if counts.get("DRAFT", 0) or counts.get("NEEDS_INPUT", 0):
         return "NOT_READY_INPUT_REQUIRED"
+    if counts.get("NOT_RUN", 0) == len(cases):
+        return "NOT_READY_NO_CURRENT_RUN"
     if not isinstance(latest_run, dict):
         return "NOT_READY_NO_CURRENT_RUN"
+    if str(latest_run.get("status") or "") == "PASS" and counts.get("PASS", 0) == 0:
+        return "NOT_READY_STALE_RUN_NOT_REFLECTED"
     if str(latest_run.get("status") or "") == "PASS":
         return "READY"
     return "REVIEW_REQUIRED"
+
+
+def _stale_report_reason(counts: dict[str, int], cases: list[dict[str, Any]], latest_run: dict[str, Any] | None) -> str | None:
+    if not cases:
+        return None
+    if not isinstance(latest_run, dict):
+        return "no latest-run payload was available for this Wiki render"
+    if counts.get("NOT_RUN", 0) == len(cases):
+        return "all listed cases are NOT_RUN"
+    if str(latest_run.get("status") or "") == "PASS" and counts.get("PASS", 0) == 0:
+        return "latest-run is PASS but no listed case reflects PASS evidence"
+    return None
 
 
 def _gate_result_for_event(

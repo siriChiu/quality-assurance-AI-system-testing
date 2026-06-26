@@ -13,6 +13,23 @@ from quality_pilot import hermes
 
 
 class HermesDispatchTest(unittest.TestCase):
+    def write_ready_mcp_snapshots(self, root: Path) -> None:
+        status_path = root / ".quality-pilot-project" / "state" / "hermes-mcp" / "status.json"
+        status_path.parent.mkdir(parents=True, exist_ok=True)
+        status_path.write_text(json.dumps({"servers": ["gitea", "redmine"]}), encoding="utf-8")
+        gitea_path = root / ".quality-pilot-project" / "state" / "gitea-mcp" / "issues.json"
+        gitea_path.parent.mkdir(parents=True, exist_ok=True)
+        gitea_path.write_text(
+            json.dumps({"schema": "quality-pilot.gitea-mcp.issues.v1", "items": []}),
+            encoding="utf-8",
+        )
+        redmine_path = root / ".quality-pilot-project" / "state" / "redmine-mcp" / "issues.json"
+        redmine_path.parent.mkdir(parents=True, exist_ok=True)
+        redmine_path.write_text(
+            json.dumps({"schema": "quality-pilot.redmine-mcp.issues.v1", "issues": []}),
+            encoding="utf-8",
+        )
+
     def test_help_command_returns_traditional_chinese_manual(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             result = hermes.dispatch_chat_command("/quality-pilot help", root=tmp)
@@ -22,6 +39,8 @@ class HermesDispatchTest(unittest.TestCase):
             self.assertEqual(result["payload"]["language"], "zh-Hant")
             self.assertIn("AI Quality Pilot 中文使用手冊", result["chat_response"])
             self.assertIn("/quality-pilot setup", result["chat_response"])
+            self.assertIn("/quality-pilot doctor --fix", result["chat_response"])
+            self.assertIn("/quality-pilot audit state", result["chat_response"])
             self.assertIn("/quality-pilot cases list", result["chat_response"])
             self.assertIn("/quality-pilot cases run <case_id>", result["chat_response"])
             self.assertNotIn("/quality-pilot qa-test list", result["chat_response"])
@@ -97,6 +116,32 @@ class HermesDispatchTest(unittest.TestCase):
             self.assertEqual(plan["status"], "ok")
             self.assertEqual(plan["payload"]["write_gate_result"]["reason"], "allowed")
 
+    def test_doctor_write_ready_warn_does_not_loop_back_to_mcp_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hermes.dispatch_chat_command("/quality-pilot setup", root=root)
+            self.write_ready_mcp_snapshots(root)
+
+            doctor = hermes.dispatch_chat_command("/quality-pilot doctor", root=root)
+
+            self.assertEqual(doctor["status"], "WARN")
+            self.assertEqual(doctor["payload"]["readiness"]["mode"], "WRITE_READY")
+            self.assertNotIn("ux_recovery", doctor["payload"])
+            self.assertNotIn("recovery: mcp_not_ready", doctor["chat_response"])
+            next_commands = [item.get("command") for item in doctor["payload"].get("next_actions", [])]
+            self.assertIn("/quality-pilot subagent status", next_commands)
+            self.assertIn("/quality-pilot audit state", next_commands)
+            self.assertNotIn("/quality-pilot doctor", next_commands)
+            self.assertNotIn("/quality-pilot issues status", next_commands)
+            self.assertNotIn("/quality-pilot publish wiki status", next_commands)
+
+            fixed = hermes.dispatch_chat_command("/quality-pilot doctor --fix", root=root)
+            fixed_next_commands = [item.get("command") for item in fixed["payload"].get("next_actions", [])]
+            self.assertIn("/quality-pilot subagent status", fixed_next_commands)
+            self.assertIn("/quality-pilot audit state", fixed_next_commands)
+            self.assertNotIn("/quality-pilot issues status", fixed_next_commands)
+            self.assertNotIn("/quality-pilot publish wiki status", fixed_next_commands)
+
     def test_command_cheat_sheet_chat_commands_are_supported(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -105,6 +150,8 @@ class HermesDispatchTest(unittest.TestCase):
             commands = [
                 "/quality-pilot help",
                 "/quality-pilot doctor",
+                "/quality-pilot doctor --fix",
+                "/quality-pilot audit state",
                 "/quality-pilot issues status",
                 "/quality-pilot cases list",
                 "/quality-pilot cases validate",
@@ -169,6 +216,8 @@ class HermesDispatchTest(unittest.TestCase):
             self.assertEqual(manifest["command_prefix"], "/quality-pilot")
             self.assertIn("quality-pilot", manifest["aliases"])
             self.assertIn("/quality-pilot help", manifest["commands"])
+            self.assertIn("/quality-pilot doctor --fix", manifest["commands"])
+            self.assertIn("/quality-pilot audit state", manifest["commands"])
             self.assertIn("/quality-pilot cases generate --init", manifest["commands"])
             self.assertIn("/quality-pilot cases generate --init --count 5", manifest["commands"])
             self.assertIn("/quality-pilot cases generate --growing", manifest["commands"])
@@ -253,6 +302,7 @@ class HermesDispatchTest(unittest.TestCase):
             self.assertIn("Gitea MCP snapshot workflow", text)
             self.assertIn("Gitea MCP Wiki write workflow", text)
             self.assertIn("Gitea MCP Redmine issue creation workflow", text)
+            self.assertIn("/quality-pilot audit state", text)
             self.assertIn("needs_mcp_apply", text)
             self.assertNotIn("/quality-pilot publish wiki complete-mcp --result-json <path>", text)
             self.assertIn("chat_response", text)
@@ -261,6 +311,7 @@ class HermesDispatchTest(unittest.TestCase):
             self.assertNotIn("Hermes needs your input", text)
             self.assertIn("product repository root", text)
             self.assertIn("/quality-pilot help", text)
+            self.assertIn("/quality-pilot doctor --fix", text)
             self.assertNotIn("/quality-pilot help qa-test", text)
             self.assertIn("/quality-pilot cases generate --init", text)
             self.assertIn("/quality-pilot subagent status", text)
@@ -268,7 +319,7 @@ class HermesDispatchTest(unittest.TestCase):
             self.assertIn("https://172.17.20.220/", text)
             self.assertIn("candidate-only", text)
             self.assertIn("opinionated SWQA engineer", text)
-            self.assertIn("executable safe-probe cases", text)
+            self.assertIn("executable product-runtime safe-probe cases", text)
             self.assertIn("Every INIT case must have `commands[].run`", text)
             self.assertIn("--count 5", text)
             self.assertNotIn("--generated_count 5", text)

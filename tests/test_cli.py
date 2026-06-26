@@ -45,8 +45,11 @@ class CliTest(unittest.TestCase):
             self.assertIn("subagents:", config)
             self.assertIn("provider: open_webui", config)
             self.assertIn('endpoint: "https://172.17.20.220/"', config)
+            self.assertIn('model: ""', config)
+            self.assertIn('api_base: ""', config)
             self.assertIn("gitea_issue_body: open-webui", config)
-            self.assertIn('user_instructions: ""', config)
+            self.assertNotIn("user_instructions", config)
+            self.assertNotIn("system_prompt", config)
 
     def test_setup_auto_configures_gitea_mcp_from_git_remote(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -138,6 +141,63 @@ class CliTest(unittest.TestCase):
             self.assertIn("hermes_mcp", payload)
             self.assertIn("issue_sync", payload)
             self.assertEqual(payload["subagents"]["endpoint"], "https://172.17.20.220/")
+            self.assertFalse(payload["fix"]["requested"])
+
+    def test_doctor_fix_creates_missing_config_and_overlay_dirs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            code, payload = self.run_cli(["doctor", "--root", tmp, "--fix", "--json"])
+
+            self.assertEqual(code, 0)
+            root = Path(tmp)
+            self.assertTrue((root / ".quality-pilot.yaml").exists())
+            self.assertTrue((root / ".quality-pilot-project" / "cases").is_dir())
+            self.assertTrue(payload["fix"]["requested"])
+            self.assertTrue(payload["fix"]["applied"])
+            self.assertIn("config_created", [action["id"] for action in payload["fix"]["actions"]])
+            self.assertEqual(payload["subagents"]["provider"], "open_webui")
+            self.assertEqual(payload["subagents"]["endpoint"], "https://172.17.20.220/")
+
+    def test_doctor_fix_repairs_missing_subagent_config_without_user_prompts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.run_cli(["setup", "--root", tmp])
+            config_path = Path(tmp) / ".quality-pilot.yaml"
+            config_text = config_path.read_text(encoding="utf-8")
+            config_path.write_text(config_text.split("\nsubagents:", 1)[0] + "\npolicy:" + config_text.split("\npolicy:", 1)[1], encoding="utf-8")
+
+            code, payload = self.run_cli(["doctor", "--root", tmp, "--fix", "--json"])
+
+            self.assertEqual(code, 0)
+            self.assertTrue(payload["fix"]["applied"])
+            updated = config_path.read_text(encoding="utf-8")
+            self.assertIn("subagents:", updated)
+            self.assertIn("provider: open_webui", updated)
+            self.assertIn("model: ''", updated)
+            self.assertIn("api_base: ''", updated)
+            self.assertNotIn("system_prompt", updated)
+            self.assertIn("redmine_issue_summary: open-webui", updated)
+            self.assertNotIn("redmine_issue_summary: ''", updated)
+            self.assertEqual(payload["subagents"]["missing_user_fields"], ["model"])
+            self.assertEqual(payload["subagents"]["missing_task_prompts"], [])
+
+    def test_doctor_fix_repairs_invalid_subagent_api_key_env_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.run_cli(["setup", "--root", tmp])
+            config_path = Path(tmp) / ".quality-pilot.yaml"
+            secret_like = "sk-proj-should-not-live-in-config"
+            config_text = config_path.read_text(encoding="utf-8")
+            config_path.write_text(config_text.replace('api_key_env: ""', f"api_key_env: {secret_like}"), encoding="utf-8")
+
+            code, payload = self.run_cli(["doctor", "--root", tmp, "--fix", "--json"])
+
+            self.assertEqual(code, 0)
+            self.assertTrue(payload["fix"]["applied"])
+            actions = payload["fix"]["actions"]
+            self.assertTrue(any(action["id"] == "secret_reference_repaired" for action in actions))
+            self.assertEqual(payload["subagents"]["api_key_env"], "OPEN_WEBUI_API_KEY")
+            updated = config_path.read_text(encoding="utf-8")
+            self.assertIn("api_key_env: OPEN_WEBUI_API_KEY", updated)
+            self.assertNotIn(secret_like, updated)
+            self.assertNotIn(secret_like, json.dumps(payload))
 
     def test_subagent_status_and_configure_use_open_webui_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -148,19 +208,49 @@ class CliTest(unittest.TestCase):
             self.assertEqual(status["subagents"]["provider"], "open_webui")
             self.assertEqual(status["subagents"]["endpoint"], "https://172.17.20.220/")
             self.assertIn("gitea_issue_body", status["subagents"]["tasks"])
-            self.assertIn("user_instructions", status["subagents"]["missing_user_fields"])
+            self.assertEqual(status["subagents"]["missing_user_fields"], ["model"])
 
             config_path = Path(tmp) / ".quality-pilot.yaml"
             config_text = config_path.read_text(encoding="utf-8")
             config_path.write_text(config_text.split("\nsubagents:", 1)[0] + "\npolicy:" + config_text.split("\npolicy:", 1)[1], encoding="utf-8")
 
-            code, configured = self.run_cli(["subagent", "configure", "--root", tmp, "--json"])
+            code, configured = self.run_cli([
+                "subagent",
+                "configure",
+                "--root",
+                tmp,
+                "--endpoint",
+                "https://172.17.20.220/?model=qwen3.6-chat-direct",
+                "--api-key-env",
+                "OPEN_WEBUI_API_KEY",
+                "--json",
+            ])
             self.assertEqual(code, 0)
             self.assertEqual(configured["subagents"]["provider"], "open_webui")
-            self.assertEqual(configured["subagents"]["endpoint"], "https://172.17.20.220/")
+            self.assertEqual(configured["subagents"]["endpoint"], "https://172.17.20.220/?model=qwen3.6-chat-direct")
+            self.assertEqual(configured["subagents"]["model"], "qwen3.6-chat-direct")
+            self.assertEqual(configured["subagents"]["model_source"], "endpoint_query")
+            self.assertEqual(configured["subagents"]["api_key_env"], "OPEN_WEBUI_API_KEY")
+            self.assertEqual(configured["subagents"]["missing_user_fields"], [])
             updated = config_path.read_text(encoding="utf-8")
             self.assertIn("subagents:", updated)
-            self.assertIn("system_prompt: ''", updated)
+            self.assertIn("endpoint: https://172.17.20.220/?model=qwen3.6-chat-direct", updated)
+            self.assertIn("api_key_env: OPEN_WEBUI_API_KEY", updated)
+            self.assertNotIn("system_prompt", updated)
+
+            code, api_updated = self.run_cli([
+                "subagent",
+                "configure",
+                "--root",
+                tmp,
+                "--api-base",
+                "https://172.17.20.220/api",
+                "--json",
+            ])
+            self.assertEqual(code, 0)
+            self.assertEqual(api_updated["subagents"]["endpoint"], "https://172.17.20.220/?model=qwen3.6-chat-direct")
+            self.assertEqual(api_updated["subagents"]["model"], "qwen3.6-chat-direct")
+            self.assertEqual(api_updated["subagents"]["api_base"], "https://172.17.20.220/api")
 
     def test_removed_status_and_config_commands_return_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

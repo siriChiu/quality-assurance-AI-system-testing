@@ -85,10 +85,10 @@ def infer_recovery(payload: dict[str, Any], *, argv: list[str], exit_code: int) 
         root_cause = "The fix handoff referenced a case id that is not currently runnable."
         confirm = bool(exact)
         confidence = "high" if exact else "medium"
-    elif "redmine_mcp_snapshot_missing" in message or "gitea_mcp_snapshot_missing" in message:
+    elif "redmine_mcp_snapshot_" in message or "gitea_mcp_snapshot_missing" in message:
         problem_class = "mcp_not_ready"
         recommended = command
-        root_cause = message or "The required Hermes MCP snapshot is missing."
+        root_cause = message or "The required Hermes MCP snapshot is missing or not verified."
         confirm = True
         confidence = "high"
     elif _mcp_not_ready(payload):
@@ -415,8 +415,59 @@ def _first_recovered_case(payload: dict[str, Any]) -> str | None:
 
 
 def _mcp_not_ready(payload: dict[str, Any]) -> bool:
-    text = json.dumps(payload, ensure_ascii=False).lower()
-    return "mcp" in text and any(marker in text for marker in ["missing", "unknown", "not_ready", "not ready", "blocked"])
+    readiness = payload.get("readiness") if isinstance(payload.get("readiness"), dict) else {}
+    mode = str(readiness.get("mode") or "").upper()
+    if mode == "WRITE_READY":
+        return False
+    if mode in {"WRITE_BLOCKED_MCP", "SYNC_BLOCKED"}:
+        return True
+
+    readiness_blockers = _string_list(readiness.get("blockers"))
+    if any(_is_mcp_readiness_blocker(item) for item in readiness_blockers):
+        return True
+
+    for key in ("hermes_mcp", "issue_sync", "redmine_sync", "wiki_sync", "remote"):
+        section = payload.get(key)
+        if not isinstance(section, dict):
+            continue
+        blockers = _string_list(section.get("blockers"))
+        if any(_is_mcp_readiness_blocker(item) for item in blockers):
+            return True
+        nested = section.get("hermes_mcp")
+        if isinstance(nested, dict):
+            nested_blockers = _string_list(nested.get("blockers"))
+            if any(_is_mcp_readiness_blocker(item) for item in nested_blockers):
+                return True
+    return False
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if item]
+
+
+def _is_mcp_readiness_blocker(value: str) -> bool:
+    lowered = value.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "hermes_mcp_status_unknown",
+            "hermes_gitea_mcp_unknown",
+            "hermes_redmine_mcp_unknown",
+            "hermes_gitea_mcp_missing",
+            "hermes_redmine_mcp_missing",
+            "hermes_gitea_mcp_unknown_or_missing",
+            "hermes_redmine_mcp_unknown_or_missing",
+            "gitea_mcp_snapshot_missing",
+            "redmine_mcp_snapshot_missing",
+            "redmine_mcp_snapshot_unverified",
+            "redmine_mcp_snapshot_invalid",
+            "redmine_issue_ids_missing",
+            "tracker_backend_not_mcp",
+            "tracker_provider_not_hermes_mcp",
+        )
+    )
 
 
 def _write_gate_blocked(payload: dict[str, Any]) -> bool:

@@ -9,6 +9,7 @@ from .config import ProjectConfig
 
 MCP_SERVERS_ENV = "QUALITY_PILOT_HERMES_MCP_SERVERS"
 MCP_STATUS_ENV = "QUALITY_PILOT_HERMES_MCP_STATUS_JSON"
+MCP_STATUS_SCHEMA = "quality-pilot.hermes-mcp-status.v1"
 
 
 def tracker_mcp_config(config_data: dict[str, Any]) -> dict[str, Any]:
@@ -79,6 +80,43 @@ def hermes_mcp_status(config: ProjectConfig) -> dict[str, Any]:
     }
 
 
+def persist_hermes_mcp_status_from_env(config: ProjectConfig) -> dict[str, Any]:
+    env_servers = os.getenv(MCP_SERVERS_ENV)
+    path = hermes_mcp_status_path(config)
+    if env_servers is None:
+        return {
+            "status": "not_requested",
+            "source": "env_missing",
+            "status_path": _relative_or_str(path, config.root),
+            "persisted": False,
+        }
+    servers = sorted(_normalize_server_names(env_servers.split(",")))
+    payload = {
+        "schema": MCP_STATUS_SCHEMA,
+        "source": "env",
+        "env": MCP_SERVERS_ENV,
+        "servers": servers,
+    }
+    before = None
+    if path.exists():
+        try:
+            before = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            before = None
+    changed = before != payload
+    if changed:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return {
+        "status": "ok",
+        "source": "env",
+        "status_path": _relative_or_str(path, config.root),
+        "servers": servers,
+        "persisted": True,
+        "changed": changed,
+    }
+
+
 def hermes_mcp_readiness(config: ProjectConfig) -> dict[str, Any]:
     cfg = tracker_mcp_config(config.data)
     status = hermes_mcp_status(config)
@@ -104,6 +142,7 @@ def hermes_mcp_readiness(config: ProjectConfig) -> dict[str, Any]:
                 "Hermes MCP server list was not provided to AI Quality Pilot. "
                 f"Set {MCP_SERVERS_ENV}=gitea,redmine or write the configured MCP status JSON before setup/doctor."
             ),
+            "expected_minimal_json": {"servers": required},
         })
 
     for server in required:

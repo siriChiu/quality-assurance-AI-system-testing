@@ -53,7 +53,7 @@ def gitea_config_from_project(config_data: dict[str, Any]) -> GiteaConfig:
         token_env=token_env,
         token=(os.getenv(token_env) if token_env else None) or None,
         mcp_issues_json=str(gitea.get("mcp_issues_json") or mcp.get("gitea_issues_json") or tracker.get("mcp_issues_json") or ".quality-pilot-project/state/gitea-mcp/issues.json"),
-        wiki_page=str(gitea.get("wiki_page") or tracker.get("wiki_page") or mcp.get("wiki_page") or "Test status (Siri)"),
+        wiki_page=str(gitea.get("wiki_page") or tracker.get("wiki_page") or mcp.get("wiki_page") or "Quality Pilot Test Status"),
         branch_prefix=str(gitea.get("branch_prefix") or "quality-pilot/issue-"),
     )
 
