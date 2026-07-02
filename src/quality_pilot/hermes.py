@@ -221,6 +221,15 @@ def render_chat_response(payload: dict[str, Any], *, exit_code: int = 0) -> str:
         lines.append(f"         missing_inputs: {payload.get('missing_input_count')}")
     if "advisory_input_count" in payload:
         lines.append(f"         advisory_inputs: {payload.get('advisory_input_count')}")
+    if payload.get("semantic_finding_count"):
+        lines.append(f"         semantic_findings: {payload.get('semantic_finding_count')}")
+        findings = payload.get("semantic_findings")
+        if isinstance(findings, list) and findings and isinstance(findings[0], dict):
+            first = findings[0]
+            if first.get("id"):
+                lines.append(f"         semantic.first: {first.get('id')}")
+            if first.get("case_id"):
+                lines.append(f"         semantic.case: {first.get('case_id')}")
     if payload.get("growth_context_path"):
         lines.append(f"         growth_context: {payload.get('growth_context_path')}")
     if payload.get("source"):
@@ -653,6 +662,13 @@ def _suggest_next_actions_without_recovery(payload: dict[str, Any], engine_argv:
             _next("產生整體 case 報告", "/quality-pilot report status"),
             _next("手動重建 Wiki plan", "/quality-pilot publish wiki plan", confirm=True),
         ]
+    if current == "close-loop heartbeat":
+        return [
+            _next("查看 close-loop 狀態", "/quality-pilot close-loop status"),
+            _next("產生 issue QA report/evidence handoff", "/quality-pilot issues report"),
+            _next("查看整體 case 報告", "/quality-pilot report status"),
+            _next("下一次 heartbeat", "/quality-pilot close-loop heartbeat", confirm=True),
+        ]
     if current == "report status":
         return [
             _next("更新 Wiki plan", "/quality-pilot publish wiki plan", confirm=True),
@@ -938,6 +954,7 @@ def build_agent_manifest(*, wrapper_path: str | None = None, runner_command: str
             f"{PRIMARY_PREFIX} publish wiki apply",
             f"{PRIMARY_PREFIX} close-loop status",
             f"{PRIMARY_PREFIX} close-loop run-once",
+            f"{PRIMARY_PREFIX} close-loop heartbeat",
             f"{PRIMARY_PREFIX} report status",
             f"{PRIMARY_PREFIX} report json",
             f"{PRIMARY_PREFIX} tracker plan-write",
@@ -1086,6 +1103,7 @@ Only these `/quality-pilot` commands are public:
 - `/quality-pilot publish wiki apply`
 - `/quality-pilot close-loop status`
 - `/quality-pilot close-loop run-once`
+- `/quality-pilot close-loop heartbeat`
 - `/quality-pilot report status`
 - `/quality-pilot report json`
 - `/quality-pilot tracker plan-write`
@@ -1162,6 +1180,8 @@ Redmine MCP rule: AI Quality Pilot V1 reads Redmine only through a Hermes Redmin
 
 The issue entry must preserve the live Redmine payload, including full description text, `updated_on`, custom fields, journals/comments, and attachments. If the Redmine MCP tool returns a compact issue, call the detail/read issue endpoint for each requested ID. Then run `/quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]` to create local Redmine mirrors, QA-focused summaries, and gated Gitea issue-create requests; if it returns `needs_mcp_apply`, execute the Gitea MCP Redmine issue creation workflow immediately. Run `/quality-pilot cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]` only when testcase contracts are needed. This command must not invent a generic invalid-command probe for Redmine. Redmine executable contracts should use the repo-agnostic runtime profile: prefer a user-confirmed product binary/runner/API entrypoint, or derive one from Redmine reproduction steps and repo runtime analysis. Do not use `go test`, `go run`, pytest, internal unit-test names, or build-system commands as the Redmine QA command; treat them only as implementation hints. Generated cases must make environment preparation visible through `environment_requirements`, including generic env names such as `QUALITY_PILOT_BINARY`, `QUALITY_PILOT_TARGET_HOST`, `QUALITY_PILOT_TEST_USER`, and `QUALITY_PILOT_TEST_PASSWORD` when needed. If the exact reproduction command is not proven safe, derive a product binary/API help/parser/dry-run fallback and keep the missing runtime details in `follow_up_needed`. Repo-only metadata probes, `python3 -c` checks, `compileall`, synthetic invalid commands, `go test`, and `go run` must not be written as testcase `commands[].run` unless the user explicitly configured them as the product runner. The generated case must record `safe_command_source_type: ai_derived`, `automation_confidence`, `requires_prepared_environment`, and `follow_up_needed` for exact lab reproduction gaps. Use `payload.hermes_needs_input` only when no product entrypoint or safe fallback can be derived at all after repo analysis.
 
+Negative oracle rule: if a Redmine/Gitea issue or testcase oracle says the product should reject input, fail validation, return non-zero, print an invalid-parameter error, or reject a boundary value such as `timeout 0`, the contract must not silently use `expected_exit_code: 0` for the raw product command. Use an explicit non-zero expected exit code, or wrap the command with a clear non-zero assertion plus stderr/stdout oracle. If `/quality-pilot cases review`, `/quality-pilot cases validate`, or `/quality-pilot cases run` reports `negative_oracle_expected_exit_code_mismatch`, treat it as a contract/harness gap first, not a product regression. Explain that the product may already be behaving correctly and recommend regenerating or repairing the case contract before filing FAIL evidence.
+
 Reference: see `references/gitea-mcp-snapshot.md` for the MCP snapshot pitfall and recommended JSON shape.
 
 Setup rule: `/quality-pilot setup` always writes `tracker.provider: hermes_mcp` plus `tracker.mcp.*` local handoff paths and a blank `runtime` profile skeleton. It may report the detected git remote and runtime repo analysis in JSON for human context, but it must not write Gitea repo URL, repo name, token env, HTTP credentials, product credentials, or guessed lab secrets into `.quality-pilot.yaml`.
@@ -1215,7 +1235,7 @@ Recommended interaction by situation:
 - If the user asks for first-time test ideas or has no cases yet, run `/quality-pilot cases generate --init`; it acts as an opinionated SWQA engineer, scans README, code, package metadata, existing runners, existing cases, and project rules, then creates executable product-runtime safe-probe cases across functional, positive, negative, boundary, invalid-input, side-effect-safe, and stress/timeout-risk coverage. Every INIT case must have `commands[].run` using the configured or inferred product entrypoint; it must not ask case-by-case confirmation questions.
 - `/quality-pilot cases generate --init` is already fast/high-standard autonomous mode.
 - If the user wants a smaller first batch, run `/quality-pilot cases generate --init --count 5`.
-- If the user asks for follow-up ideas after issues/PRs/runs changed, run `/quality-pilot cases generate --growing`; it creates incremental executable growth cases from repo, issues, PR references, latest run, reports, existing cases, and runners.
+- If the user asks for follow-up ideas after issues/PRs/runs/commits changed, run `/quality-pilot cases generate --growing`; it aggressively creates executable growth cases from repo signals, code inventory, Gitea issues, PR references, recent git commits, latest run, reports, existing cases, runners, and bounded monkey CLI help sweeps.
 - If the user names Redmine issue IDs and asks to sync or record issues, run `/quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]`; Hermes supplies the MCP snapshot, AI Quality Pilot validates it and writes local Redmine mirrors plus gated Gitea issue candidates.
 - If the user names one or more Redmine issue IDs and asks for testcases, run `/quality-pilot cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]`; Hermes supplies the MCP snapshot, AI Quality Pilot directly uses those IDs and writes linked executable case contracts. Prefer a Redmine user-confirmed product runner/API entrypoint when present; otherwise let AI Quality Pilot derive a repo-agnostic runtime command and record the required test environment/resources so the user can prepare once and then run free-hand. Do not accept `go test`, `go run`, pytest, or internal unit-test commands as the QA command. Any fallback must still use the product binary/API/runner; if only repo metadata is known, return needs-input instead of writing a fake testcase. If it returns `payload.hermes_needs_input`, ask only for the truly blocking category-level inputs. Do not create a Gitea issue plan in this command.
 - If the user types bare `/quality-pilot cases generate`, run the dispatcher and present its mode-selection error; do not silently choose a mode.
@@ -1258,6 +1278,7 @@ Examples:
 {runner_command} --root "$PWD" /quality-pilot publish wiki plan
 {runner_command} --root "$PWD" /quality-pilot publish wiki apply
 {runner_command} --root "$PWD" /quality-pilot close-loop run-once
+{runner_command} --root "$PWD" /quality-pilot close-loop heartbeat
 {runner_command} --root "$PWD" /quality-pilot report status
 {runner_command} --root "$PWD" /quality-pilot subagent status
 {runner_command} --root "$PWD" /quality-pilot subagent configure
@@ -1458,7 +1479,7 @@ def _overview_help_payload() -> dict[str, Any]:
         {"command": "/quality-pilot issues fix --issue <id> --push-pr", "purpose": "修復/開發與 verification gate 通過後建立產品 PR"},
         {"command": "/quality-pilot cases generate --init", "purpose": "首次全 repo SWQA 建案，依 README/code/metadata 產生 product-runtime executable safe-probe cases"},
         {"command": "/quality-pilot cases generate --init --count 5", "purpose": "限制初始建案第一批 case 數量"},
-        {"command": "/quality-pilot cases generate --growing", "purpose": "依最新 issues/PR/latest-run/reports 狀態擴散 executable cases"},
+        {"command": "/quality-pilot cases generate --growing", "purpose": "依 issues/PR/git commits/code roots/latest-run/monkey sweep 積極擴散 executable cases"},
         {"command": "/quality-pilot cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]", "purpose": "透過 Hermes Redmine MCP snapshot 生成 linked cases"},
         {"command": "/quality-pilot cases review", "purpose": "查看仍需人工補強的 drafts；通常 init/growing 產物可直接 validate/dry-run"},
         {"command": "/quality-pilot cases validate", "purpose": "驗證 case YAML 是否可執行"},
@@ -1471,6 +1492,7 @@ def _overview_help_payload() -> dict[str, Any]:
         {"command": "/quality-pilot publish wiki apply", "purpose": "gate 通過後只更新 Gitea Wiki；MCP backend 會產生 Hermes MCP write request"},
         {"command": "/quality-pilot close-loop status", "purpose": "查看 Observe/Normalize/Execute/Triage/Publish/Evolve/Prune health dashboard"},
         {"command": "/quality-pilot close-loop run-once", "purpose": "跑完整 pipeline：檢查、測試、write gate、報告、保存 state"},
+        {"command": "/quality-pilot close-loop heartbeat", "purpose": "跑 sensor-driven heartbeat：預設 12 小時節奏、每次最多 20 個 growth cases"},
         {"command": "/quality-pilot report status", "purpose": "產生 Markdown report"},
         {"command": "/quality-pilot report json", "purpose": "輸出 latest run JSON"},
         {"command": "/quality-pilot tracker plan-write", "purpose": "相容舊版：只檢查單一 tracker write gate"},

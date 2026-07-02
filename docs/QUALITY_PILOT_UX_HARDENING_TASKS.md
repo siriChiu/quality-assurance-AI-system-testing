@@ -273,6 +273,85 @@ Goal: Treat `README.md`, `docs/COMMANDS.md`, `docs/CONFIGURATION.md`, `docs/HERM
 - Config conformance must remain repo-agnostic: no product name, issue ID, host, raw token, or lab secret should be introduced by default setup.
 - `doctor --fix` may repair structure and safe defaults, but user-owned model, API key env, lab target, fixture, credential env names, and side-effect boundary stay explicit.
 
+## Phase P17: Anti-Overfit Case Generation Architecture
+
+Goal: Prevent field fixes from becoming product-specific core behavior. `irctool` may remain a regression fixture and field evidence, but product semantics must live in project overlay state, runtime profile, candidate evidence, or explicit local rules, not in reusable generator code.
+
+### Flow Gaps Causing The Follow-On Problems
+
+| Gap | Current Symptom | Downstream Problem | Required Flow Change |
+|---|---|---|---|
+| Final YAML is written too early | README/Redmine heuristics can become runnable cases in one pass | A weak guess becomes official coverage and later reports/Wiki trust it | Add `case-candidates.json`; write YAML only after candidate review/gate |
+| Generator mixes too many responsibilities | Repo scan, issue parsing, command inference, fixture env mapping, safety classification, oracle inference, and YAML writing all live in one flow | Fixing one repo adds product-shaped branches to core | Split into RepoAnalyzer, IssueIntake, CaseIntentPlanner, CommandCandidateBuilder, EnvironmentResolver, OracleBuilder, SafetyClassifier, ContractReviewer, ContractWriter |
+| Help fallback is used to fill requested count | Meaningful issue/README commands are replaced by repeated `--help` when candidates are filtered/deduped | Test suites look runnable but do not test user behavior | Treat help/version as readiness/surface probes unless explicitly selected as the testcase objective |
+| Product-specific fixture names leak into core | `--login` previously mapped to `QUALITY_PILOT_LOGIN_FILE` | New products need new special env names and rules | Use generic `QUALITY_PILOT_FIXTURE_<FLAG>` env names derived from path-like config/profile/fixture flags |
+| Static safety heuristics are treated as approval | Read-only/mutating word lists decide whether a command can run | Unknown product semantics can be falsely marked safe | Output `read_only`, `mutating`, `credentialed`, `target_required`, or `unknown` with confidence; unknown stops before YAML |
+| Batch generation blends unrelated intents | One pass tries to generate all testcase commands | Subagent/prompt context drifts and commands become repetitive | Generate and review one testcase candidate at a time, carrying only that candidate's evidence |
+| Syntax validation and semantic review are not cleanly separated | `cases validate` can be pulled toward semantic findings | Users cannot tell schema validity from QA truth | Keep schema validation separate from `cases review`/`audit state`, or rename semantic mode as lint/review |
+
+### P17 Tasks
+
+| ID | Task | Owner | Status | Acceptance |
+|---|---|---|---|---|
+| P17-01 | Replace product-specific fixture env mapping with generic fixture-path env names | Codex | Implemented first pass | Generated commands use `QUALITY_PILOT_FIXTURE_<FLAG>` such as `QUALITY_PILOT_FIXTURE_LOGIN` or `QUALITY_PILOT_FIXTURE_PROFILE`; core no longer emits `QUALITY_PILOT_LOGIN_FILE` |
+| P17-02 | Add anti-overfit fixture tests | Codex | Implemented first pass | Lifecycle tests cover non-login config/profile flags and assert old product-specific fixture env names do not return |
+| P17-03 | Add `case-candidates.json` stage before YAML writes | Codex | Proposed | Init/growing/Redmine/Gitea generation can run `--plan-only`, persist candidates, and write no case YAML |
+| P17-04 | Add per-candidate reviewer gate | Codex | Proposed | Each candidate records source evidence, runtime confidence, oracle confidence, fixture confidence, side-effect confidence, and reviewer status before contract writing |
+| P17-05 | Demote generic help/version fallback to readiness coverage | Codex | Proposed | Help/version commands are not used to fill issue-specific testcase count unless the case objective is CLI discovery/help correctness |
+| P17-06 | Make safety classification tri-state-plus | Codex | Proposed | Command safety is `read_only`, `mutating`, `credentialed`, `target_required`, or `unknown`; `unknown` yields HOLD/needs_input and writes no runnable YAML |
+| P17-07 | Add core token guard for product names | Codex | Proposed | Tests fail when reusable `src/quality_pilot` code introduces field-only terms such as product names, lab IDs, issue IDs, or old product-specific env names |
+| P17-08 | Split semantic review from schema validation | Codex | Proposed | `cases validate` reports contract/schema validity; `cases review` or `audit state` owns oracle/safety/evidence semantic blockers |
+
+### P17 Implementation Notes
+
+- Product-specific examples are allowed in fixtures, docs, and audited overlay evidence. They are not allowed as reusable generator assumptions.
+- Subagents should receive one candidate at a time and return candidate JSON only. They may suggest commands, oracle text, and risk notes, but deterministic gates decide whether YAML can be written.
+- The generator should prefer fewer high-quality approved cases over filling a requested count with repeated help/readiness probes.
+- A generated command must be traceable to repo analysis, issue text, runtime profile, project-local rules, or explicit user confirmation.
+
+## Phase P18: Setup-Time Automation Profile
+
+Goal: Reduce downstream testcase guessing by creating a durable, repo-agnostic automation profile candidate during `setup` and `doctor`. The tool must analyze repo/config first, persist what it can infer, and ask only for missing external facts such as credential env names, target resources, fixture paths, and side-effect boundaries.
+
+### P18 Tasks
+
+| ID | Task | Owner | Status | Acceptance |
+|---|---|---|---|---|
+| P18-01 | Persist `state/automation-profile.candidate.json` from setup/doctor | Codex | Implemented first pass | `setup` and `doctor` write a JSON candidate profile with runtime, command candidates, fixtures, credentials, targets, missing facts, and questions |
+| P18-02 | Classify repo-derived command candidates before case generation | Codex | Implemented first pass | Commands are classified as `readiness`, `read_only`, `credentialed`, `target_required`, `mutating`, or `unknown`; classification does not create runnable YAML by itself |
+| P18-03 | Use generic env names only | Codex | Implemented first pass | Fixture envs are derived as `QUALITY_PILOT_FIXTURE_<FLAG>` and credentials are represented as env names/placeholders only; no raw secret is stored |
+| P18-04 | Surface profile status in doctor | Codex | Implemented first pass | `doctor` includes an `automation.profile` check and exposes the candidate path without blocking setup completion |
+| P18-05 | Feed profile into one-candidate-at-a-time generation | Codex | Proposed | `case-candidates.json` consumes the automation profile, generates one candidate at a time, and asks only for facts still missing after repo/profile analysis |
+
+### P18 Implementation Notes
+
+- The automation profile is candidate context, not evidence and not PASS coverage.
+- Missing target/credential/fixture facts should produce precise bullet-listed questions, not a broad request for a full environment form.
+- The profile must remain product-agnostic; field repos can influence local overlay state, not reusable core assumptions.
+
+## Phase P19: Sensor-Driven Close-Loop Heartbeat
+
+Goal: Turn close-loop from a one-shot runner into a growth loop. Heartbeat must run sensors that manufacture new workflow input, create new case candidates/contracts when justified, execute only new or explicitly requested work, and report `idle` when nothing changed.
+
+### P19 Tasks
+
+| ID | Task | Owner | Status | Acceptance |
+|---|---|---|---|---|
+| P19-01 | Add `/quality-pilot close-loop heartbeat` | Codex | Implemented | Command runs one heartbeat tick, defaults to 12-hour scheduling metadata, uses up to 20 growth cases, and has no `--iterations` option |
+| P19-02 | Add growing-case sensor | Codex | Implemented first pass | Heartbeat calls growing generation first and executes only newly generated cases when available |
+| P19-03 | Persist heartbeat state and history | Codex | Implemented first pass | Writes `state/close-loop/heartbeat-latest.json` and `state/close-loop/heartbeat-history.jsonl` |
+| P19-04 | Avoid rerunning old work by default | Codex | Implemented first pass | If sensors produce no new case and no explicit scope is requested, heartbeat returns `idle` |
+| P19-05 | Add broader sensors | Codex | Implemented first pass | Growth context now includes Gitea issue snapshots, linked PR references, recent git commits, repo code roots, README surfaces, existing cases, latest run state, and bounded monkey CLI help sweeps |
+| P19-06 | Increase growth aggressiveness without fake coverage | Codex | Implemented second pass | `cases generate --growing` defaults to 20 cases, expands candidates through an SWQA operation matrix, treats duplicate existing commands as already-covered signals instead of consuming new-case budget, and still rejects repo-only/developer/synthetic commands |
+| P19-07 | Add resumable module session | Codex | Proposed | Heartbeat records module-level handoff state so failures resume at the blocked module instead of restarting the whole loop |
+
+### P19 Implementation Notes
+
+- `run-once` remains the deterministic executor for a selected scope.
+- `heartbeat` is the evolving orchestrator entrypoint: Observe -> Evolve -> Execute -> Report -> Publish.
+- Growing case generation now writes operation intent into each growth contract under `quality_pilot.swqa_operation`, so review/reporting can distinguish surface probes, invalid-option rejection, boundary invalid-value checks, repeatability, concurrency, timeout baseline, and bounded monkey sweeps.
+- Remote writes, PR creation, and external-resource tests still stop at gates.
+
 ## Updated Acceptance Test Matrix
 
 | Test | Scenario | Command / Fixture | Expected |
@@ -307,6 +386,7 @@ Goal: Treat `README.md`, `docs/COMMANDS.md`, `docs/CONFIGURATION.md`, `docs/HERM
 | T36 | Hermes install path remains verifiable | `install-skill`, `skill-status`, direct wrapper execution | Proposed; documented install commands produce a valid `~/.hermes/skills/quality-pilot/SKILL.md` and working dispatcher |
 | T37 | Snapshot contracts match docs | Full/legacy/trimmed Redmine manifests and Gitea issues snapshot fixtures | Proposed; full manifests pass, stale or trimmed manifests fail before sync/generation |
 | T38 | Simplified Open WebUI config works | Endpoint query model, separate model, blank task prompts, raw api key mistake | Proposed; model resolves, task prompts stay optional, raw secret-like `api_key_env` is repairable/actionable |
+| T39 | Heartbeat grows new work before execution | Synced issue state plus no growth case yet | Implemented in `tests/test_lifecycle.py`; heartbeat runs growing sensor, executes only newly generated cases, and persists heartbeat latest/history state |
 
 ## Definition Of Done For Field-Ready UX
 
@@ -322,6 +402,7 @@ Goal: Treat `README.md`, `docs/COMMANDS.md`, `docs/CONFIGURATION.md`, `docs/HERM
 - [x] Regression tests T9-T24 pass or are covered by existing lifecycle/Hermes tests.
 - [x] Product-runtime contract validator is centralized across all generation paths.
 - [x] Direct issue-driven fix after sync is covered by canonical mapping and PR gate tests.
+- [x] Heartbeat first pass grows new work before execution and avoids rerunning old cases by default.
 - [ ] Hermes action safety classes are persisted and enforced across module outputs.
 - [ ] Wiki-only apply and Gitea issue/report/PR handoffs share one auditable write ledger. Issue create, issue evidence update, PR linkage, and Wiki update are covered first-pass; generic issue update and richer apply reconciliation remain pending.
 - [ ] SWQA PASS/HOLD gate requires exact repro, sibling-surface scan, boundary/invalid coverage, side-effect control, evidence paths, and explicit residual risk.

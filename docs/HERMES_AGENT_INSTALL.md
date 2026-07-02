@@ -112,6 +112,7 @@ PYTHONPATH="/root/repo/AI Quality Pilot/src" python3 -m quality_pilot.hermes ski
 
 /quality-pilot close-loop status
 /quality-pilot close-loop run-once
+/quality-pilot close-loop heartbeat
 
 /quality-pilot report status
 /quality-pilot report json

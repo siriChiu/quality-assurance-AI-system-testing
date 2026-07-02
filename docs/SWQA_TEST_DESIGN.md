@@ -53,7 +53,25 @@ bug_pattern_card:
 
 `/quality-pilot cases generate --init` is the first-time full-repo SWQA map. It scans README, code inventory, package metadata, existing runners, existing cases, and project rules, then creates executable product-runtime command contracts for functional, positive, negative, boundary, side-effect-safe, and stress/timeout-risk coverage.
 
-`/quality-pilot cases generate --growing` is the follow-up mode. It is not limited to issue-to-case conversion; it observes repo metadata, current issue mirrors, PR references, latest run state, reports, existing cases/runners, and project rules, then creates executable product-runtime command contracts from fresh signals.
+`/quality-pilot cases generate --growing` is the follow-up mode. It is intentionally aggressive and is not limited to issue-to-case conversion; it observes repo metadata, code inventory, current Gitea issue mirrors, linked PR references, recent git commit history, latest run state, reports, existing cases/runners, and project rules, then creates executable product-runtime command contracts from fresh signals. The default growth target is 20 cases, with a larger internal candidate pool for dedupe and selection. Duplicate existing cases or commands are treated as already-covered signals and do not consume the requested new-case budget.
+
+Before a growth candidate becomes YAML, it must pass through an SWQA operation matrix. The point is to create operation-level coverage, not just another command-shape smoke test.
+
+```yaml
+swqa_growth_operations:
+  surface_probe: read-only product-runtime command that proves the surface is reachable
+  invalid_option_rejection: product-runtime command with an injected invalid option and an oracle that expects rejection
+  boundary_invalid_value: product-runtime command with a safe invalid boundary value and an oracle that expects rejection
+  sibling_help_sweep: grouped sibling surfaces that share a parser or feature family
+  repeatability_probe: repeated side-effect-safe command to catch state leakage or flaky output paths
+  concurrency_probe: bounded parallel side-effect-safe command to catch shared-state or lock handling issues
+  timeout_baseline: bounded timeout wrapper around a safe command to catch hangs
+  monkey_help_sweep: bounded sweep of documented help/version surfaces
+  monkey_repeatability: repeated monkey sweep inside the same safe envelope
+  monkey_concurrency: concurrent monkey sweep inside the same safe envelope
+```
+
+Monkey-style growth is allowed only inside a bounded safe envelope. The first supported monkey sensor is `monkey_cli_help_sweep`, which groups documented CLI help/version surfaces and runs them through the configured product runtime. Destructive random actions, repo-only metadata probes, and unbounded synthetic invalid commands are not monkey tests.
 
 ```yaml
 growth_generation:
@@ -79,6 +97,10 @@ growth_generation:
     - sibling_surface
     - side_effect_safe
     - stress_timeout_risk
+  candidate_budget_rule:
+    duplicate_existing_case_or_command: record_as_existing_coverage
+    requested_count: limit_new_cases_written_only
+    continue_after_duplicate: true
   repo_signals:
     - code_inventory
     - README

@@ -136,6 +136,18 @@ Redmine import has two explicit paths:
 
 Legacy/raw/trimmed Redmine snapshots are rejected for `--redmine-issues`; this prevents stale local snapshot data from masking newer live Redmine descriptions, journals, or attachments.
 
+## Automation Profile Candidate
+
+`/quality-pilot setup` and `/quality-pilot doctor` write:
+
+```text
+.quality-pilot-project/state/automation-profile.candidate.json
+```
+
+This file is generated from repo/config analysis. It records the inferred product entrypoint, user-visible command candidates, generic fixture env names such as `QUALITY_PILOT_FIXTURE_PROFILE`, credential env placeholders such as `QUALITY_PILOT_TEST_USER`, target env names such as `QUALITY_PILOT_TARGET_HOST`, safety classes, and missing external facts.
+
+It must not contain raw secrets and must not be treated as verified test coverage. Case generation should use it as candidate context, then write runnable YAML only after command/oracle/fixture/side-effect review.
+
 ## Wiki Status
 
 `/quality-pilot setup` creates `.quality-pilot-project/rules/wiki-categories.yaml` and defaults `tracker.wiki_page` to `Quality Pilot Test Status`.

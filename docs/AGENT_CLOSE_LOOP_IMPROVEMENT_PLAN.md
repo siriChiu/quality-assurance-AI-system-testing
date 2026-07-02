@@ -73,7 +73,22 @@ Redmine 和 Gitea issues 都是問題來源。Redmine issue 經 `issues sync --r
 - Every module emits a contract. 輸入、輸出、confidence、missing inputs、evidence、next action 都要結構化。
 - No placeholder truth. readiness check 不能算 testcase；stale evidence 不能算 PASS；Wiki 不能比 latest verified run 更樂觀。
 - Product runtime only. `commands[].run` 必須使用已設定/已推論的產品 binary/API/runner，或使用者確認的 runner；repo-only metadata check、`python3 -c`、`compileall`、synthetic invalid command、`go test`、`go run` 不能偽裝成 testcase。
+- Candidate before contract. Repo/issue/README/subagent signals may create candidates, but final YAML can be written only after command safety, fixture requirements, oracle, side-effect boundary, and confidence are reviewed.
+- Product semantics stay outside core. Field evidence such as irctool is allowed in fixtures/docs, but reusable generator code must use generic runtime/profile/fixture abstractions and project-local rules.
 - Close loop state must be replayable. 任一 module 失敗後，下一次可以從 state/handoff/result 繼續，而不是要求使用者重講脈絡。
+
+## Flow Gaps Behind The Current Case Problems
+
+The recurring bad commands are not one isolated bug. They come from incomplete module boundaries:
+
+| Incomplete Flow | Resulting Symptom | Required Correction |
+|---|---|---|
+| `case generate` writes YAML directly from heuristics | README snippets and Redmine hints become official tests before review | Add candidate JSON and reviewer gate before contract writing |
+| Help/version fallback is treated as executable coverage | Many generated cases run the same `--help` command | Count help/version as readiness/surface probes unless the case objective is help behavior |
+| Fixture/env inference happens inside command string assembly | Product-shaped env names can leak into core | Resolve fixture inputs through generic `QUALITY_PILOT_FIXTURE_<FLAG>` and project overlay rules |
+| Subagent work is not one-candidate-at-a-time | Batch prompts mix intents and produce repetitive commands | Loop over candidates; persist prompt/version/result for each candidate |
+| Safety classification is binary | Unknown or lab-dependent commands are treated as safe or silently replaced | Use `read_only`, `mutating`, `credentialed`, `target_required`, `unknown`; unknown stops before YAML |
+| Validation, review, and audit boundaries are blurry | Users cannot tell schema validity from semantic QA truth | Keep schema validation separate from semantic review/audit findings |
 
 ## Target Agent Modules
 
@@ -176,6 +191,8 @@ Remaining gaps:
 - Oracle synthesis is shallow when expected/actual are noisy.
 - Sibling surface and boundary matrix are generated from policy, but not deeply grounded in code paths.
 - Fixture/config discovery is limited.
+- Candidate review is still not a first-class stage; direct YAML writing makes overfit fixes likely.
+- Help/version fallback can still mask weak product-behavior coverage when candidate quality is low.
 
 Required changes:
 - Add case generation subagents:
@@ -192,12 +209,15 @@ Required changes:
   - `fixture_confidence`
   - `side_effect_confidence`
 - Require reviewer gate before writing case when confidence is low.
+- Demote help/version fallback to readiness coverage unless the testcase objective is explicitly help/version behavior.
+- Keep product-specific fixture naming and command semantics in project overlay rules, not core generator code.
 
 Acceptance:
 - No two generated cases may have identical `commands[].run` unless they intentionally share a setup preflight and differ in assertion/oracle.
 - Generated Redmine cases include exact issue objective, not just binary help.
 - If command cannot be made safe, output is `needs_input` with already-analyzed candidates and precise missing fields.
 - Generated YAML contains no placeholder readiness check, repo-only static check, synthetic invalid command, or developer test command.
+- Generated YAML is written only from approved candidates; rejected hints remain in candidate/review state.
 
 ### A4: Case Run Agent
 
@@ -413,6 +433,10 @@ Implementation progress on 2026-06-26:
 - Direct issue-driven fix after sync and PR blocking until verification are implemented and covered by lifecycle tests.
 - `/quality-pilot issues report` now writes per-issue markdown/JSON and creates gated linked Gitea issue evidence update payloads for FAIL/BLOCK latest results.
 - `src/quality_pilot/gitea_ledger.py` now records Gitea MCP ledger entries for Redmine issue create handoffs, issue evidence update handoffs, PR linkage handoffs, and Wiki update handoffs, including operation id, idempotency key, target type, request/result paths, source module, gate result, observed result status, and remote id/url when result JSON exists.
+- `setup` and `doctor` now write `state/automation-profile.candidate.json`, capturing repo-derived runtime, command candidates, fixture/credential/target env candidates, side-effect gaps, and bullet-listed missing external facts before testcase generation.
+- `/quality-pilot close-loop heartbeat` now provides a sensor-driven growth tick: run growing sensors, execute only newly generated or explicitly requested cases, record heartbeat state/history, return `idle` when no new work is produced, and expose 12-hour scheduling metadata for the next external trigger.
+- `cases generate --growing` now uses a more aggressive first-pass sensor set: Gitea issue snapshots, linked PR references, recent git commit history, repo code roots, latest run state, existing cases, README surfaces, and bounded monkey CLI help sweeps. The default growth target is 20 cases with a larger candidate pool for dedupe and selection.
+- Growth candidates now pass through an SWQA operation matrix before YAML is written: surface probe, invalid-option rejection, boundary invalid-value rejection, sibling sweep, repeatability, concurrency, timeout baseline, and bounded monkey sweep variants. Duplicate existing commands no longer consume the requested new-case budget, so follow-up growth keeps searching for deeper operation-level coverage.
 
 ### CL0: Stabilize First-Run Truth
 
@@ -426,11 +450,13 @@ Tasks:
 - CL0-05 Add smoke tests for clean repo with executable and clean repo without executable.
 - CL0-06 Enforce product-runtime-only `commands[].run` across init, growing, Redmine, and Gitea issue generation.
 - CL0-07 Record repo-only checks and developer commands as readiness/implementation hints, not testcase commands.
+- CL0-08 Persist setup-time automation profile candidates before case generation and expose them through `doctor`.
 
 Acceptance:
 - Clean repo with `cmd/tool/tool` generates cases without asking for binary.
 - Clean repo without executable returns `needs_input`, `generated_count: 0`, and writes no case YAML.
 - Generated YAML never contains repo-only checks, `python3 -c`, `compileall`, synthetic invalid commands, `go test`, or `go run` unless the user explicitly configured that command as the product runner.
+- `setup`/`doctor` produce an automation profile candidate so later generation can ask only for missing external facts after repo analysis.
 
 ### CL1: Module Contracts And Session State
 
@@ -556,9 +582,11 @@ Tasks:
 - CL8-04 Add dry-run simulation.
 - CL8-05 Add end-to-end fixture test with fake Redmine/Gitea/MCP.
 - CL8-06 Add one-command flow for Gitea-only issue input as well as Redmine input.
+- CL8-07 Expand heartbeat sensors beyond growing cases: issue delta, code diff, stale evidence, report blockers, PR references, git history, monkey sweeps, and subagent candidate review queue.
 
 Acceptance:
 - One command can run a Redmine or Gitea issue through sync, canonical mapping, either issue-driven fix handoff or case generation, safe execution, report/evidence, linked Gitea issue writeback, fix/PR readiness, and Wiki publication, stopping only for missing external facts or gated writes.
+- Heartbeat does not waste cycles on already-covered work; if sensors produce no new candidates, it reports `idle` unless explicitly configured to rerun existing cases.
 
 ### CL9: SWQA Pattern And Readiness Gate
 

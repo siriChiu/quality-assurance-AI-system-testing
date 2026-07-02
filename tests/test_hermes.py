@@ -159,6 +159,7 @@ class HermesDispatchTest(unittest.TestCase):
                 "/quality-pilot cases run EXAMPLE-001",
                 "/quality-pilot close-loop status",
                 "/quality-pilot close-loop run-once",
+                "/quality-pilot close-loop heartbeat",
                 "/quality-pilot report status",
                 "/quality-pilot report json",
                 "/quality-pilot tracker plan-write",
@@ -223,6 +224,8 @@ class HermesDispatchTest(unittest.TestCase):
             self.assertIn("/quality-pilot cases generate --growing", manifest["commands"])
             self.assertIn("/quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]", manifest["commands"])
             self.assertIn("/quality-pilot cases run <case_id>", manifest["commands"])
+            self.assertIn("/quality-pilot close-loop heartbeat", manifest["commands"])
+            self.assertNotIn("/quality-pilot close-loop watch", manifest["commands"])
             self.assertNotIn("/quality-pilot qa-test help", manifest["commands"])
             self.assertEqual(manifest["permissions"]["tracker_write"], "write_gate_apply_only")
             self.assertIn("gitea_mcp_read_and_gated_wiki_write_when_configured", manifest["permissions"]["network"])
@@ -314,6 +317,8 @@ class HermesDispatchTest(unittest.TestCase):
             self.assertIn("/quality-pilot doctor --fix", text)
             self.assertNotIn("/quality-pilot help qa-test", text)
             self.assertIn("/quality-pilot cases generate --init", text)
+            self.assertIn("/quality-pilot close-loop heartbeat", text)
+            self.assertNotIn("/quality-pilot close-loop watch", text)
             self.assertIn("/quality-pilot subagent status", text)
             self.assertIn("/quality-pilot subagent configure", text)
             self.assertIn("https://172.17.20.220/", text)

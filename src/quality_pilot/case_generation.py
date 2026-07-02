@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import shlex
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +34,10 @@ class CaseGenerationError(RuntimeError):
 
 
 SUPPORTED_PROFILES = {"auto", "cli", "api", "hardware", "repo"}
-DEFAULT_SCRATCH_COUNT = 5
+DEFAULT_SCRATCH_COUNT = 20
+GROWTH_CANDIDATE_MULTIPLIER = 8
+GROWTH_CANDIDATE_MIN_BUDGET = 80
+GROWTH_CANDIDATE_MAX_BUDGET = 240
 GROWTH_CONTEXT_NAME = "growth-context.json"
 INIT_CONTEXT_NAME = "init-context.json"
 
@@ -241,10 +245,17 @@ def generate_cases_init(
     questions: list[dict[str, Any]] = []
     seen = existing_case_fingerprints(config)
     in_batch: set[str] = set()
+    seen_command_runs = existing_case_command_runs(config)
+    in_batch_command_runs: set[str] = set()
+    existing_coverage_count = 0
 
     for index, candidate in enumerate(candidates, start=1):
+        if count is not None and len(generated) + existing_coverage_count >= count:
+            break
         fingerprint = candidate_fingerprint(candidate)
         if fingerprint in seen or fingerprint in in_batch:
+            if fingerprint in seen:
+                existing_coverage_count += 1
             deduped.append(
                 {
                     "title": candidate.get("title"),
@@ -257,10 +268,25 @@ def generate_cases_init(
         contract = draft_contract_from_init(config, candidate=candidate, index=index, context=context)
         path = config.paths.cases / f"{contract['case_id']}.yaml"
         if path.exists() and not force:
+            existing_coverage_count += 1
             skipped.append({"case_id": contract["case_id"], "path": _relative_or_str(path, config.root), "reason": "exists"})
             continue
         _enforce_generated_contract_commands(config, contract)
+        duplicate_command = _duplicate_generated_command_reason(contract, seen_command_runs, in_batch_command_runs)
+        if duplicate_command:
+            if duplicate_command.get("reason") == "duplicate_existing_command":
+                existing_coverage_count += 1
+            deduped.append(
+                {
+                    "case_id": contract["case_id"],
+                    "title": contract.get("title"),
+                    "fingerprint": fingerprint,
+                    **duplicate_command,
+                }
+            )
+            continue
         path.write_text(_dump_yaml(contract), encoding="utf-8")
+        in_batch_command_runs.update(_contract_command_runs(contract))
         item_questions = contract.get("quality_pilot", {}).get("questions", [])
         if item_questions:
             questions.append({"case_id": contract["case_id"], "questions": item_questions})
@@ -308,6 +334,7 @@ def generate_cases_init(
         "generated_count": len(generated),
         "skipped_count": len(skipped),
         "deduped_count": len(deduped),
+        "existing_coverage_count": existing_coverage_count,
         "questions": questions,
         "missing_inputs": missing_inputs,
         "missing_input_count": len(missing_inputs),
@@ -381,6 +408,7 @@ def generate_cases_growing(
             ),
         )
         payload["growth_seed_count"] = len(context["growth_seeds"])
+        payload["growth_sensor_summary"] = context.get("growth_sensor_summary", {})
         payload["candidate_source"] = candidate_source
         return payload
 
@@ -390,10 +418,17 @@ def generate_cases_growing(
     questions: list[dict[str, Any]] = []
     seen = existing_case_fingerprints(config)
     in_batch: set[str] = set()
+    seen_command_runs = existing_case_command_runs(config)
+    in_batch_command_runs: set[str] = set()
+    existing_coverage_count = 0
 
-    for index, candidate in enumerate(candidates[:count], start=1):
+    for index, candidate in enumerate(candidates, start=1):
+        if count is not None and len(generated) >= count:
+            break
         fingerprint = candidate_fingerprint(candidate)
         if fingerprint in seen or fingerprint in in_batch:
+            if fingerprint in seen:
+                existing_coverage_count += 1
             deduped.append(
                 {
                     "title": candidate.get("title"),
@@ -406,10 +441,25 @@ def generate_cases_growing(
         contract = draft_contract_from_growth(config, candidate=candidate, index=index, context=context)
         path = config.paths.cases / f"{contract['case_id']}.yaml"
         if path.exists() and not force:
+            existing_coverage_count += 1
             skipped.append({"case_id": contract["case_id"], "path": _relative_or_str(path, config.root), "reason": "exists"})
             continue
         _enforce_generated_contract_commands(config, contract)
+        duplicate_command = _duplicate_generated_command_reason(contract, seen_command_runs, in_batch_command_runs)
+        if duplicate_command:
+            if duplicate_command.get("reason") == "duplicate_existing_command":
+                existing_coverage_count += 1
+            deduped.append(
+                {
+                    "case_id": contract["case_id"],
+                    "title": contract.get("title"),
+                    "fingerprint": fingerprint,
+                    **duplicate_command,
+                }
+            )
+            continue
         path.write_text(_dump_yaml(contract), encoding="utf-8")
+        in_batch_command_runs.update(_contract_command_runs(contract))
         item_questions = contract.get("quality_pilot", {}).get("questions", [])
         if item_questions:
             questions.append({"case_id": contract["case_id"], "questions": item_questions})
@@ -422,6 +472,7 @@ def generate_cases_growing(
                 "profile": contract.get("profile"),
                 "growth_seed": contract.get("growth_seed", {}).get("id"),
                 "swqa_dimensions": contract.get("swqa_dimensions", []),
+                "swqa_operation": contract.get("quality_pilot", {}).get("swqa_operation", {}),
             }
         )
 
@@ -439,6 +490,7 @@ def generate_cases_growing(
         "resolved_profile": context["resolved_profile"],
         "growth_context_path": _relative_or_str(context_path, config.root),
         "growth_seed_count": len(context["growth_seeds"]),
+        "growth_sensor_summary": context.get("growth_sensor_summary", {}),
         "candidate_source": candidate_source,
         "candidate_count": len(candidates),
         "generated": generated,
@@ -447,6 +499,7 @@ def generate_cases_growing(
         "generated_count": len(generated),
         "skipped_count": len(skipped),
         "deduped_count": len(deduped),
+        "existing_coverage_count": existing_coverage_count,
         "questions": questions,
         "missing_inputs": missing_inputs,
         "missing_input_count": len(missing_inputs),
@@ -667,6 +720,8 @@ def build_growth_context(
     if issue_id is not None:
         items = [item for item in items if int(item.get("issue_id", -1)) == issue_id]
     existing_cases = existing_case_summaries(config)
+    repo_inventory = scan_repo_inventory(config)
+    git_history = summarize_git_history(config)
     latest_run = load_state_json(config, "latest-run.json")
     publish_plan = load_state_json(config, "publish-plan.json")
     pr_refs = collect_pr_references(items)
@@ -689,10 +744,13 @@ def build_growth_context(
         "latest_run": summarize_latest_run(latest_run),
         "publish_plan": summarize_publish_plan(publish_plan),
         "existing_cases": existing_cases,
+        "repo_inventory": repo_inventory,
+        "git_history": git_history,
         "existing_runners": file_summaries(config.paths.runners),
         "project_rules": file_summaries(config.paths.rules),
     }
     context["growth_seeds"] = build_growth_seeds(context)
+    context["growth_sensor_summary"] = growth_sensor_summary(context)
     return context
 
 
@@ -728,14 +786,51 @@ def build_init_seeds(context: dict[str, Any]) -> list[dict[str, Any]]:
     inventory = context["repo_inventory"]
     project_name = str(signals.get("project_name") or context["feature"] or "Repository")
     seeds: list[dict[str, Any]] = []
+    readme_operation_seed_count = 0
+    for surface in signals.get("readme_cli_operations", [])[:16]:
+        args = surface.get("args") if isinstance(surface, dict) else None
+        if not isinstance(args, list) or not args:
+            continue
+        label = str(surface.get("label") or " ".join(str(item) for item in args))
+        seeds.append(
+            {
+                "id": f"readme-op-{_slug(label).lower()}",
+                "type": "readme_cli_operation",
+                "title": label,
+                "summary": "Read-only product CLI operation documented in README; requires prepared runtime fixture when credentials or target are needed.",
+                "surface": label,
+                "command_args": [str(item) for item in args],
+                "command_source": surface.get("source") or "README",
+                "requires_prepared_environment": bool(surface.get("requires_prepared_environment")),
+                "environment_requirements": surface.get("environment_requirements", []),
+            }
+        )
+        readme_operation_seed_count += 1
+    if readme_operation_seed_count == 0:
+        for surface in signals.get("readme_cli_surfaces", [])[:16]:
+            args = surface.get("args") if isinstance(surface, dict) else None
+            if not isinstance(args, list) or not args:
+                continue
+            label = str(surface.get("label") or " ".join(str(item) for item in args))
+            seeds.append(
+                {
+                    "id": f"readme-cli-{_slug(label).lower()}",
+                    "type": "readme_cli_surface",
+                    "title": label,
+                    "summary": "Side-effect-safe product CLI surface documented in README.",
+                    "surface": label,
+                    "command_args": [str(item) for item in args],
+                    "command_source": surface.get("source") or "README",
+                }
+            )
     for command in signals.get("cli_commands", [])[:4]:
         seeds.append(
             {
-                "id": f"cli-{_slug(str(command)).lower()}",
+                "id": f"cli-{_slug(command).lower()}",
                 "type": "cli_command",
-                "title": f"{command} CLI",
-                "summary": "CLI entry point discovered from project metadata.",
-                "surface": str(command),
+                "title": f"{command} command surface",
+                "summary": f"Exercise the discovered CLI entry point `{command}` with safe probes.",
+                "surface": command,
             }
         )
     for package_file in inventory.get("package_files", [])[:4]:
@@ -775,11 +870,9 @@ def build_init_candidates(context: dict[str, Any], *, count: int | None = None) 
     candidates: list[dict[str, Any]] = []
     seeds = context.get("init_seeds", [])
     specs = init_dimension_specs()
-    for seed in seeds:
-        for spec in specs:
+    for spec in specs:
+        for seed in seeds:
             candidates.append(candidate_from_init_seed(context, seed, spec))
-    if count is not None:
-        return candidates[:count]
     return candidates
 
 
@@ -814,6 +907,13 @@ def draft_contract_from_init(
     fingerprint = candidate_fingerprint(candidate)
     case_id = f"INIT-{_slug(str(candidate.get('feature') or context['feature']))}-{fingerprint[:8].upper()}"
     commands = safe_commands_for_generated_case(config, case_id=case_id, candidate=candidate, context=context)
+    seed = candidate["init_seed"]
+    executable_scope = (
+        "prepared_environment_readonly_product_command"
+        if seed.get("type") == "readme_cli_operation"
+        else "side_effect_safe_probe"
+    )
+    environment_requirements = seed.get("environment_requirements") if isinstance(seed.get("environment_requirements"), list) else []
     return {
         "case_id": case_id,
         "title": str(candidate["title"]),
@@ -835,7 +935,10 @@ def draft_contract_from_init(
             "generation_mode": "init",
             "review_required_before_run": False,
             "executable": True,
-            "executable_scope": "side_effect_safe_probe",
+            "executable_scope": executable_scope,
+            "safe_command_source": seed.get("command_source") or "",
+            "requires_prepared_environment": bool(seed.get("requires_prepared_environment")),
+            "environment_requirements": environment_requirements,
             "interaction_scope": context.get("interaction_scope", "category"),
             "fast_mode": bool(context.get("fast")),
             "fast_mode_assumptions": context.get("fast_mode_assumptions", []),
@@ -871,6 +974,64 @@ def build_growth_seeds(context: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
 
+    for pr in context.get("pr_references", [])[:24]:
+        number = pr.get("number") or pr.get("id") or "unknown"
+        title = str(pr.get("title") or f"PR {number}")
+        seeds.append(
+            {
+                "id": f"pr-{number}",
+                "type": "pr_reference",
+                "title": title,
+                "summary": f"Linked Gitea PR reference from synced issue state: {title}",
+                "issue_id": pr.get("issue_id"),
+                "pr_number": number,
+                "url": pr.get("url"),
+                "dimensions_hint": ["exact_reproduction", "sibling_surface", "boundary", "side_effect_safe"],
+            }
+        )
+
+    git_history = context.get("git_history") if isinstance(context.get("git_history"), dict) else {}
+    for commit in git_history.get("recent_commits", [])[:30] if isinstance(git_history.get("recent_commits"), list) else []:
+        if not isinstance(commit, dict):
+            continue
+        short_hash = str(commit.get("short_hash") or commit.get("hash") or "commit")[:12]
+        subject = str(commit.get("subject") or short_hash)
+        touched_roots = commit.get("touched_roots") if isinstance(commit.get("touched_roots"), list) else []
+        seeds.append(
+            {
+                "id": f"git-{_slug(short_hash).lower()}",
+                "type": "git_commit",
+                "title": subject,
+                "summary": _compact_text(
+                    f"Recent commit {short_hash} touched {', '.join(str(item) for item in touched_roots[:5]) or 'unknown files'}."
+                ),
+                "commit": short_hash,
+                "touched_files": commit.get("touched_files", [])[:12] if isinstance(commit.get("touched_files"), list) else [],
+                "touched_roots": touched_roots[:8],
+                "issue_refs": commit.get("issue_refs", []) if isinstance(commit.get("issue_refs"), list) else [],
+                "pr_refs": commit.get("pr_refs", []) if isinstance(commit.get("pr_refs"), list) else [],
+                "dimensions_hint": ["sibling_surface", "boundary", "stress_timeout_risk", "side_effect_safe"],
+            }
+        )
+
+    inventory = context.get("repo_inventory") if isinstance(context.get("repo_inventory"), dict) else {}
+    for code_root in inventory.get("code_roots", [])[:16] if isinstance(inventory.get("code_roots"), list) else []:
+        if not isinstance(code_root, dict):
+            continue
+        root_name = str(code_root.get("path") or "").strip()
+        if not root_name:
+            continue
+        seeds.append(
+            {
+                "id": f"code-root-{_slug(root_name).lower()}",
+                "type": "code_root",
+                "title": root_name,
+                "summary": f"{code_root.get('count')} source files under `{root_name}`; expand adjacent behavior and regression probes.",
+                "surface": root_name,
+                "dimensions_hint": ["sibling_surface", "boundary", "invalid_input", "stress_timeout_risk"],
+            }
+        )
+
     latest = context.get("latest_run", {})
     for result in latest.get("interesting_results", []):
         case_id = result.get("case_id") or "unknown"
@@ -898,6 +1059,49 @@ def build_growth_seeds(context: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
 
+    readme_operation_seed_count = 0
+    for surface in context["repo_signals"].get("readme_cli_operations", [])[:8]:
+        args = surface.get("args") if isinstance(surface, dict) else None
+        if not isinstance(args, list) or not args:
+            continue
+        label = str(surface.get("label") or " ".join(str(item) for item in args))
+        seeds.append(
+            {
+                "id": f"readme-op-{_slug(label).lower()}",
+                "type": "readme_cli_operation",
+                "title": label,
+                "summary": "Read-only product CLI operation documented in README; requires prepared runtime fixture when credentials or target are needed.",
+                "feature": label,
+                "command_args": [str(item) for item in args],
+                "command_source": surface.get("source") or "README",
+                "requires_prepared_environment": bool(surface.get("requires_prepared_environment")),
+                "environment_requirements": surface.get("environment_requirements", []),
+                "dimensions_hint": ["functional", "positive", "side_effect_safe"],
+            }
+        )
+        readme_operation_seed_count += 1
+
+    if readme_operation_seed_count == 0:
+        for surface in context["repo_signals"].get("readme_cli_surfaces", [])[:8]:
+            args = surface.get("args") if isinstance(surface, dict) else None
+            if not isinstance(args, list) or not args:
+                continue
+            label = str(surface.get("label") or " ".join(str(item) for item in args))
+            seeds.append(
+                {
+                    "id": f"readme-cli-{_slug(label).lower()}",
+                    "type": "readme_cli_surface",
+                    "title": label,
+                    "summary": "Side-effect-safe product CLI surface documented in README.",
+                    "feature": label,
+                    "command_args": [str(item) for item in args],
+                    "command_source": surface.get("source") or "README",
+                "dimensions_hint": ["functional", "side_effect_safe", "sibling_surface"],
+            }
+        )
+
+    seeds.extend(_monkey_cli_sweep_seeds(context))
+
     if context.get("feature") or not seeds:
         seeds.insert(
             0,
@@ -912,28 +1116,138 @@ def build_growth_seeds(context: dict[str, Any]) -> list[dict[str, Any]]:
     return seeds
 
 
+def _monkey_cli_sweep_seeds(context: dict[str, Any]) -> list[dict[str, Any]]:
+    surfaces = []
+    for surface in context.get("repo_signals", {}).get("readme_cli_surfaces", []):
+        if not isinstance(surface, dict):
+            continue
+        args = surface.get("args")
+        if not isinstance(args, list) or not args:
+            continue
+        normalized = [str(item) for item in args]
+        lowered = [item.lower() for item in normalized]
+        if lowered[-1:] == ["--help"] or lowered in (["--version"], ["-v"]):
+            surfaces.append({
+                "args": normalized,
+                "label": str(surface.get("label") or _readme_cli_surface_label(normalized)),
+                "source": surface.get("source") or "README",
+            })
+    if not surfaces:
+        surfaces = [{"args": ["--help"], "label": "root help", "source": "runtime profile"}]
+
+    seeds: list[dict[str, Any]] = []
+    chunk_size = 4
+    for index in range(0, min(len(surfaces), 32), chunk_size):
+        group = surfaces[index:index + chunk_size]
+        labels = [str(item["label"]) for item in group]
+        seeds.append(
+            {
+                "id": f"monkey-cli-sweep-{index // chunk_size + 1}",
+                "type": "monkey_cli_help_sweep",
+                "title": f"Bounded monkey CLI sweep {index // chunk_size + 1}",
+                "summary": "Deterministic side-effect-safe monkey sweep across documented CLI help/version surfaces.",
+                "command_groups": [item["args"] for item in group],
+                "surface": ", ".join(labels),
+                "command_source": "README/runtime profile",
+                "dimensions_hint": ["monkey", "sibling_surface", "side_effect_safe", "stress_timeout_risk"],
+            }
+        )
+    return seeds
+
+
+def growth_sensor_summary(context: dict[str, Any]) -> dict[str, Any]:
+    seeds = context.get("growth_seeds") if isinstance(context.get("growth_seeds"), list) else []
+    seed_counts: dict[str, int] = {}
+    for seed in seeds:
+        if not isinstance(seed, dict):
+            continue
+        seed_type = str(seed.get("type") or "unknown")
+        seed_counts[seed_type] = seed_counts.get(seed_type, 0) + 1
+    git_history = context.get("git_history") if isinstance(context.get("git_history"), dict) else {}
+    repo_inventory = context.get("repo_inventory") if isinstance(context.get("repo_inventory"), dict) else {}
+    return {
+        "seed_count": len(seeds),
+        "seed_counts": dict(sorted(seed_counts.items())),
+        "issue_count": context.get("issue_snapshot", {}).get("open_count", 0),
+        "pr_reference_count": len(context.get("pr_references", []) if isinstance(context.get("pr_references"), list) else []),
+        "recent_commit_count": git_history.get("recent_commit_count", 0),
+        "repo_analyzed_files_count": repo_inventory.get("analyzed_files_count", 0),
+        "monkey_seed_count": seed_counts.get("monkey_cli_help_sweep", 0),
+    }
+
+
 def build_growth_candidates(context: dict[str, Any], *, count: int) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     specs = growth_dimension_specs()
+    budget = min(
+        GROWTH_CANDIDATE_MAX_BUDGET,
+        max(GROWTH_CANDIDATE_MIN_BUDGET, count * GROWTH_CANDIDATE_MULTIPLIER),
+    )
     for seed in context.get("growth_seeds", []):
         for spec in specs:
-            candidates.append(candidate_from_seed(context, seed, spec))
-            if len(candidates) >= count * 3:
-                return candidates
+            for operation in swqa_growth_operations_for_seed(seed, spec):
+                candidates.append(candidate_from_seed(context, seed, spec, operation=operation))
+                if len(candidates) >= budget:
+                    return candidates
     return candidates
 
 
-def candidate_from_seed(context: dict[str, Any], seed: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
-    title = f"{seed.get('title')}: {spec['title']}"
-    dimensions = sorted(set(spec["dimensions"]) | set(seed.get("dimensions_hint", [])[:1]))
+def swqa_growth_operations_for_seed(seed: dict[str, Any], spec: dict[str, Any]) -> list[dict[str, Any]]:
+    key = str(spec.get("key") or "")
+    seed_type = str(seed.get("type") or "")
+    operations: list[dict[str, Any]] = []
+
+    if seed_type == "monkey_cli_help_sweep":
+        operations.extend([
+            _swqa_operation("monkey_help_sweep", "Bounded monkey help sweep", ["monkey", "sibling_surface", "side_effect_safe"]),
+            _swqa_operation("monkey_repeatability", "Repeated monkey help sweep", ["monkey", "stress_timeout_risk", "side_effect_safe"]),
+            _swqa_operation("monkey_concurrency", "Concurrent monkey help sweep", ["monkey", "stress_timeout_risk", "side_effect_safe"]),
+        ])
+        return operations
+
+    if key in {"exact-reproduction", "functional-primary", "positive-smoke", "positive"}:
+        operations.append(_swqa_operation("surface_probe", "Read-only surface probe", ["functional", "positive", "side_effect_safe"]))
+    if key in {"negative-invalid-input", "negative-invalid-option"} or "negative" in spec.get("dimensions", []):
+        operations.append(_swqa_operation("invalid_option_rejection", "Invalid option rejection", ["negative", "invalid_input", "side_effect_safe"]))
+    if key.startswith("boundary") or "boundary" in spec.get("dimensions", []):
+        operations.append(_swqa_operation("boundary_invalid_value", "Boundary invalid value rejection", ["boundary", "invalid_input", "side_effect_safe"]))
+    if key.startswith("sibling") or "sibling_surface" in spec.get("dimensions", []):
+        operations.append(_swqa_operation("sibling_help_sweep", "Sibling surface sweep", ["sibling_surface", "side_effect_safe"]))
+    if key.startswith("stress") or "stress_timeout_risk" in spec.get("dimensions", []):
+        operations.extend([
+            _swqa_operation("repeatability_probe", "Repeated read-only probe", ["stress_timeout_risk", "side_effect_safe"]),
+            _swqa_operation("concurrency_probe", "Concurrent read-only probe", ["stress_timeout_risk", "side_effect_safe"]),
+            _swqa_operation("timeout_baseline", "Bounded timeout baseline", ["stress_timeout_risk", "boundary", "side_effect_safe"]),
+        ])
+
+    if not operations:
+        operations.append(_swqa_operation("surface_probe", "Read-only surface probe", ["side_effect_safe"]))
+    return operations
+
+
+def _swqa_operation(key: str, title: str, dimensions: list[str]) -> dict[str, Any]:
+    return {"key": key, "title": title, "dimensions": dimensions}
+
+
+def candidate_from_seed(
+    context: dict[str, Any],
+    seed: dict[str, Any],
+    spec: dict[str, Any],
+    *,
+    operation: dict[str, Any],
+) -> dict[str, Any]:
+    operation_title = str(operation.get("title") or operation.get("key") or "SWQA operation")
+    title = f"{seed.get('title')}: {spec['title']} - {operation_title}"
+    dimensions = sorted(set(spec["dimensions"]) | set(seed.get("dimensions_hint", [])[:1]) | set(operation.get("dimensions", [])))
     return {
         "title": title,
         "feature": seed.get("feature") or context["feature"],
         "profile": context["resolved_profile"],
         "expected": spec["expected"],
         "swqa_dimensions": dimensions,
+        "swqa_operation": operation,
         "growth_seed": seed,
-        "growth_reason": f"Expand {seed.get('type')} signal through {spec['key']} coverage.",
+        "growth_reason": f"Expand {seed.get('type')} signal through {spec['key']} coverage using {operation.get('key')} operation.",
         "six_hats": six_hats_for(seed, spec),
         "questions": [],
         "risk_controls": [
@@ -960,6 +1274,13 @@ def draft_contract_from_growth(
         candidate=candidate,
         context=context,
     )
+    seed = candidate["growth_seed"]
+    executable_scope = (
+        "prepared_environment_readonly_product_command"
+        if seed.get("type") == "readme_cli_operation"
+        else "side_effect_safe_probe"
+    )
+    environment_requirements = seed.get("environment_requirements") if isinstance(seed.get("environment_requirements"), list) else []
     return {
         "case_id": case_id,
         "title": str(candidate["title"]),
@@ -982,7 +1303,11 @@ def draft_contract_from_growth(
             "generation_mode": "growth",
             "review_required_before_run": False,
             "executable": True,
-            "executable_scope": "side_effect_safe_probe",
+            "executable_scope": executable_scope,
+            "safe_command_source": seed.get("command_source") or "",
+            "requires_prepared_environment": bool(seed.get("requires_prepared_environment")),
+            "environment_requirements": environment_requirements,
+            "swqa_operation": candidate.get("swqa_operation", {}),
             "interaction_scope": context.get("interaction_scope", "category"),
             "fast_mode": bool(context.get("fast")),
             "fast_mode_assumptions": context.get("fast_mode_assumptions", []),
@@ -1001,11 +1326,13 @@ def draft_contract_from_growth(
 
 def review_generated_cases(config: ProjectConfig) -> dict[str, Any]:
     reviews: list[dict[str, Any]] = []
+    semantic_findings: list[dict[str, Any]] = []
     for path in sorted([*config.paths.cases.glob("*.yaml"), *config.paths.cases.glob("*.yml")]):
         try:
             data = _load_yaml(path)
         except Exception:
             continue
+        semantic_findings.extend(_case_contract_semantic_findings(data, path=path, root=config.root))
         qa = data.get("quality_pilot") if isinstance(data.get("quality_pilot"), dict) else {}
         if qa.get("draft") or qa.get("questions"):
             reviews.append(
@@ -1017,7 +1344,13 @@ def review_generated_cases(config: ProjectConfig) -> dict[str, Any]:
                     "source": data.get("source"),
                 }
             )
-    return {"status": "ok", "draft_count": len(reviews), "drafts": reviews}
+    return {
+        "status": "needs_review" if semantic_findings else "ok",
+        "draft_count": len(reviews),
+        "drafts": reviews,
+        "semantic_finding_count": len(semantic_findings),
+        "semantic_findings": semantic_findings,
+    }
 
 
 def validate_generated_cases(config: ProjectConfig) -> dict[str, Any]:
@@ -1027,9 +1360,11 @@ def validate_generated_cases(config: ProjectConfig) -> dict[str, Any]:
         return {"status": "error", "error": exc.error, "message": exc.message, "path": exc.path}
     review = review_generated_cases(config)
     return {
-        "status": "ok",
+        "status": "needs_review" if review.get("semantic_findings") else "ok",
         "case_count": len(contracts),
         "draft_count": review["draft_count"],
+        "semantic_finding_count": review["semantic_finding_count"],
+        "semantic_findings": review["semantic_findings"],
         "cases": [
             {
                 "case_id": contract.case_id,
@@ -1041,6 +1376,132 @@ def validate_generated_cases(config: ProjectConfig) -> dict[str, Any]:
         ],
         "drafts": review["drafts"],
     }
+
+
+def _case_contract_semantic_findings(data: dict[str, Any], *, path: Path, root: Path) -> list[dict[str, Any]]:
+    case_id = str(data.get("case_id") or path.stem)
+    if not _is_issue_linked_case_contract(data, case_id):
+        return []
+    oracle_text = _case_contract_oracle_text(data)
+    if not _oracle_text_indicates_rejection(oracle_text):
+        return []
+    commands = data.get("commands") if isinstance(data.get("commands"), list) else []
+    mismatched_commands: list[dict[str, Any]] = []
+    for index, command in enumerate(commands):
+        if not isinstance(command, dict):
+            continue
+        expected_exit = _int_or_none(command.get("expected_exit_code"))
+        run = str(command.get("run") or "")
+        if expected_exit == 0 and not _command_wraps_negative_exit_assertion(run):
+            mismatched_commands.append(
+                {
+                    "index": index,
+                    "id": command.get("id"),
+                    "expected_exit_code": expected_exit,
+                }
+            )
+    if not mismatched_commands:
+        return []
+    return [
+        {
+            "id": "negative_oracle_expected_exit_code_mismatch",
+            "case_id": case_id,
+            "path": _relative_or_str(path, root),
+            "severity": "BLOCKER",
+            "commands": mismatched_commands,
+            "message": (
+                "The case oracle says the product should reject/fail the input, "
+                "but at least one command still expects exit code 0."
+            ),
+            "recommendation": (
+                "Set the command expected_exit_code to the product's rejection exit code, "
+                "or wrap the command with an explicit non-zero assertion and stderr/stdout oracle."
+            ),
+        }
+    ]
+
+
+def _is_issue_linked_case_contract(data: dict[str, Any], case_id: str) -> bool:
+    source = data.get("source") if isinstance(data.get("source"), dict) else {}
+    source_type = str(source.get("type") or "").lower()
+    return source_type in {"redmine", "issue"} or case_id.startswith(("REDMINE-", "ISSUE-"))
+
+
+def _case_contract_oracle_text(data: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key in ["title", "expected"]:
+        value = data.get(key)
+        if isinstance(value, str):
+            parts.append(value)
+    source = data.get("source") if isinstance(data.get("source"), dict) else {}
+    qa_summary = source.get("qa_summary") if isinstance(source.get("qa_summary"), dict) else {}
+    for key in ["expected", "observed", "problem", "reproduction"]:
+        value = qa_summary.get(key)
+        if isinstance(value, str):
+            parts.append(value)
+    for container in [source.get("safe_runner"), data.get("quality_pilot")]:
+        if isinstance(container, dict):
+            parts.extend(_oracle_values_from_mapping(container))
+    commands = data.get("commands") if isinstance(data.get("commands"), list) else []
+    for command in commands:
+        if isinstance(command, dict):
+            for key in ["expected_stdout", "expected_stderr", "stderr_contains", "stdout_contains", "oracle"]:
+                value = command.get(key)
+                if isinstance(value, str):
+                    parts.append(value)
+                elif isinstance(value, list):
+                    parts.extend(str(item) for item in value if str(item).strip())
+    return "\n".join(part for part in parts if str(part).strip())
+
+
+def _oracle_values_from_mapping(value: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    user_inputs = value.get("user_confirmed_inputs") if isinstance(value.get("user_confirmed_inputs"), dict) else {}
+    oracle = user_inputs.get("oracle") if isinstance(user_inputs.get("oracle"), list) else []
+    for item in oracle:
+        if isinstance(item, dict):
+            out.append(str(item.get("value") or ""))
+        else:
+            out.append(str(item))
+    safe_runner = value.get("safe_runner") if isinstance(value.get("safe_runner"), dict) else {}
+    if safe_runner:
+        out.extend(_oracle_values_from_mapping(safe_runner))
+    return out
+
+
+def _oracle_text_indicates_rejection(text: str) -> bool:
+    lowered = str(text or "").lower()
+    if not lowered:
+        return False
+    patterns = [
+        r"\btimeout\s*(?:0|zero)\b",
+        r"\bmust be positive\b",
+        r"\bshould\s+(?:fail|be rejected|return non[- ]?zero)\b",
+        r"\bmust\s+(?:fail|be rejected|return non[- ]?zero)\b",
+        r"\bexpected\s+(?:failure|non[- ]?zero|exit code\s+[1-9])\b",
+        r"\bstderr\b.*\b(?:invalid|error|must be positive)\b",
+        r"(?:應|应该|必須|必须).{0,12}(?:拒絕|拒绝|失敗|失败|非零|錯誤|错误|為正|为正)",
+        r"(?:不應|不应|不能|不可).{0,12}(?:成功|開始|开始|通過|通过)",
+    ]
+    return any(re.search(pattern, lowered) for pattern in patterns)
+
+
+def _command_wraps_negative_exit_assertion(command: str) -> bool:
+    text = str(command or "")
+    patterns = [
+        r"\btest\s+\$\?\s+-ne\s+0\b",
+        r"\[\s+\$\?\s+-ne\s+0\s+\]",
+        r"\bif\b.+\bthen\s+exit\s+1\b",
+        r"!\s+(?:\"?\$binary\"?|[A-Za-z0-9_./-]+)\b",
+    ]
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def draft_contract_for_issue(config: ProjectConfig, item: dict[str, Any]) -> dict[str, Any]:
@@ -1229,18 +1690,19 @@ def _ai_derived_redmine_safe_probe(config: ProjectConfig, issue: dict[str, Any])
     command_hint = next((command for command in commands if not _is_developer_test_command(command)), commands[0] if commands else "")
     command, analysis = _derive_side_effect_safe_command(config, issue, command_hint)
     oracle = qa_summary.get("expected") or "AI-derived probe exits with the expected return code and exercises the safest available issue-related surface."
+    expected_exit = _expected_exit_from_oracle_text(str(oracle))
     environment = qa_summary.get("environment") if isinstance(qa_summary.get("environment"), list) else []
     evidence = qa_summary.get("evidence") if isinstance(qa_summary.get("evidence"), list) else []
     return {
         "run": command,
         "source": analysis["source"],
         "source_type": "ai_derived",
-        "expected_exit_code": 0,
-        "expected_exit_code_source": "AI-derived safe probe default",
+        "expected_exit_code": expected_exit["code"],
+        "expected_exit_code_source": expected_exit["source"],
         "user_confirmed_inputs": {
             "command_source": analysis["source"],
-            "expected_exit_code": 0,
-            "expected_exit_code_source": "AI-derived safe probe default",
+            "expected_exit_code": expected_exit["code"],
+            "expected_exit_code_source": expected_exit["source"],
             "fixtures_environment": [{"field": "AI-derived", "value": value} for value in environment[:5]],
             "oracle": [{"field": "AI-derived expected behavior", "value": str(oracle)}],
             "side_effect_boundaries": [
@@ -1257,6 +1719,12 @@ def _ai_derived_redmine_safe_probe(config: ProjectConfig, issue: dict[str, Any])
         "requires_prepared_environment": True,
         "follow_up_needed": _redmine_follow_up_needed(issue, confirmed=False),
     }
+
+
+def _expected_exit_from_oracle_text(text: str) -> dict[str, Any]:
+    if _oracle_text_indicates_rejection(text):
+        return {"code": 1, "source": "AI-inferred rejection oracle"}
+    return {"code": 0, "source": "AI-derived safe probe default"}
 
 
 def _derive_side_effect_safe_command(config: ProjectConfig, issue: dict[str, Any], command_hint: str) -> tuple[str, dict[str, Any]]:
@@ -1358,14 +1826,70 @@ def _redmine_shell_arg_fragments(args: list[str]) -> list[str]:
             fragments.append(f'"${{QUALITY_PILOT_TARGET_HOST:-{_shell_default_value(next_value)}}}"')
             i += 2
             continue
-        if lowered in {"--login", "--config", "--config-file", "--fixture"} and next_value:
+        fixture_env = _fixture_env_name_for_flag_value(arg, next_value)
+        if fixture_env:
             fragments.append(shlex.quote(arg))
-            fragments.append(f'"${{QUALITY_PILOT_LOGIN_FILE:-{_shell_default_value(next_value)}}}"')
+            fragments.append(f'"${{{fixture_env}:-{_shell_default_value(next_value)}}}"')
             i += 2
             continue
         fragments.append(shlex.quote(arg))
         i += 1
     return fragments
+
+
+def _fixture_env_name_for_flag_value(flag: str, value: str) -> str:
+    if not flag.startswith("-") or not value:
+        return ""
+    lowered = flag.lower()
+    if lowered in _OUTPUT_VALUE_FLAGS or lowered in _CREDENTIAL_VALUE_FLAGS or lowered in _TARGET_VALUE_FLAGS:
+        return ""
+    if not (_flag_name_suggests_fixture_path(lowered) or _value_looks_like_fixture_path(value)):
+        return ""
+    name = re.sub(r"[^A-Za-z0-9]+", "_", flag.strip("-")).strip("_").upper()
+    return f"QUALITY_PILOT_FIXTURE_{name or 'PATH'}"
+
+
+def _flag_name_suggests_fixture_path(flag: str) -> bool:
+    if not flag.startswith("-"):
+        return False
+    name = flag.strip("-").replace("_", "-").lower()
+    words = {part for part in name.split("-") if part}
+    if words & {"config", "fixture", "profile", "login", "credential", "credentials", "certificate", "cert"}:
+        return True
+    return name.endswith("-file") or name.endswith("-path")
+
+
+def _value_looks_like_fixture_path(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    if "/" in text or "\\" in text:
+        return True
+    return lowered.endswith((
+        ".cfg",
+        ".conf",
+        ".ini",
+        ".json",
+        ".pem",
+        ".profile",
+        ".properties",
+        ".toml",
+        ".txt",
+        ".xml",
+        ".yaml",
+        ".yml",
+    ))
+
+
+def _fixture_env_names_in_command(command: str) -> list[str]:
+    names = re.findall(r"\bQUALITY_PILOT_FIXTURE_[A-Z0-9_]+\b", command)
+    return sorted(set(names))
+
+
+_CREDENTIAL_VALUE_FLAGS = {"-p", "--passwd", "--password", "--pass", "--token", "--api-key", "--secret"}
+_TARGET_VALUE_FLAGS = {"-r", "--host", "--hostname", "--target", "--bmc", "--server", "--url", "--endpoint"}
+_OUTPUT_VALUE_FLAGS = {"-o", "--out", "--output", "--outfile", "--output-file"}
 
 
 def _shell_default_value(value: str) -> str:
@@ -1466,8 +1990,8 @@ def _redmine_environment_requirements(
         requirements.append("Set QUALITY_PILOT_TEST_USER when the prepared test account differs from the issue example user.")
     if "QUALITY_PILOT_TARGET_HOST" in command:
         requirements.append("Set QUALITY_PILOT_TARGET_HOST to the prepared test system/BMC address.")
-    if "QUALITY_PILOT_LOGIN_FILE" in command:
-        requirements.append("Set QUALITY_PILOT_LOGIN_FILE to the prepared login/config fixture path.")
+    for env_name in _fixture_env_names_in_command(command):
+        requirements.append(f"Set {env_name} to the prepared fixture/config path referenced by the command.")
     environment = qa_summary.get("environment") if isinstance(qa_summary.get("environment"), list) else []
     for item in environment[:5]:
         requirements.append(f"Prepare Redmine test environment/resource: {item}")
@@ -1698,7 +2222,7 @@ def draft_contract_from_scratch(
 
 def inspect_repo_signals(config: ProjectConfig) -> dict[str, Any]:
     root = config.root
-    readme_text = _first_existing_text(root, ["README.md", "README.rst", "README.txt"], limit=6000)
+    readme_text = _first_existing_text(root, ["README.md", "README.rst", "README.txt"], limit=80000)
     pyproject_text = _read_text_if_exists(root / "pyproject.toml", limit=8000)
     package_json_text = _read_text_if_exists(root / "package.json", limit=8000)
     go_mod_text = _read_text_if_exists(root / "go.mod", limit=4000)
@@ -1709,6 +2233,19 @@ def inspect_repo_signals(config: ProjectConfig) -> dict[str, Any]:
     cli_commands = _extract_pyproject_scripts(pyproject_text) + _extract_package_bins(package_json_text)
     project_name = str(config.data.get("project", {}).get("name") or root.name)
     suggested_command = cli_commands[0] if cli_commands else ""
+    runtime_binary = primary_runtime_binary(config)
+    readme_cli_surfaces = _readme_cli_surfaces_from_text(
+        readme_text,
+        runtime_binary=runtime_binary,
+        cli_commands=cli_commands,
+        project_name=project_name,
+    )
+    readme_cli_operations = _readme_cli_operations_from_text(
+        readme_text,
+        runtime_binary=runtime_binary,
+        cli_commands=cli_commands,
+        project_name=project_name,
+    )
     return {
         "project_name": project_name,
         "detected_profile": _detect_profile(readme_text, pyproject_text, package_json_text, go_mod_text, openapi_exists, cli_commands),
@@ -1721,6 +2258,8 @@ def inspect_repo_signals(config: ProjectConfig) -> dict[str, Any]:
         "existing_runner_count": existing_runner_count,
         "existing_case_count": existing_case_count,
         "cli_commands": cli_commands[:5],
+        "readme_cli_operations": readme_cli_operations[:24],
+        "readme_cli_surfaces": readme_cli_surfaces[:24],
         "suggested_command": suggested_command,
     }
 
@@ -1818,6 +2357,88 @@ def scan_repo_inventory(config: ProjectConfig) -> dict[str, Any]:
         "package_files": package_files[:24],
         "ignored_runtime_dirs": sorted(ignored_dirs),
     }
+
+
+def summarize_git_history(config: ProjectConfig, *, limit: int = 30) -> dict[str, Any]:
+    git_dir = config.root / ".git"
+    if not git_dir.exists():
+        return {"exists": False, "recent_commits": []}
+    try:
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(config.root),
+                "log",
+                f"-n{limit}",
+                "--date=iso-strict",
+                "--name-only",
+                "--pretty=format:__QP_COMMIT__%x1f%H%x1f%h%x1f%ad%x1f%s",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"exists": True, "status": "unreadable", "error": type(exc).__name__, "recent_commits": []}
+    if completed.returncode != 0:
+        return {
+            "exists": True,
+            "status": "unreadable",
+            "error": _compact_text(completed.stderr or completed.stdout, limit=240),
+            "recent_commits": [],
+        }
+
+    commits: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    for raw_line in completed.stdout.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("__QP_COMMIT__"):
+            if current:
+                commits.append(current)
+            parts = line.split("\x1f", 4)
+            current = {
+                "hash": parts[1] if len(parts) > 1 else "",
+                "short_hash": parts[2] if len(parts) > 2 else "",
+                "date": parts[3] if len(parts) > 3 else "",
+                "subject": parts[4] if len(parts) > 4 else "",
+                "touched_files": [],
+                "touched_roots": [],
+                "issue_refs": [],
+                "pr_refs": [],
+            }
+            continue
+        if current is None:
+            continue
+        files = current.setdefault("touched_files", [])
+        if isinstance(files, list) and len(files) < 20:
+            files.append(line)
+    if current:
+        commits.append(current)
+
+    for commit in commits:
+        touched_files = [str(item) for item in commit.get("touched_files", []) if str(item).strip()]
+        commit["touched_roots"] = sorted({Path(item).parts[0] for item in touched_files if Path(item).parts})[:8]
+        issue_refs, pr_refs = _extract_issue_pr_refs(str(commit.get("subject") or ""))
+        commit["issue_refs"] = issue_refs
+        commit["pr_refs"] = pr_refs
+
+    return {
+        "exists": True,
+        "status": "ok",
+        "recent_commit_count": len(commits),
+        "recent_commits": commits[:limit],
+    }
+
+
+def _extract_issue_pr_refs(text: str) -> tuple[list[str], list[str]]:
+    issue_refs = sorted({match.group(1) for match in re.finditer(r"(?i)(?:fix(?:es|ed)?|close(?:s|d)?|issue)\s+#?(\d+)", text)})
+    pr_refs = sorted({match.group(1) for match in re.finditer(r"(?i)(?:pr|pull request)\s+#?(\d+)", text)})
+    pr_refs.extend(ref for ref in re.findall(r"\(#(\d+)\)", text) if ref not in pr_refs)
+    return issue_refs[:8], pr_refs[:8]
 
 
 def init_missing_inputs(context: dict[str, Any]) -> list[str]:
@@ -2072,6 +2693,51 @@ def existing_case_fingerprints(config: ProjectConfig) -> set[str]:
     return {item["fingerprint"] for item in existing_case_summaries(config) if item.get("fingerprint")}
 
 
+def existing_case_command_runs(config: ProjectConfig) -> dict[str, set[str]]:
+    runs: dict[str, set[str]] = {}
+    paths = sorted([*config.paths.cases.glob("*.yaml"), *config.paths.cases.glob("*.yml")]) if config.paths.cases.exists() else []
+    for path in paths:
+        try:
+            data = _load_yaml(path)
+        except Exception:
+            continue
+        case_id = str(data.get("case_id") or path.stem)
+        for run in _contract_command_runs(data):
+            runs.setdefault(run, set()).add(case_id)
+    return runs
+
+
+def _contract_command_runs(contract: dict[str, Any]) -> set[str]:
+    commands = contract.get("commands") if isinstance(contract.get("commands"), list) else []
+    runs: set[str] = set()
+    for command in commands:
+        if not isinstance(command, dict):
+            continue
+        run = str(command.get("run") or "").strip()
+        if run:
+            runs.add(run)
+    return runs
+
+
+def _duplicate_generated_command_reason(
+    contract: dict[str, Any],
+    existing_runs: dict[str, set[str]],
+    batch_runs: set[str],
+) -> dict[str, Any] | None:
+    case_id = str(contract.get("case_id") or "")
+    for run in _contract_command_runs(contract):
+        if run in batch_runs:
+            return {"reason": "duplicate_generated_command", "run": run}
+        existing_case_ids = sorted(existing_runs.get(run, set()) - {case_id})
+        if existing_case_ids:
+            return {
+                "reason": "duplicate_existing_command",
+                "run": run,
+                "existing_case_ids": existing_case_ids,
+            }
+    return None
+
+
 def file_summaries(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
@@ -2238,19 +2904,111 @@ def _safe_probe_command(config: ProjectConfig, *, candidate: dict[str, Any], con
     dimensions = {str(item) for item in candidate.get("swqa_dimensions", []) if item}
     runtime_binary = primary_runtime_binary(config)
     if runtime_binary:
+        operation = candidate.get("swqa_operation") if isinstance(candidate.get("swqa_operation"), dict) else {}
+        operation_key = str(operation.get("key") or "")
+        seed_groups = _candidate_seed_command_groups(candidate)
+        if seed_groups and operation_key in {"monkey_help_sweep", "sibling_help_sweep"}:
+            return _runtime_binary_group_command(runtime_binary, seed_groups)
+        if seed_groups and operation_key == "monkey_repeatability":
+            return _runtime_binary_repeat_group_command(runtime_binary, seed_groups)
+        if seed_groups and operation_key == "monkey_concurrency":
+            return _runtime_binary_concurrent_group_command(runtime_binary, seed_groups)
+        seed_args = _candidate_seed_command_args(candidate)
+        if operation_key == "invalid_option_rejection":
+            return _runtime_binary_invalid_option_command(runtime_binary, _base_args_for_operation(seed_args), _candidate_operation_slug(candidate, "invalid"))
+        if operation_key == "boundary_invalid_value":
+            return _runtime_binary_boundary_invalid_value_command(runtime_binary, _base_args_for_operation(seed_args), _candidate_operation_slug(candidate, "boundary"))
+        if operation_key == "repeatability_probe":
+            return _runtime_binary_repeat_command(runtime_binary, _safe_args_for_repeated_operation(seed_args))
+        if operation_key == "concurrency_probe":
+            return _runtime_binary_concurrent_command(runtime_binary, _safe_args_for_repeated_operation(seed_args))
+        if operation_key == "timeout_baseline":
+            return _runtime_binary_timeout_command(runtime_binary, _safe_args_for_repeated_operation(seed_args))
+        if operation_key == "sibling_help_sweep":
+            groups = _readme_help_surface_groups(config, runtime_binary=runtime_binary)
+            if groups:
+                return _runtime_binary_group_command(runtime_binary, groups)
+        if seed_args:
+            if _candidate_seed_type(candidate) == "readme_cli_operation":
+                return _runtime_binary_readme_operation_command(runtime_binary, seed_args)
+            return _runtime_binary_exec_command(runtime_binary, seed_args)
         if "stress_timeout_risk" in dimensions:
             return _runtime_binary_help_command(runtime_binary)
         if "sibling_surface" in dimensions:
-            subcommands = _readme_help_subcommands(config, runtime_binary)
-            if subcommands:
+            surfaces = [
+                surface
+                for surface in _readme_cli_surfaces(config, runtime_binary=runtime_binary)
+                if isinstance(surface.get("args"), list)
+                and surface["args"]
+                and surface["args"][-1] == "--help"
+                and len(surface["args"]) > 1
+            ]
+            if surfaces:
                 checks = " && ".join(
-                    _runtime_binary_help_fragment(runtime_binary, subcommand=subcommand)
-                    for subcommand in subcommands[:3]
+                    _runtime_binary_exec_fragment(runtime_binary, [str(item) for item in surface["args"]])
+                    for surface in surfaces[:3]
                 )
                 return _shell_command(checks)
         return _runtime_binary_help_command(runtime_binary)
 
     raise CaseGenerationError("runtime_profile_required_for_executable_command")
+
+
+def _candidate_operation_slug(candidate: dict[str, Any], prefix: str) -> str:
+    seed = candidate.get("growth_seed") if isinstance(candidate.get("growth_seed"), dict) else {}
+    operation = candidate.get("swqa_operation") if isinstance(candidate.get("swqa_operation"), dict) else {}
+    raw = "-".join([
+        prefix,
+        str(seed.get("type") or "seed"),
+        str(seed.get("id") or seed.get("title") or ""),
+        str(operation.get("key") or ""),
+    ])
+    return _slug(raw).lower()[:40] or prefix
+
+
+def _base_args_for_operation(seed_args: list[str]) -> list[str]:
+    args = [str(item) for item in seed_args if str(item).strip()]
+    if args and args[-1] == "--help":
+        return args[:-1]
+    if args in (["--version"], ["-v"]):
+        return []
+    return [arg for arg in args if not arg.startswith("-")][:3]
+
+
+def _safe_args_for_repeated_operation(seed_args: list[str]) -> list[str]:
+    args = [str(item) for item in seed_args if str(item).strip()]
+    if args and args[-1] == "--help":
+        return args
+    if args in (["--version"], ["-v"]):
+        return args
+    base = [arg for arg in args if not arg.startswith("-")][:3]
+    return [*base, "--help"] if base else ["--help"]
+
+
+def _readme_help_surface_groups(config: ProjectConfig, *, runtime_binary: str) -> list[list[str]]:
+    groups: list[list[str]] = []
+    for surface in _readme_cli_surfaces(config, runtime_binary=runtime_binary):
+        args = surface.get("args") if isinstance(surface, dict) else None
+        if isinstance(args, list) and args and args[-1] == "--help":
+            groups.append([str(item) for item in args])
+    return groups[:8]
+
+
+def _candidate_seed_command_groups(candidate: dict[str, Any]) -> list[list[str]]:
+    for key in ["growth_seed", "init_seed"]:
+        seed = candidate.get(key)
+        if not isinstance(seed, dict):
+            continue
+        groups = seed.get("command_groups")
+        if not isinstance(groups, list):
+            continue
+        out: list[list[str]] = []
+        for group in groups:
+            if isinstance(group, list) and all(str(item).strip() for item in group):
+                out.append([str(item) for item in group])
+        if out:
+            return out
+    return []
 
 
 def _runtime_binary_exec_command(binary: str, args: list[str]) -> str:
@@ -2261,15 +3019,115 @@ def _runtime_binary_exec_command(binary: str, args: list[str]) -> str:
     return _shell_command(script)
 
 
+def _runtime_binary_group_command(binary: str, groups: list[list[str]]) -> str:
+    checks = " && ".join(_runtime_binary_exec_fragment(binary, args) for args in groups[:8])
+    return _shell_command(checks)
+
+
+def _runtime_binary_repeat_group_command(binary: str, groups: list[list[str]]) -> str:
+    checks = " && ".join(_runtime_binary_repeat_fragment(binary, args, repeats=3) for args in groups[:4])
+    return _shell_command(checks)
+
+
+def _runtime_binary_concurrent_group_command(binary: str, groups: list[list[str]]) -> str:
+    checks = " && ".join(_runtime_binary_concurrent_fragment(binary, args) for args in groups[:4])
+    return _shell_command(checks)
+
+
+def _runtime_binary_invalid_option_command(binary: str, args: list[str], slug: str) -> str:
+    invalid_flag = f"--quality-pilot-invalid-{slug}"
+    args_text = " ".join(_redmine_shell_arg_fragments([*args, invalid_flag]))
+    script = (
+        f'binary="${{QUALITY_PILOT_BINARY:-{binary}}}"; command -v "$binary" >/dev/null 2>&1 || test -x "$binary"; '
+        f'"$binary" {args_text} >/dev/null 2>&1; rc=$?; test "$rc" -ne 0'
+    )
+    return _shell_command(script)
+
+
+def _runtime_binary_boundary_invalid_value_command(binary: str, args: list[str], slug: str) -> str:
+    invalid_flag = f"--quality-pilot-boundary-{slug}"
+    args_text = " ".join(_redmine_shell_arg_fragments([*args, invalid_flag, ""]))
+    script = (
+        f'binary="${{QUALITY_PILOT_BINARY:-{binary}}}"; command -v "$binary" >/dev/null 2>&1 || test -x "$binary"; '
+        f'"$binary" {args_text} >/dev/null 2>&1; rc=$?; test "$rc" -ne 0'
+    )
+    return _shell_command(script)
+
+
+def _runtime_binary_repeat_command(binary: str, args: list[str]) -> str:
+    return _shell_command(_runtime_binary_repeat_fragment(binary, args, repeats=5))
+
+
+def _runtime_binary_concurrent_command(binary: str, args: list[str]) -> str:
+    return _shell_command(_runtime_binary_concurrent_fragment(binary, args))
+
+
+def _runtime_binary_timeout_command(binary: str, args: list[str]) -> str:
+    args_text = " ".join(_redmine_shell_arg_fragments(args))
+    script = (
+        f'binary="${{QUALITY_PILOT_BINARY:-{binary}}}"; command -v "$binary" >/dev/null 2>&1 || test -x "$binary"; '
+        f'timeout "${{QUALITY_PILOT_TIMEOUT_SECONDS:-5}}" "$binary"'
+    )
+    if args_text:
+        script += f" {args_text}"
+    script += " >/dev/null"
+    return _shell_command(script)
+
+
+def _runtime_binary_repeat_fragment(binary: str, args: list[str], *, repeats: int) -> str:
+    args_text = " ".join(_redmine_shell_arg_fragments(args))
+    command = f'"$binary" {args_text} >/dev/null' if args_text else '"$binary" --help >/dev/null'
+    return (
+        f'binary="${{QUALITY_PILOT_BINARY:-{binary}}}"; command -v "$binary" >/dev/null 2>&1 || test -x "$binary"; '
+        f'for i in $(seq 1 {repeats}); do {command}; done'
+    )
+
+
+def _runtime_binary_concurrent_fragment(binary: str, args: list[str]) -> str:
+    args_text = " ".join(_redmine_shell_arg_fragments(args))
+    command = f'"$binary" {args_text} >/dev/null' if args_text else '"$binary" --help >/dev/null'
+    return (
+        f'binary="${{QUALITY_PILOT_BINARY:-{binary}}}"; command -v "$binary" >/dev/null 2>&1 || test -x "$binary"; '
+        f'{command} & p1=$!; {command} & p2=$!; wait "$p1"; wait "$p2"'
+    )
+
+
+def _runtime_binary_readme_operation_command(binary: str, args: list[str]) -> str:
+    script = f'binary="${{QUALITY_PILOT_BINARY:-{binary}}}"; command -v "$binary" >/dev/null 2>&1 || test -x "$binary";'
+    exec_parts = ['exec "$binary"']
+    i = 0
+    while i < len(args):
+        arg = str(args[i])
+        next_value = str(args[i + 1]) if i + 1 < len(args) else ""
+        fixture_env = _fixture_env_name_for_flag_value(arg, next_value)
+        if fixture_env:
+            var_name = f"fixture_{i}"
+            script += f' {var_name}="${{{fixture_env}:-{_shell_default_value(next_value)}}}"; test -f "${var_name}";'
+            exec_parts.extend([shlex.quote(arg), f'"${var_name}"'])
+            i += 2
+            continue
+        exec_parts.append(shlex.quote(arg))
+        i += 1
+    script += " " + " ".join(exec_parts)
+    return _shell_command(script)
+
+
 def _runtime_binary_help_command(binary: str, *, subcommand: str = "") -> str:
-    args = [subcommand, "--help"] if subcommand else ["--help"]
+    args = [*shlex.split(subcommand), "--help"] if subcommand else ["--help"]
     return _runtime_binary_exec_command(binary, args)
 
 
-def _runtime_binary_help_fragment(binary: str, *, subcommand: str = "") -> str:
-    args = [subcommand, "--help"] if subcommand else ["--help"]
+def _runtime_binary_exec_fragment(binary: str, args: list[str]) -> str:
     args_text = " ".join(_redmine_shell_arg_fragments(args))
-    return f'binary="${{QUALITY_PILOT_BINARY:-{binary}}}"; command -v "$binary" >/dev/null 2>&1 || test -x "$binary"; "$binary" {args_text} >/dev/null'
+    script = f'binary="${{QUALITY_PILOT_BINARY:-{binary}}}"; command -v "$binary" >/dev/null 2>&1 || test -x "$binary"; "$binary"'
+    if args_text:
+        script += f" {args_text}"
+    return script + " >/dev/null"
+
+
+def _runtime_binary_help_fragment(binary: str, *, subcommand: str = "") -> str:
+    args = [*shlex.split(subcommand), "--help"] if subcommand else ["--help"]
+    return _runtime_binary_exec_fragment(binary, args)
 
 
 def _command_uses_runtime_binary(command: str, runtime_binary: str) -> bool:
@@ -2291,16 +3149,343 @@ def _command_uses_runtime_binary(command: str, runtime_binary: str) -> bool:
     return False
 
 
-def _readme_help_subcommands(config: ProjectConfig, command_name: str) -> list[str]:
+def _candidate_seed_command_args(candidate: dict[str, Any]) -> list[str]:
+    for key in ["init_seed", "growth_seed"]:
+        seed = candidate.get(key)
+        if not isinstance(seed, dict):
+            continue
+        args = seed.get("command_args")
+        if isinstance(args, list) and args:
+            return [str(item) for item in args if str(item).strip()]
+    return []
+
+
+def _candidate_seed_type(candidate: dict[str, Any]) -> str:
+    for key in ["init_seed", "growth_seed"]:
+        seed = candidate.get(key)
+        if isinstance(seed, dict) and seed.get("type"):
+            return str(seed.get("type"))
+    return ""
+
+
+def _readme_cli_surfaces(config: ProjectConfig, *, runtime_binary: str = "") -> list[dict[str, Any]]:
     text = _first_existing_text(config.root, ["README.md", "README.rst", "README.txt"], limit=80000)
     if not text:
         return []
-    pattern = re.compile(rf"(?:\./)?{re.escape(command_name)}\s+([A-Za-z0-9_-]+)\s+--help")
+    return _readme_cli_surfaces_from_text(
+        text,
+        runtime_binary=runtime_binary or primary_runtime_binary(config),
+        cli_commands=[],
+        project_name=str(config.data.get("project", {}).get("name") or config.root.name),
+    )
+
+
+def _readme_cli_surfaces_from_text(
+    text: str,
+    *,
+    runtime_binary: str = "",
+    cli_commands: list[str] | None = None,
+    project_name: str = "",
+) -> list[dict[str, Any]]:
+    if not text:
+        return []
+    command_names = _readme_command_names(runtime_binary, cli_commands or [], project_name)
+    if not command_names:
+        return []
+    surfaces: list[dict[str, Any]] = []
+    seen: set[tuple[str, ...]] = set()
+    for line_no, line in enumerate(text.splitlines(), start=1):
+        raw_args = _readme_command_args_from_line(line, command_names)
+        args = _safe_readme_cli_args(raw_args)
+        if not args:
+            continue
+        key = tuple(args)
+        if key in seen:
+            continue
+        seen.add(key)
+        surfaces.append(
+            {
+                "label": _readme_cli_surface_label(args),
+                "args": args,
+                "source": f"README:{line_no}",
+            }
+        )
+    return surfaces
+
+
+def _readme_cli_operations_from_text(
+    text: str,
+    *,
+    runtime_binary: str = "",
+    cli_commands: list[str] | None = None,
+    project_name: str = "",
+) -> list[dict[str, Any]]:
+    if not text:
+        return []
+    command_names = _readme_command_names(runtime_binary, cli_commands or [], project_name)
+    if not command_names:
+        return []
+    operations: list[dict[str, Any]] = []
+    seen: set[tuple[str, ...]] = set()
+    for line_no, line in enumerate(text.splitlines(), start=1):
+        raw_args = _readme_command_args_from_line(line, command_names)
+        candidate = _safe_readme_operation_args(raw_args)
+        if not candidate:
+            continue
+        args = candidate["args"]
+        key = tuple(args)
+        if key in seen:
+            continue
+        seen.add(key)
+        operations.append(
+            {
+                "label": _readme_operation_label(args),
+                "args": args,
+                "source": f"README:{line_no}",
+                "requires_prepared_environment": candidate["requires_prepared_environment"],
+                "environment_requirements": candidate["environment_requirements"],
+            }
+        )
+    return operations
+
+
+def _readme_command_names(runtime_binary: str, cli_commands: list[str], project_name: str) -> set[str]:
+    names: set[str] = set()
+    binary = str(runtime_binary or "").strip()
+    if binary:
+        first = binary.split()[0]
+        names.add(_clean_readme_token(first))
+        names.add(Path(first).name)
+    if not names:
+        for value in [*cli_commands, project_name]:
+            cleaned = _clean_readme_token(str(value or ""))
+            if cleaned:
+                names.add(cleaned)
+                names.add(Path(cleaned).name)
+    return {name for name in names if name}
+
+
+def _readme_command_args_from_line(line: str, command_names: set[str]) -> list[str]:
+    text = line.strip()
+    if not text or text.startswith("```"):
+        return []
+    text = text.strip("`")
+    text = re.sub(r"^\s*(?:[-*+]\s*)?(?:\$|>|%)\s*", "", text)
+    try:
+        tokens = shlex.split(text)
+    except ValueError:
+        tokens = text.split()
+    if not tokens:
+        return []
+    cleaned_tokens = [_clean_readme_token(token) for token in tokens]
+    for index, token in enumerate(cleaned_tokens[:8]):
+        if token in command_names or Path(token).name in command_names:
+            args: list[str] = []
+            for value in cleaned_tokens[index + 1 :]:
+                if not value or value.startswith("#"):
+                    break
+                args.append(value)
+            return args
+    return []
+
+
+def _safe_readme_operation_args(args: list[str]) -> dict[str, Any] | None:
+    if not args:
+        return None
+    if _looks_like_readme_usage_or_description(args):
+        return None
+    lowered = [arg.lower() for arg in args]
+    if "--help" in lowered or "--version" in lowered or "-v" in lowered:
+        return None
+    if any(arg in {"-u", "--user", "-p", "--passwd", "--password", "--pass", "-r", "--host"} for arg in lowered):
+        return None
+    if any(arg in {"-o", "--out", "--output", "--outfile", "--file"} for arg in lowered):
+        return None
+    if any(arg in {"--force", "--confirm", "--yes"} for arg in lowered):
+        return None
+
+    command_words = _operation_command_words(args)
+    if not command_words:
+        return None
+    if any(word in _MUTATING_OPERATION_WORDS for word in command_words):
+        return None
+    if not any(word in _READONLY_OPERATION_WORDS for word in command_words):
+        return None
+
+    requirements = _fixture_environment_requirements_for_args(args)
+    if requirements is None:
+        return None
+    return {
+        "args": args,
+        "requires_prepared_environment": bool(requirements),
+        "environment_requirements": requirements,
+    }
+
+
+def _fixture_environment_requirements_for_args(args: list[str]) -> list[str] | None:
+    requirements: list[str] = []
+    i = 0
+    while i < len(args):
+        arg = str(args[i])
+        next_value = str(args[i + 1]) if i + 1 < len(args) else ""
+        if arg.startswith("-") and _flag_name_suggests_fixture_path(arg.lower()) and not next_value:
+            return None
+        env_name = _fixture_env_name_for_flag_value(arg, next_value)
+        if env_name:
+            requirements.append(
+                f"Prepare fixture/config path for `{arg}` in {env_name}, or place the README default file at the documented relative path."
+            )
+            i += 2
+            continue
+        i += 1
+    return _unique_text(requirements)
+
+
+def _looks_like_readme_usage_or_description(args: list[str]) -> bool:
+    for arg in args:
+        value = str(arg or "").strip()
+        if not value:
+            return True
+        lowered = value.lower()
+        if value == "-":
+            return True
+        if "[" in value or "]" in value:
+            return True
+        if value.startswith("<") or value.endswith(">"):
+            return True
+        if lowered in {"options", "arguments", "command", "commands"}:
+            return True
+        if lowered.endswith("..."):
+            return True
+    return False
+
+
+def _operation_command_words(args: list[str]) -> list[str]:
+    words: list[str] = []
+    skip_next = False
+    value_flags = {
+        "--format",
+        "--severity",
+        "--type",
+        "--after",
+        "--before",
+        "--contains",
+        "--interfaces",
+    }
+    for arg in args:
+        lowered = arg.lower()
+        if skip_next:
+            skip_next = False
+            continue
+        if lowered in value_flags or _flag_name_suggests_fixture_path(lowered):
+            skip_next = True
+            continue
+        if lowered.startswith("-"):
+            continue
+        words.append(lowered)
+    return words
+
+
+_READONLY_OPERATION_WORDS = {
+    "entry",
+    "firmware",
+    "get",
+    "info",
+    "list",
+    "mcinfo",
+    "query",
+    "read",
+    "show",
+    "sensors",
+    "status",
+    "validate",
+    "view",
+}
+
+
+_MUTATING_OPERATION_WORDS = {
+    "apply",
+    "clear",
+    "collect",
+    "create",
+    "delete",
+    "download",
+    "eject",
+    "insert",
+    "passwd",
+    "password",
+    "reboot",
+    "remove",
+    "reset",
+    "set",
+    "update",
+    "upload",
+    "write",
+}
+
+
+def _safe_readme_cli_args(args: list[str]) -> list[str]:
+    if not args:
+        return []
+    credential_or_target_flags = {
+        "-p",
+        "--passwd",
+        "--password",
+        "--pass",
+        "-u",
+        "--user",
+        "-r",
+        "--host",
+        "--login",
+        "--token",
+        "--api-key",
+        "--secret",
+    }
+    lowered = [arg.lower() for arg in args]
+    if any(arg in credential_or_target_flags for arg in lowered):
+        return []
+    if "--version" in lowered:
+        return ["--version"]
+    if "-v" in lowered and len(args) == 1:
+        return ["-v"]
+    if "--help" not in lowered:
+        return []
+    help_index = lowered.index("--help")
+    head = args[:help_index]
+    if any(arg.startswith("-") for arg in head):
+        return []
+    safe = [arg for arg in head if arg]
+    return [*safe, "--help"]
+
+
+def _readme_cli_surface_label(args: list[str]) -> str:
+    if args == ["--help"]:
+        return "root help"
+    if args in (["--version"], ["-v"]):
+        return "version"
+    if args and args[-1] == "--help":
+        return " ".join(args[:-1]) + " help"
+    return " ".join(args)
+
+
+def _readme_operation_label(args: list[str]) -> str:
+    words = _operation_command_words(args)
+    return " ".join(words) or "read-only operation"
+
+
+def _clean_readme_token(token: str) -> str:
+    return str(token or "").strip().strip("`'\"").rstrip(".,;:")
+
+
+def _readme_help_subcommands(config: ProjectConfig, command_name: str) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
-    for match in pattern.finditer(text):
-        value = match.group(1)
-        if value in {"--help", "help"} or value in seen:
+    for surface in _readme_cli_surfaces(config, runtime_binary=command_name):
+        args = surface.get("args") if isinstance(surface, dict) else None
+        if not isinstance(args, list) or len(args) <= 1 or args[-1] != "--help":
+            continue
+        value = " ".join(str(item) for item in args[:-1])
+        if not value or value in {"--help", "help"} or value in seen:
             continue
         seen.add(value)
         out.append(value)

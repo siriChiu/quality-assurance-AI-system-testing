@@ -82,13 +82,19 @@ def load_contracts(cases_dir: Path) -> list[CaseContract]:
     return [load_contract(path) for path in list_contract_paths(cases_dir)]
 
 
-def select_contracts(cases_dir: Path, case_id: str | None = None) -> list[CaseContract]:
+def select_contracts(cases_dir: Path, case_id: str | None = None, case_ids: list[str] | None = None) -> list[CaseContract]:
     contracts = load_contracts(cases_dir)
-    if case_id is None:
+    if case_ids is None:
+        case_ids = [case_id] if case_id else []
+    if not case_ids:
         return contracts
-    selected = [contract for contract in contracts if contract.case_id == case_id]
+    requested = set(case_ids)
+    selected = [contract for contract in contracts if contract.case_id in requested]
     if not selected:
-        raise ContractError("case_not_found", f"Case not found: {case_id}")
+        raise ContractError("case_not_found", f"Case not found: {', '.join(case_ids)}")
+    missing = [item for item in case_ids if item not in {contract.case_id for contract in selected}]
+    if missing:
+        raise ContractError("case_not_found", f"Case not found: {', '.join(missing)}")
     return selected
 
 

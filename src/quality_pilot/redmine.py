@@ -985,6 +985,8 @@ def render_redmine_qa_focus(issue: dict[str, Any]) -> str:
 def redmine_safe_probe_command(issue: dict[str, Any]) -> dict[str, Any] | None:
     raw = issue.get("raw") if isinstance(issue.get("raw"), dict) else {}
     expected_exit = _redmine_expected_exit(raw)
+    if expected_exit.get("source") is None:
+        expected_exit = _redmine_expected_exit_from_oracle(issue) or expected_exit
     for name, value in _custom_field_entries(raw):
         normalized = _normalized_field_name(name)
         if not any(hint in normalized for hint in REDMINE_SAFE_COMMAND_FIELD_HINTS):
@@ -1111,6 +1113,36 @@ def _redmine_expected_exit(raw: dict[str, Any]) -> dict[str, Any]:
             except ValueError:
                 return {"code": 0, "source": name}
     return {"code": 0, "source": None}
+
+
+def _redmine_expected_exit_from_oracle(issue: dict[str, Any]) -> dict[str, Any] | None:
+    raw = issue.get("raw") if isinstance(issue.get("raw"), dict) else {}
+    parts = [_render_expected_result(issue)]
+    for name, value in _custom_field_entries(raw):
+        normalized = _normalized_field_name(name)
+        if any(hint in normalized for hint in REDMINE_SAFE_ORACLE_FIELD_HINTS):
+            parts.append(str(value))
+    text = "\n".join(part for part in parts if str(part).strip())
+    if _oracle_text_indicates_rejection(text):
+        return {"code": 1, "source": "AI-inferred rejection oracle"}
+    return None
+
+
+def _oracle_text_indicates_rejection(text: str) -> bool:
+    lowered = str(text or "").lower()
+    if not lowered:
+        return False
+    patterns = [
+        r"\btimeout\s*(?:0|zero)\b",
+        r"\bmust be positive\b",
+        r"\bshould\s+(?:fail|be rejected|return non[- ]?zero)\b",
+        r"\bmust\s+(?:fail|be rejected|return non[- ]?zero)\b",
+        r"\bexpected\s+(?:failure|non[- ]?zero|exit code\s+[1-9])\b",
+        r"\bstderr\b.*\b(?:invalid|error|must be positive)\b",
+        r"(?:應|应该|必須|必须).{0,12}(?:拒絕|拒绝|失敗|失败|非零|錯誤|错误|為正|为正)",
+        r"(?:不應|不应|不能|不可).{0,12}(?:成功|開始|开始|通過|通过)",
+    ]
+    return any(re.search(pattern, lowered) for pattern in patterns)
 
 
 def _redmine_expected_exit_code(raw: dict[str, Any]) -> int:

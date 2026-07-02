@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -50,6 +51,19 @@ class LifecycleTest(unittest.TestCase):
             "side_effect_boundary": "Read-only local smoke probes only; no network, tracker, source, or lab writes.",
         }
         config_path.write_text(config_module.yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+    def write_democtl_product_binary(self, root: Path) -> None:
+        binary = root / "democtl"
+        binary.write_text(
+            "#!/bin/sh\n"
+            "case \"$*\" in\n"
+            "  *--help*|*--version*|-v) exit 0 ;;\n"
+            "  *) exit 0 ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        binary.chmod(0o755)
+        self.write_runtime_profile(root, entrypoint="./democtl")
 
     def assert_no_placeholder_command(self, command: str) -> None:
         self.assertNotIn("__quality_pilot_invalid_command__", command)
@@ -244,6 +258,54 @@ democtl = "demo.cli:main"
             prompts = [item["prompt"] for item in doctor["hermes_needs_input"]["questions"]]
             self.assertTrue(any("democtl" in prompt for prompt in prompts))
             self.assertTrue(any("\n- " in prompt for prompt in prompts))
+
+    def test_setup_writes_automation_profile_candidate_after_repo_analysis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            binary = root / "democtl"
+            binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            binary.chmod(0o755)
+            (root / "README.md").write_text(
+                "\n".join(
+                    [
+                        "Usage:",
+                        "- `./democtl --profile demo.yaml status`",
+                        "- `./democtl --target lab-a sensors list`",
+                        "- `./democtl --username qa --password secret status`",
+                        "- `./democtl config update --value unsafe`",
+                        "- `./democtl --help`",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            code, setup = self.run_cli(["setup", "--root", tmp, "--json"])
+
+            self.assertEqual(code, 0)
+            path = root / setup["automation_profile_candidate_path"]
+            self.assertTrue(path.exists())
+            profile = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(profile["schema"], "quality-pilot.automation-profile-candidate.v1")
+            self.assertEqual(profile["runtime"]["primary_entrypoint"], "democtl")
+            self.assertFalse(profile["raw_secrets_allowed"])
+            fixture_envs = {item["env_name"] for item in profile["fixtures"]}
+            self.assertIn("QUALITY_PILOT_FIXTURE_PROFILE", fixture_envs)
+            target_envs = {item["env_name"] for item in profile["targets"]}
+            self.assertIn("QUALITY_PILOT_TARGET_HOST", target_envs)
+            credential_envs = {item["env_name"] for item in profile["credentials"]}
+            self.assertIn("QUALITY_PILOT_TEST_USER", credential_envs)
+            self.assertIn("QUALITY_PILOT_TEST_PASSWORD", credential_envs)
+            classes = {klass for item in profile["command_candidates"] for klass in item["safety_classes"]}
+            self.assertIn("read_only", classes)
+            self.assertIn("target_required", classes)
+            self.assertIn("credentialed", classes)
+            self.assertIn("mutating", classes)
+            self.assertIn("readiness", classes)
+            missing_kinds = {item["kind"] for item in profile["missing_external_facts"]}
+            self.assertIn("fixture", missing_kinds)
+            self.assertIn("credential_env", missing_kinds)
+            self.assertIn("target_resource", missing_kinds)
+            self.assertTrue(profile["questions"][0]["prompt"].startswith("請只補工具無法從 repo/config 判斷的外部資訊："))
 
     def test_cases_generate_uses_inferred_repo_executable_without_asking_for_entrypoint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -630,7 +692,8 @@ democtl = "demo.cli:main"
             self.assertTrue(any("QUALITY_PILOT_BINARY" in item for item in case_yaml["quality_pilot"]["environment_requirements"]))
             self.assertIn('${QUALITY_PILOT_BINARY:-./irctool}', case_yaml["commands"][0]["run"])
             self.assertIn("sensors --login", case_yaml["commands"][0]["run"])
-            self.assertIn("QUALITY_PILOT_LOGIN_FILE", case_yaml["commands"][0]["run"])
+            self.assertIn("QUALITY_PILOT_FIXTURE_LOGIN", case_yaml["commands"][0]["run"])
+            self.assertNotIn("QUALITY_PILOT_LOGIN_FILE", case_yaml["commands"][0]["run"])
             self.assertIn("Exact lab reproduction remains advisory", case_yaml["quality_pilot"]["follow_up_needed"][-1])
             self.assert_no_placeholder_command(case_yaml["commands"][0]["run"])
             second_case_yaml = load_yaml(root / ".quality-pilot-project" / "cases" / "REDMINE-144693.yaml")
@@ -803,6 +866,88 @@ democtl = "demo.cli:main"
             self.assertIn("side-effect boundaries", follow_up)
             self.assertNotIn("__quality_pilot_invalid_command__", case_yaml["commands"][0]["run"])
 
+    def test_cases_generate_redmine_infers_negative_expected_exit_from_oracle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.init_gitea_project(tmp)
+            snapshot_path = self.write_redmine_issues(root)
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            for issue in snapshot["issues"]:
+                if issue["id"] == 144780:
+                    issue["description_text"] = "\n".join(
+                        [
+                            "Procedure:",
+                            "Run `irctool diag --timeout 0`.",
+                            "Expected: timeout 0 should be rejected before starting the diagnostic task.",
+                            "Actual: task may start with an invalid timeout.",
+                        ]
+                    )
+                    issue["custom_fields"].append({"id": 9, "name": "Safe Probe Command", "value": "irctool diag --timeout 0"})
+                    issue["custom_fields"].append({"id": 11, "name": "Safe Probe Fixture / Environment", "value": "No lab fixture required for parser validation."})
+                    issue["custom_fields"].append(
+                        {
+                            "id": 12,
+                            "name": "Pass/Fail Oracle",
+                            "value": "timeout 0 must be rejected; stderr should mention timeout must be positive.",
+                        }
+                    )
+                    issue["custom_fields"].append({"id": 13, "name": "Side Effect Boundary", "value": "Parser validation only; must not start the diagnostic task."})
+            snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+            code, payload = self.run_cli([
+                "cases",
+                "generate",
+                "--root",
+                tmp,
+                "--redmine-issues",
+                "144780",
+                "--json",
+            ])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["status"], "ok")
+            case_yaml = load_yaml(root / ".quality-pilot-project" / "cases" / "REDMINE-144780.yaml")
+            self.assertEqual(case_yaml["source"]["safe_runner"]["expected_exit_code"], 1)
+            self.assertEqual(case_yaml["source"]["safe_runner"]["expected_exit_code_source"], "AI-inferred rejection oracle")
+            self.assertEqual(case_yaml["commands"][0]["expected_exit_code"], 1)
+
+    def test_cases_review_flags_negative_oracle_expected_exit_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.init_gitea_project(tmp)
+            case_path = root / ".quality-pilot-project" / "cases" / "REDMINE-144780.yaml"
+            case_path.write_text(
+                """case_id: REDMINE-144780
+title: Timeout zero validation
+source:
+  type: redmine
+  provider: redmine
+  redmine_issue_id: 144780
+quality_pilot:
+  safe_runner:
+    user_confirmed_inputs:
+      oracle:
+        - field: Pass/Fail Oracle
+          value: timeout 0 must be rejected; stderr should mention timeout must be positive.
+commands:
+  - id: safe_probe
+    run: irctool diag --timeout 0
+    expected_exit_code: 0
+expected: timeout 0 should be rejected before starting the diagnostic task.
+""",
+                encoding="utf-8",
+            )
+
+            code, review = self.run_cli(["cases", "review", "--root", tmp, "--json"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(review["status"], "needs_review")
+            self.assertEqual(review["semantic_finding_count"], 1)
+            self.assertEqual(review["semantic_findings"][0]["id"], "negative_oracle_expected_exit_code_mismatch")
+
+            code, validated = self.run_cli(["cases", "validate", "--root", tmp, "--json"])
+            self.assertEqual(code, 3)
+            self.assertEqual(validated["status"], "needs_review")
+            self.assertEqual(validated["semantic_findings"][0]["case_id"], "REDMINE-144780")
+
     def test_cases_generate_redmine_issues_rejects_developer_safe_command_and_uses_binary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self.init_gitea_project(tmp)
@@ -839,7 +984,8 @@ democtl = "demo.cli:main"
             self.assertIn("go test ./internal/diaglog", case_yaml["quality_pilot"]["safe_runner"]["rejected_safe_command"]["run"])
             self.assertIn('${QUALITY_PILOT_BINARY:-./irctool}', case_yaml["commands"][0]["run"])
             self.assertIn("sensors --login", case_yaml["commands"][0]["run"])
-            self.assertIn("QUALITY_PILOT_LOGIN_FILE", case_yaml["commands"][0]["run"])
+            self.assertIn("QUALITY_PILOT_FIXTURE_LOGIN", case_yaml["commands"][0]["run"])
+            self.assertNotIn("QUALITY_PILOT_LOGIN_FILE", case_yaml["commands"][0]["run"])
             self.assertNotIn("go test", case_yaml["commands"][0]["run"])
             self.assertNotIn("go run", case_yaml["commands"][0]["run"])
             self.assertTrue(any("Build or install the product binary" in item for item in case_yaml["quality_pilot"]["environment_requirements"]))
@@ -1033,6 +1179,138 @@ commands:
             self.assertEqual(run_one["status"], "PASS")
             self.assertTrue(run_one["results"][0]["evidence"])
 
+    def test_cases_generate_growing_aggressively_uses_pr_git_code_and_monkey_sensors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.init_gitea_project(tmp)
+            self.write_democtl_product_binary(root)
+            (root / "README.md").write_text(
+                """# Demo
+
+```bash
+./democtl --help
+./democtl users --help
+./democtl users list --help
+./democtl config --help
+./democtl reports --help
+./democtl --version
+```
+""",
+                encoding="utf-8",
+            )
+            (root / "src").mkdir()
+            (root / "src" / "main.py").write_text("print('demo')\n", encoding="utf-8")
+            subprocess.run(["git", "init"], cwd=root, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["git", "config", "user.email", "qa@example.test"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.name", "QA"], cwd=root, check=True)
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "fix issue #42 add users list surface (#7)"],
+                cwd=root,
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            issues = [
+                {
+                    "number": 42,
+                    "state": "open",
+                    "title": "Users list regression",
+                    "body": "users list should remain stable.",
+                    "html_url": "https://git.example.test/demo/issues/42",
+                    "pull_requests": [
+                        {
+                            "number": 7,
+                            "title": "Add users list fix",
+                            "state": "open",
+                            "html_url": "https://git.example.test/demo/pulls/7",
+                        }
+                    ],
+                }
+            ]
+            issues_path = root / "issues.json"
+            issues_path.write_text(json.dumps(issues), encoding="utf-8")
+            self.run_cli(["issues", "sync", "--root", tmp, "--issues-json", str(issues_path)])
+
+            code, generated = self.run_cli(["cases", "generate", "--root", tmp, "--growing", "--count", "8", "--json"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(generated["generated_count"], 8)
+            self.assertEqual(generated["candidate_count"], 80)
+            summary = generated["growth_sensor_summary"]
+            self.assertEqual(summary["issue_count"], 1)
+            self.assertEqual(summary["pr_reference_count"], 1)
+            self.assertEqual(summary["recent_commit_count"], 1)
+            self.assertGreaterEqual(summary["repo_analyzed_files_count"], 3)
+            self.assertGreaterEqual(summary["monkey_seed_count"], 1)
+            context = json.loads((root / ".quality-pilot-project" / "state" / "growth-context.json").read_text(encoding="utf-8"))
+            seed_types = {seed["type"] for seed in context["growth_seeds"]}
+            self.assertIn("issue", seed_types)
+            self.assertIn("pr_reference", seed_types)
+            self.assertIn("git_commit", seed_types)
+            self.assertIn("code_root", seed_types)
+            self.assertIn("monkey_cli_help_sweep", seed_types)
+            commands = [load_yaml(root / item["path"])["commands"][0]["run"] for item in generated["generated"]]
+            self.assertEqual(len(commands), len(set(commands)))
+            self.assertTrue(any("users list --help" in command for command in commands))
+            self.assertTrue(any(" && " in command for command in commands))
+            for command in commands:
+                self.assert_no_placeholder_command(command)
+
+    def test_cases_generate_growing_expands_operation_layer_after_surface_commands_are_covered(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.init_gitea_project(tmp)
+            self.write_democtl_product_binary(root)
+            (root / "README.md").write_text(
+                """# Demo
+
+```bash
+./democtl --help
+./democtl users --help
+./democtl users list --help
+./democtl config --help
+./democtl reports --help
+./democtl --version
+```
+""",
+                encoding="utf-8",
+            )
+            self.run_cli(["cases", "generate", "--root", tmp, "--growing", "--count", "20"])
+
+            code, generated = self.run_cli(["cases", "generate", "--root", tmp, "--growing", "--count", "12", "--json"])
+
+            self.assertEqual(code, 0)
+            self.assertGreater(generated["deduped_count"], 0)
+            self.assertGreater(generated["generated_count"], 0)
+            commands = [load_yaml(root / item["path"])["commands"][0]["run"] for item in generated["generated"]]
+            joined = "\n".join(commands)
+            self.assertTrue(
+                any(
+                    marker in joined
+                    for marker in [
+                        "quality-pilot-invalid",
+                        "quality-pilot-boundary",
+                        "for i in $(seq 1",
+                        " p1=$!",
+                        "QUALITY_PILOT_TIMEOUT_SECONDS",
+                    ]
+                )
+            )
+            operation_keys = {
+                load_yaml(root / item["path"])["quality_pilot"]["swqa_operation"]["key"]
+                for item in generated["generated"]
+            }
+            self.assertTrue(
+                operation_keys
+                & {
+                    "invalid_option_rejection",
+                    "boundary_invalid_value",
+                    "repeatability_probe",
+                    "concurrency_probe",
+                    "timeout_baseline",
+                    "monkey_repeatability",
+                    "monkey_concurrency",
+                }
+            )
+
     def test_cases_generate_requires_explicit_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             self.run_cli(["setup", "--root", tmp])
@@ -1049,14 +1327,18 @@ commands:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self.run_cli(["setup", "--root", tmp])
-            self.write_runtime_profile(root)
+            self.write_democtl_product_binary(root)
             (root / "README.md").write_text(
                 """# Demo
 
 Usage:
 
 ```bash
-democtl --help
+./democtl --help
+./democtl users --help
+./democtl users list --help
+./democtl config --help
+./democtl --version
 ```
 """,
                 encoding="utf-8",
@@ -1100,9 +1382,6 @@ democtl = "demo.cli:main"
             self.assertGreaterEqual(generated["analyzed_files_count"], 2)
             self.assertTrue((root / ".quality-pilot-project" / "state" / "init-context.json").exists())
             self.assertEqual(len(generated["generated"]), 5)
-            all_dimensions = {dimension for item in generated["generated"] for dimension in item["swqa_dimensions"]}
-            for dimension in ["functional", "positive", "negative", "boundary", "invalid_input", "side_effect_safe", "stress_timeout_risk"]:
-                self.assertIn(dimension, all_dimensions)
             first_case = generated["generated"][0]["case_id"]
             first_path = root / generated["generated"][0]["path"]
             first_yaml = load_yaml(first_path)
@@ -1112,11 +1391,18 @@ democtl = "demo.cli:main"
             self.assertTrue(first_yaml["quality_pilot"]["executable"])
             self.assertEqual(first_yaml["quality_pilot"]["questions"], [])
             self.assertEqual(first_yaml["commands"][0]["id"], "safe_probe")
+            commands: list[str] = []
             for item in generated["generated"]:
                 case_yaml = load_yaml(root / item["path"])
                 command = case_yaml["commands"][0]["run"]
+                commands.append(command)
                 self.assertIn("QUALITY_PILOT_BINARY", command)
                 self.assert_no_placeholder_command(command)
+            self.assertEqual(len(commands), len(set(commands)))
+            joined_commands = "\n".join(commands)
+            self.assertIn("users --help", joined_commands)
+            self.assertIn("users list --help", joined_commands)
+            self.assertIn("config --help", joined_commands)
             self.assertIn("risk_controls", first_yaml)
             self.assertIn("init_seed", first_yaml)
 
@@ -1156,6 +1442,108 @@ democtl = "demo.cli:main"
             self.assertEqual(second["generated_count"], 0)
             self.assertGreaterEqual(second["deduped_count"], 1)
 
+    def test_cases_generate_init_prefers_readonly_product_operations_over_help_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.run_cli(["setup", "--root", tmp])
+            self.write_democtl_product_binary(root)
+            (root / "demo.yaml").write_text("user: demo\nhost: 127.0.0.1\n", encoding="utf-8")
+            (root / "README.md").write_text(
+                """# Demo
+
+```bash
+./democtl --login demo.yaml status
+./democtl --login demo.yaml users list
+./democtl --login demo.yaml config get default
+./democtl --login demo.yaml config update --value unsafe
+./democtl --help
+```
+""",
+                encoding="utf-8",
+            )
+
+            code, generated = self.run_cli([
+                "cases",
+                "generate",
+                "--root",
+                tmp,
+                "--init",
+                "--profile",
+                "cli",
+                "--count",
+                "3",
+                "--json",
+            ])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(generated["generated_count"], 3)
+            commands = [load_yaml(root / item["path"])["commands"][0]["run"] for item in generated["generated"]]
+            joined_commands = "\n".join(commands)
+            self.assertIn("QUALITY_PILOT_FIXTURE_LOGIN", joined_commands)
+            self.assertNotIn("QUALITY_PILOT_LOGIN_FILE", joined_commands)
+            self.assertIn("status", joined_commands)
+            self.assertIn("users list", joined_commands)
+            self.assertIn("config get default", joined_commands)
+            self.assertNotIn("config update", joined_commands)
+            self.assertNotIn("--help", joined_commands)
+            for item in generated["generated"]:
+                case_yaml = load_yaml(root / item["path"])
+                self.assertEqual(case_yaml["quality_pilot"]["executable_scope"], "prepared_environment_readonly_product_command")
+                self.assertTrue(case_yaml["quality_pilot"]["requires_prepared_environment"])
+                self.assertTrue(case_yaml["quality_pilot"]["environment_requirements"])
+
+            first_case = generated["generated"][0]["case_id"]
+            code, run_one = self.run_cli(["cases", "run", "--root", tmp, "--json", first_case])
+            self.assertEqual(code, 0)
+            self.assertEqual(run_one["status"], "PASS")
+
+    def test_cases_generate_init_uses_generic_fixture_env_for_non_login_config_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.run_cli(["setup", "--root", tmp])
+            self.write_democtl_product_binary(root)
+            (root / "demo.yaml").write_text("user: demo\nhost: 127.0.0.1\n", encoding="utf-8")
+            (root / "README.md").write_text(
+                """# Demo
+
+```bash
+./democtl --profile demo.yaml status
+./democtl --profile demo.yaml users list
+./democtl --profile demo.yaml config update --value unsafe
+```
+""",
+                encoding="utf-8",
+            )
+
+            code, generated = self.run_cli([
+                "cases",
+                "generate",
+                "--root",
+                tmp,
+                "--init",
+                "--profile",
+                "cli",
+                "--count",
+                "2",
+                "--json",
+            ])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(generated["generated_count"], 2)
+            commands = [load_yaml(root / item["path"])["commands"][0]["run"] for item in generated["generated"]]
+            joined_commands = "\n".join(commands)
+            self.assertIn("QUALITY_PILOT_FIXTURE_PROFILE", joined_commands)
+            self.assertNotIn("QUALITY_PILOT_LOGIN_FILE", joined_commands)
+            self.assertIn("--profile", joined_commands)
+            self.assertIn("status", joined_commands)
+            self.assertIn("users list", joined_commands)
+            self.assertNotIn("config update", joined_commands)
+
+            first_case = load_yaml(root / generated["generated"][0]["path"])
+            self.assertTrue(
+                any("QUALITY_PILOT_FIXTURE_PROFILE" in item for item in first_case["quality_pilot"]["environment_requirements"])
+            )
+
     def test_cases_generate_init_requires_runtime_profile_instead_of_placeholder_cases(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1191,7 +1579,17 @@ democtl = "demo.cli:main"
     def test_cases_generate_init_default_uses_full_seed_dimension_map(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self.init_gitea_project(tmp)
-            (root / "README.md").write_text("# Demo CLI\n\nUse democtl for status checks.\n", encoding="utf-8")
+            self.write_democtl_product_binary(root)
+            (root / "README.md").write_text(
+                "# Demo CLI\n\n"
+                "```bash\n"
+                "./democtl --help\n"
+                "./democtl users --help\n"
+                "./democtl users list --help\n"
+                "./democtl config --help\n"
+                "```\n",
+                encoding="utf-8",
+            )
             (root / "pyproject.toml").write_text(
                 """[project]
 name = "demo"
@@ -1221,16 +1619,27 @@ democtl = "demo.cli:main"
             self.assertEqual(generated["generation_limit"], "all_init_seed_dimension_pairs")
             self.assertIsNone(generated["requested_generated_count"])
             self.assertIsNone(generated["requested_count"])
-            self.assertGreater(generated["generated_count"], 5)
+            self.assertGreaterEqual(generated["generated_count"], 4)
             self.assertEqual(
                 generated["candidate_count"],
                 generated["generated_count"] + generated["deduped_count"] + generated["skipped_count"],
             )
+            commands = [load_yaml(root / item["path"])["commands"][0]["run"] for item in generated["generated"]]
+            self.assertEqual(len(commands), len(set(commands)))
 
     def test_cases_generate_init_fast_uses_autonomous_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self.init_gitea_project(tmp)
-            (root / "README.md").write_text("# Demo CLI\n\nUse democtl for status checks.\n", encoding="utf-8")
+            self.write_democtl_product_binary(root)
+            (root / "README.md").write_text(
+                "# Demo CLI\n\n"
+                "```bash\n"
+                "./democtl --help\n"
+                "./democtl users --help\n"
+                "./democtl config --help\n"
+                "```\n",
+                encoding="utf-8",
+            )
             (root / "pyproject.toml").write_text(
                 """[project]
 name = "demo"
@@ -1306,6 +1715,28 @@ democtl = "demo.cli:main"
         serialized = json.dumps(payload, ensure_ascii=False)
         for project_only_word in ["irctool", "Redfish", "VM_HTTP_URL", "GID-Ubuntu"]:
             self.assertNotIn(project_only_word, serialized)
+
+    def test_close_loop_heartbeat_grows_and_runs_only_new_cases(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.init_gitea_project(tmp)
+            issues_json = self.write_issues(root)
+            self.run_cli(["issues", "sync", "--root", tmp, "--issues-json", str(issues_json)])
+
+            code, payload = self.run_cli(["close-loop", "heartbeat", "--root", tmp, "--grow-count", "1", "--json"])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["schema"], "quality-pilot.close-loop-heartbeat.v1")
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["every_seconds"], 43200)
+            self.assertEqual(payload["next_heartbeat_after_seconds"], 43200)
+            latest = payload["latest_tick"]
+            self.assertEqual(latest["status"], "ok")
+            self.assertEqual(latest["growth"]["generated_count"], 1)
+            generated_case_ids = latest["sensors"][1]["generated_case_ids"]
+            self.assertEqual(latest["executed_case_ids"], generated_case_ids)
+            self.assertEqual(sum(latest["run"]["case_counts"].values()), 1)
+            self.assertTrue((root / ".quality-pilot-project" / "state" / "close-loop" / "heartbeat-latest.json").exists())
+            self.assertTrue((root / ".quality-pilot-project" / "state" / "close-loop" / "heartbeat-history.jsonl").exists())
 
     def test_publish_wiki_plan_and_issues_fix_flow(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

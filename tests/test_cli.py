@@ -34,6 +34,8 @@ class CliTest(unittest.TestCase):
             self.assertFalse((root / ".quality-pilot" / "cases").exists())
             self.assertEqual(payload["status"], "ok")
             self.assertEqual(Path(payload["workspace"]).name, ".quality-pilot-project")
+            self.assertEqual(payload["automation_profile"]["schema"], "quality-pilot.automation-profile-candidate.v1")
+            self.assertTrue((root / payload["automation_profile_candidate_path"]).exists())
             self.assertIn("workspace: .quality-pilot-project", (root / ".quality-pilot.yaml").read_text(encoding="utf-8"))
             self.assertEqual(payload["tracker_setup"]["provider"], "hermes_mcp")
             config = (root / ".quality-pilot.yaml").read_text(encoding="utf-8")
@@ -140,6 +142,9 @@ class CliTest(unittest.TestCase):
             self.assertTrue(any(check["name"] == "config" for check in payload["checks"]))
             self.assertIn("hermes_mcp", payload)
             self.assertIn("issue_sync", payload)
+            self.assertEqual(payload["automation_profile"]["schema"], "quality-pilot.automation-profile-candidate.v1")
+            self.assertTrue((Path(tmp) / payload["automation_profile_candidate_path"]).exists())
+            self.assertTrue(any(check["name"] == "automation.profile" for check in payload["checks"]))
             self.assertEqual(payload["subagents"]["endpoint"], "https://172.17.20.220/")
             self.assertFalse(payload["fix"]["requested"])
 

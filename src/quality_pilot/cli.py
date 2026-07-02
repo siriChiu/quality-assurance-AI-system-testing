@@ -11,6 +11,7 @@ from typing import Any
 from urllib import parse
 
 from . import config as config_module
+from .automation_profile import build_automation_profile_candidate, write_automation_profile_candidate
 from .config import (
     CONFIG_FILE,
     DEFAULT_PROJECT_WORKSPACE,
@@ -36,6 +37,12 @@ from .case_generation import (
 from .contracts import ContractError, list_contract_paths, load_contract, load_contracts, select_contracts
 from .fix_issues import FixIssueError, fix_status, plan_fix_issue, run_fix_issue, submit_fix_pr
 from .gitea import GiteaError
+from .heartbeat import (
+    HEARTBEAT_DEFAULT_EVERY,
+    HEARTBEAT_DEFAULT_GROW_COUNT,
+    parse_heartbeat_interval,
+    run_heartbeat,
+)
 from .hermes_mcp import hermes_mcp_readiness, persist_hermes_mcp_status_from_env
 from .issues import IssueSyncError, dedupe_issues, issue_status, issue_sync_readiness, show_issue, sync_issues
 from .pipeline import PIPELINE_ORDER, run_close_loop
@@ -159,6 +166,8 @@ def cmd_init_project(args: argparse.Namespace) -> int:
     wiki_sync = None
     subagents = None
     runtime_profile = None
+    automation_profile = None
+    automation_profile_candidate_path = None
     config_error = None
     if paths.config.exists():
         try:
@@ -167,6 +176,8 @@ def cmd_init_project(args: argparse.Namespace) -> int:
             wiki_sync = wiki_readiness(config)
             subagents = subagent_status(config)
             runtime_profile = runtime_profile_status(config)
+            automation_profile = build_automation_profile_candidate(config, runtime_profile)
+            automation_profile_candidate_path = write_automation_profile_candidate(config, automation_profile)
         except QAConfigError as exc:
             config_error = {"error": exc.error, "message": exc.message, **exc.details}
 
@@ -180,6 +191,8 @@ def cmd_init_project(args: argparse.Namespace) -> int:
         "wiki_sync": wiki_sync,
         "subagents": subagents,
         "runtime_profile": runtime_profile,
+        "automation_profile": automation_profile,
+        "automation_profile_candidate_path": automation_profile_candidate_path,
         "config_error": config_error,
         "embedded_tool_checkout_detected": is_quality_pilot_source_checkout(root / LEGACY_PROJECT_WORKSPACE),
     }
@@ -293,6 +306,8 @@ def cmd_status(args: argparse.Namespace) -> int:
     wiki_sync = None
     config_error = None
     runtime_profile = None
+    automation_profile = None
+    automation_profile_candidate_path = None
     if config_exists:
         try:
             config = load_project_config(root)
@@ -300,6 +315,8 @@ def cmd_status(args: argparse.Namespace) -> int:
             wiki_sync = wiki_readiness(config)
             subagents = subagent_status(config)
             runtime_profile = runtime_profile_status(config)
+            automation_profile = build_automation_profile_candidate(config, runtime_profile)
+            automation_profile_candidate_path = write_automation_profile_candidate(config, automation_profile)
             if not issue_sync.get("issue_sync_ready"):
                 payload_status = "warn"
             if runtime_profile.get("needs_user_input"):
@@ -337,6 +354,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         "wiki_sync": wiki_sync,
         "subagents": subagents,
         "runtime_profile": runtime_profile,
+        "automation_profile": automation_profile,
+        "automation_profile_candidate_path": automation_profile_candidate_path,
     }
     return print_json(attach_readiness(payload, build_readiness(issue_sync=issue_sync, wiki_sync=wiki_sync)))
 
@@ -364,6 +383,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         subagents = subagent_status(config)
         checks.extend(subagents.get("checks", []))
         runtime_profile = runtime_profile_status(config)
+        automation_profile = build_automation_profile_candidate(config, runtime_profile)
+        automation_profile_candidate_path = write_automation_profile_candidate(config, automation_profile)
         checks.append({
             "name": "runtime.profile",
             "status": "WARN" if runtime_profile.get("needs_user_input") else "PASS",
@@ -374,6 +395,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             ),
             "missing_fields": runtime_profile.get("missing_fields", []),
             "suggested_primary_entrypoint": runtime_profile.get("repo_analysis", {}).get("suggested_primary_entrypoint"),
+        })
+        checks.append({
+            "name": "automation.profile",
+            "status": "WARN" if automation_profile.get("missing_external_fact_count") else "PASS",
+            "message": (
+                "Automation profile candidate needs external facts."
+                if automation_profile.get("missing_external_fact_count")
+                else "Automation profile candidate is ready for testcase candidate generation."
+            ),
+            "candidate_path": automation_profile_candidate_path,
+            "missing_external_fact_count": automation_profile.get("missing_external_fact_count", 0),
         })
         state_audit = audit_project_state(config)
         if state_audit.get("semantic_valid"):
@@ -409,6 +441,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             "redmine_sync": redmine_ready,
             "subagents": subagents,
             "runtime_profile": runtime_profile,
+            "automation_profile": automation_profile,
+            "automation_profile_candidate_path": automation_profile_candidate_path,
             "state_audit": audit_summary(state_audit),
             "wiki_sync": wiki_ready,
             "fix": fix_result,
@@ -434,6 +468,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                     "question_field": "prompt",
                 },
                 "questions": runtime_profile.get("questions", []),
+                "automation_profile": automation_profile,
+                "automation_profile_questions": automation_profile.get("questions", []),
                 "answer_format": (
                     "請用條列式回覆，例如：\n"
                     "- binary/runner/API: ...\n"
@@ -1085,6 +1121,25 @@ def cmd_close_loop_run_once(args: argparse.Namespace) -> int:
     return print_json(payload, exit_code=0 if result.status in {"PASS", "FAIL"} else 2)
 
 
+def cmd_close_loop_heartbeat(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        every_seconds = parse_heartbeat_interval(args.every)
+        payload = run_heartbeat(
+            config,
+            every_seconds=every_seconds,
+            grow_count=args.grow_count,
+            case_id=args.case_id,
+            dry_run=args.dry_run,
+            run_existing_if_no_growth=args.run_existing_if_no_growth,
+        )
+    except QAConfigError as exc:
+        return _error_payload(exc)
+    except ValueError as exc:
+        return print_json({"status": "error", "error": "invalid_heartbeat_option", "message": str(exc)}, exit_code=2)
+    return print_json(payload, exit_code=0 if payload.get("status") in {"ok", "idle"} else 4)
+
+
 def cmd_report_status(args: argparse.Namespace) -> int:
     try:
         config = load_project_config(Path(args.root), args.config)
@@ -1252,6 +1307,7 @@ PUBLIC_COMMANDS = [
     "/quality-pilot publish wiki apply",
     "/quality-pilot close-loop status",
     "/quality-pilot close-loop run-once",
+    "/quality-pilot close-loop heartbeat",
     "/quality-pilot report status",
     "/quality-pilot report json",
     "/quality-pilot tracker plan-write",
@@ -1380,6 +1436,14 @@ def build_parser() -> argparse.ArgumentParser:
     run_once.add_argument("--case-id", default=None)
     run_once.add_argument("--dry-run", action="store_true")
     run_once.set_defaults(func=cmd_close_loop_run_once)
+    heartbeat = close_sub.add_parser("heartbeat", help="Run sensor-driven close-loop growth and execute only new work")
+    _add_root_config(heartbeat)
+    heartbeat.add_argument("--every", default=HEARTBEAT_DEFAULT_EVERY, help="Scheduling interval metadata, for example 30m, 1h, or 12h")
+    heartbeat.add_argument("--grow-count", type=int, default=HEARTBEAT_DEFAULT_GROW_COUNT, help="Maximum new growth cases per heartbeat")
+    heartbeat.add_argument("--case-id", default=None, help="Run a specific case instead of newly grown cases")
+    heartbeat.add_argument("--dry-run", action="store_true")
+    heartbeat.add_argument("--run-existing-if-no-growth", action="store_true", help="Run existing cases when sensors produce no new growth")
+    heartbeat.set_defaults(func=cmd_close_loop_heartbeat)
 
     report = sub.add_parser("report", help="Report commands")
     report_sub = report.add_subparsers(dest="report_command", required=True, parser_class=QualityPilotArgumentParser)

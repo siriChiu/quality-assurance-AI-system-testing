@@ -35,7 +35,13 @@ class PipelineResult:
         return str(self.payload["status"])
 
 
-def run_close_loop(config: ProjectConfig, *, case_id: str | None = None, dry_run: bool = False) -> PipelineResult:
+def run_close_loop(
+    config: ProjectConfig,
+    *,
+    case_id: str | None = None,
+    case_ids: list[str] | None = None,
+    dry_run: bool = False,
+) -> PipelineResult:
     run_id = utc_now().replace(":", "").replace(".", "")
     run_evidence_dir = config.paths.evidence / run_id
     config.paths.state.mkdir(parents=True, exist_ok=True)
@@ -48,7 +54,7 @@ def run_close_loop(config: ProjectConfig, *, case_id: str | None = None, dry_run
         _mark(steps, "config_validate", "PASS")
         _mark(steps, "health_checks", "PASS")
         _mark(steps, "issues_sync_readiness", "PASS", {"mode": "checked_by_doctor_or_issues_sync"})
-        contracts = select_contracts(config.paths.cases, case_id)
+        contracts = select_contracts(config.paths.cases, case_id, case_ids=case_ids)
         _mark(steps, "select_scope", "PASS", {"case_count": len(contracts)})
         context = RunContext(root=config.root, evidence_dir=run_evidence_dir)
         for contract in contracts:
