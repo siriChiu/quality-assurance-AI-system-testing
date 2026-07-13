@@ -42,6 +42,7 @@ def run_heartbeat(
     case_id: str | None = None,
     dry_run: bool = False,
     run_existing_if_no_growth: bool = False,
+    fail_on_test_failure: bool = False,
 ) -> dict[str, Any]:
     if every_seconds < 0:
         raise ValueError("heartbeat interval must be >= 0")
@@ -57,8 +58,15 @@ def run_heartbeat(
         dry_run=dry_run,
         run_existing_if_no_growth=run_existing_if_no_growth,
     )
-    payload = _heartbeat_payload(heartbeat_id, tick, every_seconds=every_seconds, dry_run=dry_run)
-    _persist_heartbeat(config, payload)
+    payload = _heartbeat_payload(
+        heartbeat_id,
+        tick,
+        every_seconds=every_seconds,
+        dry_run=dry_run,
+        fail_on_test_failure=fail_on_test_failure,
+    )
+    if not dry_run:
+        _persist_heartbeat(config, payload)
     return payload
 
 
@@ -71,32 +79,80 @@ def run_heartbeat_once(
     dry_run: bool,
     run_existing_if_no_growth: bool,
 ) -> dict[str, Any]:
+    if dry_run:
+        planned_scope: dict[str, Any] = {
+            "mode": "case" if case_id else ("all_existing" if run_existing_if_no_growth else "new_growth"),
+            "case_ids": [case_id] if case_id else [],
+            "grow_count": 0 if case_id else grow_count,
+        }
+        return {
+            "heartbeat_id": heartbeat_id,
+            "tick": 1,
+            "status": "planned",
+            "qa_outcome": "NOT_RUN",
+            "alert_required": False,
+            "reason": "dry_run_plan_only",
+            "sensors": [],
+            "planned_scope": planned_scope,
+            "next_action": "/quality-pilot close-loop heartbeat",
+        }
+
     sensors: list[dict[str, Any]] = []
     issue_sensor = _issue_sensor(config)
     sensors.append(issue_sensor)
+    if _issue_sensor_blocked(issue_sensor):
+        return {
+            "heartbeat_id": heartbeat_id,
+            "tick": 1,
+            "status": "blocked",
+            "qa_outcome": "NOT_RUN",
+            "alert_required": True,
+            "reason": "issue_sensor_blocked",
+            "sensors": sensors,
+            "growth": {"status": "skipped", "reason": "issue_sensor_blocked"},
+            "next_action": "/quality-pilot issues status",
+        }
 
-    growth = generate_cases_growing(config, count=grow_count, fast=True, force=False)
+    growth: dict[str, Any]
+    if case_id:
+        growth = {
+            "status": "skipped",
+            "generated": [],
+            "generated_count": 0,
+            "reason": "explicit_case_scope",
+        }
+        sensors.append({
+            "name": "case_generate_growing",
+            "status": "skipped",
+            "reason": "explicit_case_scope",
+            "generated_case_ids": [],
+        })
+    else:
+        growth = generate_cases_growing(config, count=grow_count, fast=True, force=False)
     generated_case_ids = [
         str(item.get("case_id"))
         for item in growth.get("generated", [])
         if isinstance(item, dict) and item.get("case_id")
     ]
-    sensors.append({
-        "name": "case_generate_growing",
-        "status": str(growth.get("status") or "unknown"),
-        "generated_count": int(growth.get("generated_count") or 0),
-        "deduped_count": int(growth.get("deduped_count") or 0),
-        "skipped_count": int(growth.get("skipped_count") or 0),
-        "growth_seed_count": int(growth.get("growth_seed_count") or 0),
-        "growth_context_path": growth.get("growth_context_path"),
-        "generated_case_ids": generated_case_ids,
-    })
+    if not case_id:
+        sensors.append({
+            "name": "case_generate_growing",
+            "status": str(growth.get("status") or "unknown"),
+            "generated_count": int(growth.get("generated_count") or 0),
+            "deduped_count": int(growth.get("deduped_count") or 0),
+            "skipped_count": int(growth.get("skipped_count") or 0),
+            "growth_seed_count": int(growth.get("growth_seed_count") or 0),
+            "growth_context_path": growth.get("growth_context_path"),
+            "generated_case_ids": generated_case_ids,
+        })
 
     if growth.get("status") == "needs_input" and _growth_has_no_actionable_input(growth, issue_sensor):
         return {
             "heartbeat_id": heartbeat_id,
             "tick": 1,
             "status": "idle",
+            "qa_outcome": "NOT_RUN",
+            "alert_required": False,
             "reason": "no_actionable_sensor_input",
             "sensors": sensors,
             "growth": growth,
@@ -108,6 +164,8 @@ def run_heartbeat_once(
             "heartbeat_id": heartbeat_id,
             "tick": 1,
             "status": "blocked",
+            "qa_outcome": "BLOCK",
+            "alert_required": True,
             "reason": "growth_needs_input",
             "sensors": sensors,
             "growth": growth,
@@ -125,6 +183,8 @@ def run_heartbeat_once(
             "heartbeat_id": heartbeat_id,
             "tick": 1,
             "status": "idle",
+            "qa_outcome": "NOT_RUN",
+            "alert_required": False,
             "reason": "no_new_growth",
             "sensors": sensors,
             "growth": growth,
@@ -135,17 +195,25 @@ def run_heartbeat_once(
         config,
         case_id=case_id if case_id else None,
         case_ids=None if case_id or run_existing_if_no_growth else selected_case_ids,
-        dry_run=dry_run,
+        dry_run=False,
     )
     run_payload = result.payload
+    qa_outcome = str(run_payload.get("test_outcome") or result.status)
+    alert_required = (
+        qa_outcome in {"FAIL", "BLOCK", "ABORT"}
+        or run_payload.get("gate_status") == "BLOCKED"
+        or run_payload.get("workflow_status") in {"BLOCKED", "FAILED"}
+    )
     wiki = None
-    if not dry_run and result.status in {"PASS", "FAIL", "BLOCK"}:
+    if result.status in {"PASS", "FAIL", "BLOCK"}:
         wiki = auto_sync_wiki(config, event="test_result", latest_run=run_payload, source_payload=run_payload)
 
     return {
         "heartbeat_id": heartbeat_id,
         "tick": 1,
-        "status": "ok" if result.status in {"PASS", "FAIL"} else "blocked",
+        "status": "ok" if qa_outcome in {"PASS", "FAIL", "HOLD"} else "blocked",
+        "qa_outcome": qa_outcome,
+        "alert_required": alert_required,
         "reason": "new_growth_executed" if generated_case_ids and not case_id else "requested_scope_executed",
         "sensors": sensors,
         "growth": growth,
@@ -164,6 +232,12 @@ def _growth_has_no_actionable_input(growth: dict[str, Any], issue_sensor: dict[s
         and _safe_int(growth.get("advisory_input_count")) == 0
         and _safe_int(growth.get("generated_count")) == 0
     )
+
+
+def _issue_sensor_blocked(issue_sensor: dict[str, Any]) -> bool:
+    status = str(issue_sensor.get("status") or "").strip().lower()
+    blocked_statuses = {"abort", "blocked", "error", "fail", "failed", "unhealthy"}
+    return bool(issue_sensor.get("error")) or status in blocked_statuses
 
 
 def _safe_int(value: Any) -> int:
@@ -192,16 +266,23 @@ def _heartbeat_payload(
     *,
     every_seconds: int,
     dry_run: bool,
+    fail_on_test_failure: bool,
 ) -> dict[str, Any]:
     status = str(tick.get("status") or "unknown")
+    qa_outcome = str(tick.get("qa_outcome") or "NOT_RUN")
+    alert_required = bool(tick.get("alert_required"))
     return {
         "schema": HEARTBEAT_SCHEMA,
         "status": status,
+        "qa_outcome": qa_outcome,
+        "alert_required": alert_required,
+        "fail_on_test_failure": fail_on_test_failure,
         "heartbeat_id": heartbeat_id,
         "created_at": heartbeat_id,
         "every_seconds": every_seconds,
         "next_heartbeat_after_seconds": every_seconds,
         "dry_run": dry_run,
+        "state_persisted": not dry_run,
         "latest_tick": tick,
         "state_path": ".quality-pilot-project/state/close-loop/heartbeat-latest.json",
         "history_path": ".quality-pilot-project/state/close-loop/heartbeat-history.jsonl",

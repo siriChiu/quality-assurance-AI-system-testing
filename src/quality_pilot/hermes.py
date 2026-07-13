@@ -1053,10 +1053,7 @@ def build_skill_markdown(*, runner_command: str = "quality-pilot-hermes") -> str
     return f"""---
 name: quality-pilot
 description: "AI Quality Pilot dynamic skill: call the deterministic QA lifecycle engine for issues, cases, Wiki status, close-loop health, reports, and gated PR flow."
-version: {__version__}
-author: AI Quality Pilot contributors
 license: MIT
-platforms: [linux, macos]
 metadata:
   hermes:
     tags: [qa, testing, deterministic, evidence, write-gate, tracker, dynamic-skill]
@@ -1103,7 +1100,10 @@ Only these `/quality-pilot` commands are public:
 - `/quality-pilot publish wiki apply`
 - `/quality-pilot close-loop status`
 - `/quality-pilot close-loop run-once`
+- `/quality-pilot close-loop run-once --fail-on-test-failure`
 - `/quality-pilot close-loop heartbeat`
+- `/quality-pilot close-loop heartbeat --case-id <case_id>`
+- `/quality-pilot close-loop heartbeat --fail-on-test-failure`
 - `/quality-pilot report status`
 - `/quality-pilot report json`
 - `/quality-pilot tracker plan-write`
@@ -1182,13 +1182,21 @@ The issue entry must preserve the live Redmine payload, including full descripti
 
 Negative oracle rule: if a Redmine/Gitea issue or testcase oracle says the product should reject input, fail validation, return non-zero, print an invalid-parameter error, or reject a boundary value such as `timeout 0`, the contract must not silently use `expected_exit_code: 0` for the raw product command. Use an explicit non-zero expected exit code, or wrap the command with a clear non-zero assertion plus stderr/stdout oracle. If `/quality-pilot cases review`, `/quality-pilot cases validate`, or `/quality-pilot cases run` reports `negative_oracle_expected_exit_code_mismatch`, treat it as a contract/harness gap first, not a product regression. Explain that the product may already be behaving correctly and recommend regenerating or repairing the case contract before filing FAIL evidence.
 
+Structured oracle rule: Contract v2 supports named assertions over exit code, stdout, stderr, and duration. Prefer semantic stdout/stderr assertions for behavior claims. An exit-code-only surface probe is partial evidence, not proof of functional correctness; preserve `oracle_strength`, `partial_probe`, and `oracle_results` when explaining a run.
+
+Generated rejection rule: negative and boundary wrappers require both a bounded non-zero rejection and rejection-specific diagnostic text. Panic/traceback, permission, missing-dependency, command-not-found, and timeout evidence must fail rather than produce a success marker. Treat each `coverage_claims` row independently; only claims that reference runner-effective semantic assertion IDs may be `realized`.
+
+Run truth rule: read `workflow_status`, `test_outcome`, `probe_outcome`, `gate_status`, and `health_status` separately. Zero-case, dry-run, and partial-only scopes cannot become an official PASS. A blocked write gate must not be described as a failed product test, and a passing process exit code must not override a failed semantic assertion. Close-loop reports `health_status: NOT_EVALUATED` until an independent doctor/component health check exists; never infer health from QA PASS.
+
+Heartbeat rule: one `/quality-pilot close-loop heartbeat` invocation is one deterministic tick; Hermes heartbeat or an external cron/systemd scheduler owns recurrence. Dry-run is plan-only and must not persist heartbeat state. `--case-id` runs that explicit scope without growth generation. Use `--fail-on-test-failure` when the scheduler must receive exit 1 for a QA failure.
+
 Reference: see `references/gitea-mcp-snapshot.md` for the MCP snapshot pitfall and recommended JSON shape.
 
 Setup rule: `/quality-pilot setup` always writes `tracker.provider: hermes_mcp` plus `tracker.mcp.*` local handoff paths and a blank `runtime` profile skeleton. It may report the detected git remote and runtime repo analysis in JSON for human context, but it must not write Gitea repo URL, repo name, token env, HTTP credentials, product credentials, or guessed lab secrets into `.quality-pilot.yaml`.
 
 Runtime profile rule: AI Quality Pilot is repo-agnostic. Do not assume the product is irctool, Go, CLI-only, Redfish-only, or hardware-only. Before asking for runtime details, run `/quality-pilot setup` or `/quality-pilot doctor` and read `payload.runtime_profile.repo_analysis`. If repo analysis finds an executable candidate and `payload.runtime_profile.status == "ready_inferred"`, do not ask the user to confirm the entrypoint; proceed with the inferred runtime and ask later only for issue-specific secrets/input if needed. If `payload.hermes_needs_input.reason == "runtime_profile_missing"`, render the clarify prompt exactly as bullet-listed by the payload, preserving the "already detected" and "please provide only missing details" structure. Never ask runtime questions before repo analysis exists. Never ask one question per testcase.
 
-Subagent text generation rule: AI Quality Pilot may delegate long human-facing draft text to a configured subagent, but the subagent is candidate-only. Use `/quality-pilot subagent status` to inspect the active profile. Use `/quality-pilot subagent configure` to write the default Open WebUI profile with endpoint `https://172.17.20.220/`. The user only needs to provide a model, either by pasting an endpoint such as `https://172.17.20.220/?model=qwen3.6-chat-direct` or by filling the separate `model` field. API credentials must be referenced by `api_key_env` only; never ask for or store a raw API key. Task prompts are optional overrides, not readiness blockers. The subagent may draft Gitea issue bodies, PR bodies, Wiki summaries, Redmine QA summaries, case candidate analysis, and reviewer notes. Redmine sync payloads include a `qa_summary` plus a `redmine_issue_summary` subagent handoff so QA can see problem, environment, reproduction, expected/actual, evidence, and missing testcase details. It must not write files, create issues, edit Wiki pages, open PRs, close issues, or bypass AI Quality Pilot validation/write gates.
+Subagent text generation rule: AI Quality Pilot may delegate long human-facing draft text to a configured subagent, but the subagent is candidate-only. Use `/quality-pilot subagent status` to inspect the active profile. Use `/quality-pilot subagent configure` to write the Open WebUI profile skeleton. No private endpoint is a universal default: the deployment owner must provide an endpoint and a model, either by using an endpoint such as `https://open-webui.example.invalid/?model=<model-name>` or by filling the separate `model` field. API credentials must be referenced by `api_key_env` only; never ask for or store a raw API key. Task prompts are optional overrides, not readiness blockers. The subagent may draft Gitea issue bodies, PR bodies, Wiki summaries, Redmine QA summaries, case candidate analysis, and reviewer notes. Redmine sync payloads include a `qa_summary` plus a `redmine_issue_summary` subagent handoff so QA can see problem, environment, reproduction, expected/actual, evidence, and missing testcase details. It must not write files, create issues, edit Wiki pages, open PRs, close issues, or bypass AI Quality Pilot validation/write gates.
 
 ## Interactive Guidance Model
 
@@ -1232,7 +1240,7 @@ Recommended interaction by situation:
 - After `/quality-pilot doctor` warning: explain the warning and suggest the smallest check that resolves it. If `payload.hermes_needs_input.reason == "runtime_profile_missing"`, call `clarify` using its questions; those questions are already based on repo analysis.
 - After `gitea_mcp_snapshot_missing`: offer to use Hermes Gitea MCP read-only fetch, write the snapshot, then rerun `/quality-pilot issues sync`.
 - After `/quality-pilot issues sync`: explain that sync includes dedupe/prune, then suggest `/quality-pilot issues status` and `/quality-pilot cases generate --growing`.
-- If the user asks for first-time test ideas or has no cases yet, run `/quality-pilot cases generate --init`; it acts as an opinionated SWQA engineer, scans README, code, package metadata, existing runners, existing cases, and project rules, then creates executable product-runtime safe-probe cases across functional, positive, negative, boundary, invalid-input, side-effect-safe, and stress/timeout-risk coverage. Every INIT case must have `commands[].run` using the configured or inferred product entrypoint; it must not ask case-by-case confirmation questions.
+- If the user asks for first-time test ideas or has no cases yet, run `/quality-pilot cases generate --init`; it scans README, code, package metadata, existing runners, existing cases, and project rules, then creates a stratified first slice across functional/positive, negative, boundary, stress/timeout-risk, and sibling-surface dimensions. Every INIT case must have `commands[].run` using the configured or inferred product entrypoint; it must not ask case-by-case confirmation questions. Report exit-only probes as partial. Do not claim deep white-box, mutation, fuzz, UI, API, or production-grade load coverage unless an explicit adapter and semantic oracle exist.
 - `/quality-pilot cases generate --init` is already fast/high-standard autonomous mode.
 - If the user wants a smaller first batch, run `/quality-pilot cases generate --init --count 5`.
 - If the user asks for follow-up ideas after issues/PRs/runs/commits changed, run `/quality-pilot cases generate --growing`; it aggressively creates executable growth cases from repo signals, code inventory, Gitea issues, PR references, recent git commits, latest run, reports, existing cases, runners, and bounded monkey CLI help sweeps.

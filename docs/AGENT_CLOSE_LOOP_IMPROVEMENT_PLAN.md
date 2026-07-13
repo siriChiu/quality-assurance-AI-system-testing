@@ -434,9 +434,12 @@ Implementation progress on 2026-06-26:
 - `/quality-pilot issues report` now writes per-issue markdown/JSON and creates gated linked Gitea issue evidence update payloads for FAIL/BLOCK latest results.
 - `src/quality_pilot/gitea_ledger.py` now records Gitea MCP ledger entries for Redmine issue create handoffs, issue evidence update handoffs, PR linkage handoffs, and Wiki update handoffs, including operation id, idempotency key, target type, request/result paths, source module, gate result, observed result status, and remote id/url when result JSON exists.
 - `setup` and `doctor` now write `state/automation-profile.candidate.json`, capturing repo-derived runtime, command candidates, fixture/credential/target env candidates, side-effect gaps, and bullet-listed missing external facts before testcase generation.
-- `/quality-pilot close-loop heartbeat` now provides a sensor-driven growth tick: run growing sensors, execute only newly generated or explicitly requested cases, record heartbeat state/history, return `idle` when no new work is produced, and expose 12-hour scheduling metadata for the next external trigger.
+- `/quality-pilot close-loop heartbeat` now provides a sensor-driven growth tick: run growing sensors, execute only newly generated or explicitly requested cases, record heartbeat state/history, return `idle` when no new work is produced, and expose 12-hour scheduling metadata for the next external trigger. A blocked issue sensor stops the tick and raises an alert instead of being reported as idle/ok.
 - `cases generate --growing` now uses a more aggressive first-pass sensor set: Gitea issue snapshots, linked PR references, recent git commit history, repo code roots, latest run state, existing cases, README surfaces, and bounded monkey CLI help sweeps. The default growth target is 20 cases with a larger candidate pool for dedupe and selection.
 - Growth candidates now pass through an SWQA operation matrix before YAML is written: surface probe, invalid-option rejection, boundary invalid-value rejection, sibling sweep, repeatability, concurrency, timeout baseline, and bounded monkey sweep variants. Duplicate existing commands no longer consume the requested new-case budget, so follow-up growth keeps searching for deeper operation-level coverage.
+- Contract v2 now supports structured exit/stdout/stderr/duration assertions with assertion IDs and persisted `oracle_results`; exit-only legacy cases remain compatible but are marked partial.
+- Run truth now separates `workflow_status`, `test_outcome`, `probe_outcome`, `gate_status`, and `health_status`; zero-case, dry-run, and partial-only executions cannot become an official PASS. Because close-loop skips doctor-owned health checks, it reports `health_status: NOT_EVALUATED` instead of deriving health from QA/gate results.
+- Init selection now starts with a stratified dimension/operation slice. Generated rejection operations require rejection-specific diagnostics and exclude infrastructure failures; coverage is claimed per dimension only when it references a runner-effective semantic assertion. External candidate assertions and claim IDs are normalized before Contract v2 write.
 
 ### CL0: Stabilize First-Run Truth
 
@@ -636,7 +639,7 @@ Acceptance:
 | Independent agent module state exists | no module result schema/session | Not ready |
 | Issues report agent exists | `issues report`, `reports/issues-report.md`, `state/issues-report.json`, evidence update lifecycle test | Partial |
 | Full close loop one-command flow exists | `close-loop run-once` is pipeline-like but not flowchart-module aware | Not ready |
-| SWQA bug-pattern PASS gate exists | principles documented in `docs/SWQA_TEST_DESIGN.md`; engine gate pending | Not ready |
+| SWQA bug-pattern PASS gate exists | structured assertions, partial-only HOLD, and four-axis truth are implemented; full issue-level risk/pattern gate is pending | Partial |
 | Docs/install/config conformance is regression-tested | docs are aligned manually; drift tests pending | Not ready |
 
 ## Test Plan

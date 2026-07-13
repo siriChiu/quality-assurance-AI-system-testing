@@ -57,7 +57,9 @@ class LifecycleTest(unittest.TestCase):
         binary.write_text(
             "#!/bin/sh\n"
             "case \"$*\" in\n"
-            "  *--help*|*--version*|-v) exit 0 ;;\n"
+            "  *--quality-pilot-invalid-*) printf 'error: unknown option %s\\nusage: democtl [options]\\n' \"$*\" >&2; exit 2 ;;\n"
+            "  *--quality-pilot-boundary-*) printf 'error: invalid value for option\\nusage: democtl [options]\\n' >&2; exit 2 ;;\n"
+            "  *--help*|*--version*|-v) printf 'usage: democtl [options]\\n'; exit 0 ;;\n"
             "  *) exit 0 ;;\n"
             "esac\n",
             encoding="utf-8",
@@ -1392,17 +1394,27 @@ democtl = "demo.cli:main"
             self.assertEqual(first_yaml["quality_pilot"]["questions"], [])
             self.assertEqual(first_yaml["commands"][0]["id"], "safe_probe")
             commands: list[str] = []
+            operation_keys: set[str] = set()
             for item in generated["generated"]:
                 case_yaml = load_yaml(root / item["path"])
                 command = case_yaml["commands"][0]["run"]
                 commands.append(command)
+                operation_keys.add(case_yaml["quality_pilot"]["swqa_operation"]["key"])
                 self.assertIn("QUALITY_PILOT_BINARY", command)
                 self.assert_no_placeholder_command(command)
+                self.assertEqual(case_yaml["contract_version"], 2)
+                self.assertTrue(case_yaml["commands"][0]["assertions"])
+                self.assertTrue(case_yaml["coverage_claims"])
             self.assertEqual(len(commands), len(set(commands)))
             joined_commands = "\n".join(commands)
             self.assertIn("users --help", joined_commands)
-            self.assertIn("users list --help", joined_commands)
-            self.assertIn("config --help", joined_commands)
+            self.assertIn("quality-pilot-invalid", joined_commands)
+            self.assertIn("quality-pilot-boundary", joined_commands)
+            self.assertIn("QUALITY_PILOT_TIMEOUT_SECONDS", joined_commands)
+            self.assertEqual(
+                operation_keys,
+                {"surface_probe", "invalid_option_rejection", "boundary_invalid_value", "timeout_baseline"},
+            )
             self.assertIn("risk_controls", first_yaml)
             self.assertIn("init_seed", first_yaml)
 
@@ -1439,8 +1451,8 @@ democtl = "demo.cli:main"
                 "--json",
             ])
             self.assertEqual(code, 0)
-            self.assertEqual(second["generated_count"], 0)
-            self.assertGreaterEqual(second["deduped_count"], 1)
+            self.assertEqual(second["generated_count"], 5)
+            self.assertGreaterEqual(second["deduped_count"], 5)
 
     def test_cases_generate_init_prefers_readonly_product_operations_over_help_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1496,6 +1508,237 @@ democtl = "demo.cli:main"
             code, run_one = self.run_cli(["cases", "run", "--root", tmp, "--json", first_case])
             self.assertEqual(code, 0)
             self.assertEqual(run_one["status"], "PASS")
+
+    def test_generated_negative_case_detects_invalid_option_acceptance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.run_cli(["setup", "--root", tmp])
+            self.write_democtl_product_binary(root)
+            (root / "README.md").write_text(
+                "# Demo\n\n```bash\n./democtl --help\n./democtl users --help\n./democtl config --help\n```\n",
+                encoding="utf-8",
+            )
+
+            code, generated = self.run_cli([
+                "cases", "generate", "--root", tmp, "--init", "--profile", "cli", "--count", "3", "--json",
+            ])
+            self.assertEqual(code, 0)
+            negative_case_id = next(
+                item["case_id"]
+                for item in generated["generated"]
+                if load_yaml(root / item["path"])["quality_pilot"]["swqa_operation"]["key"]
+                == "invalid_option_rejection"
+            )
+
+            code, healthy = self.run_cli(["cases", "run", "--root", tmp, "--json", negative_case_id])
+            self.assertEqual(code, 0)
+            self.assertEqual(healthy["status"], "PASS")
+            marker_result = next(
+                item
+                for item in healthy["results"][0]["commands"][0]["oracle_results"]
+                if item["type"] == "stdout"
+            )
+            self.assertTrue(marker_result["passed"])
+
+            binary = root / "democtl"
+            binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            binary.chmod(0o755)
+            code, defective = self.run_cli(["cases", "run", "--root", tmp, "--json", negative_case_id])
+            self.assertEqual(code, 1)
+            self.assertEqual(defective["status"], "FAIL")
+            self.assertFalse(all(
+                item["passed"]
+                for item in defective["results"][0]["commands"][0]["oracle_results"]
+            ))
+
+    def test_generated_rejection_cases_do_not_accept_infrastructure_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.run_cli(["setup", "--root", tmp])
+            self.write_democtl_product_binary(root)
+            (root / "README.md").write_text(
+                "# Demo\n\n```bash\n./democtl --help\n./democtl users --help\n```\n",
+                encoding="utf-8",
+            )
+            code, generated = self.run_cli([
+                "cases", "generate", "--root", tmp, "--init", "--profile", "cli", "--count", "5", "--json",
+            ])
+            self.assertEqual(code, 0)
+            rejection_cases = {
+                load_yaml(root / item["path"])["quality_pilot"]["swqa_operation"]["key"]: item["case_id"]
+                for item in generated["generated"]
+                if load_yaml(root / item["path"])["quality_pilot"]["swqa_operation"]["key"]
+                in {"invalid_option_rejection", "boundary_invalid_value"}
+            }
+            self.assertEqual(set(rejection_cases), {"invalid_option_rejection", "boundary_invalid_value"})
+
+            for operation, case_id in rejection_cases.items():
+                with self.subTest(operation=operation, defect="healthy_rejection"):
+                    self.write_democtl_product_binary(root)
+                    code, healthy = self.run_cli(["cases", "run", "--root", tmp, "--json", case_id])
+                    self.assertEqual(code, 0)
+                    self.assertEqual(healthy["status"], "PASS")
+                    command_result = healthy["results"][0]["commands"][0]
+                    output = (root / command_result["stdout"]).read_text(encoding="utf-8")
+                    self.assertRegex(output, r"(?i)(unknown option|invalid value)")
+                    self.assertIn("QUALITY_PILOT_ORACLE=", output)
+
+                seeded_failures = {
+                    "crash": "panic: invalid memory address\n",
+                    "permission": "error: permission denied while loading config\n",
+                    "dependency": "ModuleNotFoundError: missing dependency\n",
+                }
+                for defect, diagnostic in seeded_failures.items():
+                    with self.subTest(operation=operation, defect=defect):
+                        binary = root / "democtl"
+                        binary.write_text(
+                            "#!/bin/sh\n"
+                            f"printf '%s' {json.dumps(diagnostic)} >&2\n"
+                            "exit 2\n",
+                            encoding="utf-8",
+                        )
+                        binary.chmod(0o755)
+                        code, failed = self.run_cli(["cases", "run", "--root", tmp, "--json", case_id])
+                        self.assertEqual(code, 1)
+                        self.assertEqual(failed["status"], "FAIL")
+                        command_result = failed["results"][0]["commands"][0]
+                        output = (root / command_result["stdout"]).read_text(encoding="utf-8")
+                        self.assertIn(diagnostic.strip(), output)
+                        self.assertNotIn("QUALITY_PILOT_ORACLE=", output)
+
+    def test_generated_coverage_claims_realize_only_dimensions_with_semantic_oracles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.run_cli(["setup", "--root", tmp])
+            self.write_democtl_product_binary(root)
+            (root / "README.md").write_text(
+                "# Demo\n\n```bash\n./democtl --help\n./democtl users --help\n```\n",
+                encoding="utf-8",
+            )
+            code, generated = self.run_cli([
+                "cases", "generate", "--root", tmp, "--init", "--profile", "cli", "--count", "5", "--json",
+            ])
+            self.assertEqual(code, 0)
+
+            expected_realized = {
+                "surface_probe": set(),
+                "invalid_option_rejection": {"negative", "invalid_input"},
+                "boundary_invalid_value": {"boundary", "invalid_input"},
+                "timeout_baseline": {"stress_timeout_risk"},
+            }
+            observed_operations: set[str] = set()
+            for item in generated["generated"]:
+                case_yaml = load_yaml(root / item["path"])
+                operation = case_yaml["quality_pilot"]["swqa_operation"]["key"]
+                observed_operations.add(operation)
+                assertion_types = {
+                    assertion["id"]: assertion["type"]
+                    for assertion in case_yaml["commands"][0]["assertions"]
+                }
+                claims = {claim["dimension"]: claim for claim in case_yaml["coverage_claims"]}
+                realized = {
+                    dimension
+                    for dimension, claim in claims.items()
+                    if claim["status"] == "realized"
+                }
+                self.assertEqual(realized, expected_realized[operation])
+                for claim in claims.values():
+                    if claim["status"] == "realized":
+                        self.assertTrue(claim["assertion_ids"])
+                        self.assertTrue(all(assertion_id in assertion_types for assertion_id in claim["assertion_ids"]))
+                        self.assertTrue(all(assertion_types[assertion_id] != "exit_code" for assertion_id in claim["assertion_ids"]))
+                    else:
+                        self.assertIn(claim["status"], {"partial", "planned"})
+                dimension_rows = {
+                    row["dimension"]: row
+                    for row in case_yaml["quality_pilot"]["dimension_realization"]["dimensions"]
+                }
+                self.assertEqual(set(dimension_rows), set(claims))
+                self.assertEqual(
+                    case_yaml["quality_pilot"]["partial_probe"],
+                    not bool(expected_realized[operation]),
+                )
+            self.assertEqual(observed_operations, set(expected_realized))
+
+    def test_external_candidate_assertions_and_claim_ids_are_normalized_before_contract_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.init_gitea_project(tmp)
+            self.write_democtl_product_binary(root)
+            candidate_json = root / "candidate.json"
+            candidate = {
+                "title": "External semantic smoke",
+                "feature": "democtl",
+                "expected": "Help output is visible and bounded.",
+                "swqa_dimensions": ["functional", "side_effect_safe"],
+                "commands": [
+                    {
+                        "id": "external_smoke",
+                        "run": "${QUALITY_PILOT_BINARY:-./democtl} --help",
+                        "expected_exit_code": 0,
+                        "oracles": [
+                            {"type": "stdout", "operator": "contains", "expected": "usage: democtl"},
+                            {"id": "duration_bound", "type": "duration_ms", "operator": "less_than_or_equal", "expected": 5000},
+                        ],
+                    }
+                ],
+                "coverage_claims": [
+                    {
+                        "dimension": "functional",
+                        "step_ids": ["external_smoke"],
+                        "assertion_ids": ["assertion-1"],
+                        "status": "realized",
+                    },
+                    {
+                        "dimension": "side_effect_safe",
+                        "step_ids": ["external_smoke"],
+                        "assertion_ids": [],
+                        "status": "partial",
+                    },
+                ],
+            }
+            candidate_json.write_text(json.dumps({"candidates": [candidate]}), encoding="utf-8")
+
+            generated = generate_cases_growing(load_project_config(root), candidate_json=candidate_json, count=1)
+            self.assertEqual(generated["generated_count"], 1)
+            case_yaml = load_yaml(root / generated["generated"][0]["path"])
+            self.assertEqual(case_yaml["contract_version"], 2)
+            command = case_yaml["commands"][0]
+            self.assertNotIn("oracles", command)
+            self.assertEqual(
+                [assertion["id"] for assertion in command["assertions"]],
+                ["expected-exit-code", "assertion-1", "duration_bound"],
+            )
+            functional_claim = next(
+                claim for claim in case_yaml["coverage_claims"] if claim["dimension"] == "functional"
+            )
+            self.assertEqual(functional_claim["status"], "realized")
+            self.assertEqual(functional_claim["assertion_ids"], ["assertion-1"])
+
+            code, run = self.run_cli(["cases", "run", "--root", tmp, "--json", case_yaml["case_id"]])
+            self.assertEqual(code, 0)
+            runner_ids = {
+                result["id"]
+                for result in run["results"][0]["commands"][0]["oracle_results"]
+            }
+            self.assertTrue(set(functional_claim["assertion_ids"]).issubset(runner_ids))
+            self.assertEqual(runner_ids, {"expected-exit-code", "assertion-1", "duration_bound"})
+
+            bad_candidate = dict(candidate)
+            bad_candidate["title"] = "External bad claim"
+            bad_candidate["coverage_claims"] = [
+                {
+                    "dimension": "functional",
+                    "step_ids": ["external_smoke"],
+                    "assertion_ids": ["not-a-runner-assertion"],
+                    "status": "realized",
+                }
+            ]
+            candidate_json.write_text(json.dumps({"candidates": [bad_candidate]}), encoding="utf-8")
+            before_paths = set((root / ".quality-pilot-project" / "cases").glob("GROW-*.yaml"))
+            with self.assertRaises(CaseGenerationError) as ctx:
+                generate_cases_growing(load_project_config(root), candidate_json=candidate_json, count=1)
+            self.assertIn("does not match a runner-effective assertion", str(ctx.exception))
+            self.assertEqual(before_paths, set((root / ".quality-pilot-project" / "cases").glob("GROW-*.yaml")))
 
     def test_cases_generate_init_uses_generic_fixture_env_for_non_login_config_flags(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1734,7 +1977,11 @@ democtl = "demo.cli:main"
             self.assertEqual(latest["growth"]["generated_count"], 1)
             generated_case_ids = latest["sensors"][1]["generated_case_ids"]
             self.assertEqual(latest["executed_case_ids"], generated_case_ids)
-            self.assertEqual(sum(latest["run"]["case_counts"].values()), 1)
+            self.assertEqual(
+                sum(latest["run"]["case_counts"].values())
+                + sum(latest["run"]["partial_probe_counts"].values()),
+                1,
+            )
             self.assertTrue((root / ".quality-pilot-project" / "state" / "close-loop" / "heartbeat-latest.json").exists())
             self.assertTrue((root / ".quality-pilot-project" / "state" / "close-loop" / "heartbeat-history.jsonl").exists())
 

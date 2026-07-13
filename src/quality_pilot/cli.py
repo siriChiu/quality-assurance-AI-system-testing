@@ -1118,7 +1118,10 @@ def cmd_close_loop_run_once(args: argparse.Namespace) -> int:
     payload = result.payload
     if not args.dry_run and result.status in {"PASS", "FAIL", "BLOCK"}:
         payload = _with_auto_wiki(config, payload, event="test_result", latest_run=payload)
-    return print_json(payload, exit_code=0 if result.status in {"PASS", "FAIL"} else 2)
+    exit_code = 0 if result.status in {"PASS", "FAIL"} else 2
+    if args.fail_on_test_failure and payload.get("test_outcome") == "FAIL":
+        exit_code = 1
+    return print_json(payload, exit_code=exit_code)
 
 
 def cmd_close_loop_heartbeat(args: argparse.Namespace) -> int:
@@ -1132,12 +1135,16 @@ def cmd_close_loop_heartbeat(args: argparse.Namespace) -> int:
             case_id=args.case_id,
             dry_run=args.dry_run,
             run_existing_if_no_growth=args.run_existing_if_no_growth,
+            fail_on_test_failure=args.fail_on_test_failure,
         )
     except QAConfigError as exc:
         return _error_payload(exc)
     except ValueError as exc:
         return print_json({"status": "error", "error": "invalid_heartbeat_option", "message": str(exc)}, exit_code=2)
-    return print_json(payload, exit_code=0 if payload.get("status") in {"ok", "idle"} else 4)
+    exit_code = 0 if payload.get("status") in {"ok", "idle", "planned"} else 4
+    if args.fail_on_test_failure and payload.get("qa_outcome") == "FAIL":
+        exit_code = 1
+    return print_json(payload, exit_code=exit_code)
 
 
 def cmd_report_status(args: argparse.Namespace) -> int:
@@ -1253,7 +1260,23 @@ def _contract_payload(contract: Any) -> dict[str, Any]:
         "title": contract.title,
         "path": str(contract.path),
         "contract_hash": contract.contract_hash,
-        "commands": [{"id": command.id, "run": command.run, "expected_exit_code": command.expected_exit_code} for command in contract.commands],
+        "commands": [
+            {
+                "id": command.id,
+                "run": command.run,
+                "expected_exit_code": command.expected_exit_code,
+                "assertions": [
+                    {
+                        "id": assertion.id,
+                        "type": assertion.type,
+                        "operator": assertion.operator,
+                        "expected": assertion.expected,
+                    }
+                    for assertion in command.assertions
+                ],
+            }
+            for command in contract.commands
+        ],
     }
 
 
@@ -1435,6 +1458,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_root_config(run_once)
     run_once.add_argument("--case-id", default=None)
     run_once.add_argument("--dry-run", action="store_true")
+    run_once.add_argument("--fail-on-test-failure", action="store_true", help="Return exit code 1 when QA outcome is FAIL")
     run_once.set_defaults(func=cmd_close_loop_run_once)
     heartbeat = close_sub.add_parser("heartbeat", help="Run sensor-driven close-loop growth and execute only new work")
     _add_root_config(heartbeat)
@@ -1442,6 +1466,7 @@ def build_parser() -> argparse.ArgumentParser:
     heartbeat.add_argument("--grow-count", type=int, default=HEARTBEAT_DEFAULT_GROW_COUNT, help="Maximum new growth cases per heartbeat")
     heartbeat.add_argument("--case-id", default=None, help="Run a specific case instead of newly grown cases")
     heartbeat.add_argument("--dry-run", action="store_true")
+    heartbeat.add_argument("--fail-on-test-failure", action="store_true", help="Return exit code 1 when QA outcome is FAIL")
     heartbeat.add_argument("--run-existing-if-no-growth", action="store_true", help="Run existing cases when sensors produce no new growth")
     heartbeat.set_defaults(func=cmd_close_loop_heartbeat)
 

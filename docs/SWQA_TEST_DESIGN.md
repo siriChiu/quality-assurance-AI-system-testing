@@ -3,7 +3,18 @@
 status: reusable
 scope: generic AI Quality Pilot test design
 
-AI Quality Pilot must model how an experienced SWQA engineer expands one confirmed bug into a reusable test pattern. The goal is not only to prove the exact fix; it is to expose sibling failures that share the same parser, validator, state transition, transport path, or safety boundary.
+This document contains both current executable contracts and the deeper test
+strategy AI Quality Pilot is growing toward. The current checkout supports a
+first slice of structured command assertions, four-axis truth, and stratified
+init selection. Complete white-box/black-box, mutation, fuzz, security,
+UI/browser, API-schema, load/soak, and distributed-system coverage is **Planned**,
+not implied by generated dimension labels. See
+[`CAPABILITY_MATRIX.md`](CAPABILITY_MATRIX.md).
+
+The target is to model how an experienced SWQA engineer expands one confirmed
+bug into a reusable test pattern. The goal is not only to prove the exact fix;
+it is to expose sibling failures that share the same parser, validator, state
+transition, transport path, or safety boundary.
 
 ## Core principle
 
@@ -17,11 +28,98 @@ swqa_principle:
   pass_without_explicit_risk_list: forbidden
 ```
 
-A PASS result is valid only when the evidence shows what was tested, how it was tested, what was intentionally not tested, and why the remaining risk is acceptable.
+This is the target issue-level principle. The current engine enforces structured
+command assertions and several evidence-consistency gates, but complete
+risk-based issue/release PASS/HOLD enforcement is Partial. Therefore a
+command-level `test_outcome: PASS` must not be summarized as complete issue or
+release readiness.
+
+## Supported first slice: structured command assertions
+
+A contract can attach machine-evaluable assertions to each command. Public
+contracts should prefer `assertions`; `oracles` is accepted as a compatibility
+alias. `expected_exit_code` remains supported and is converted into an effective
+exit assertion when no explicit exit assertion is present.
+
+```yaml
+commands:
+  - id: rejected_invalid_option
+    run: "${QUALITY_PILOT_BINARY} inspect --definitely-invalid"
+    expected_exit_code: 2
+    assertions:
+      - id: exit_rejected
+        type: exit_code
+        operator: equals
+        expected: 2
+      - id: invalid_message
+        type: stderr
+        operator: contains
+        expected: "unknown option"
+      - id: usage_context
+        type: stderr
+        operator: regex
+        expected: "(?i)usage|invalid"
+      - id: bounded_rejection
+        type: duration_ms
+        operator: less_than_or_equal
+        expected: 2000
+```
+
+Supported assertion types and operators:
+
+| Type | Operators | Expected value |
+|---|---|---|
+| `exit_code` | `equals` | integer |
+| `stdout` | `contains`, `regex`, `equals` | string |
+| `stderr` | `contains`, `regex`, `equals` | string |
+| `duration_ms` | `less_than`, `less_than_or_equal` | non-negative number |
+
+Assertion `id` is optional but recommended for traceability. Invalid assertion
+schemas and invalid regular expressions fail contract loading. Each executed
+command records `duration_ms`, `oracle_results`, `oracle_strength`, and
+`oracle_partial`; oracle results include the assertion id, expected value,
+redacted actual evidence, source, status, and mismatch reason. The case result
+also summarizes oracle strength/partial state. An assertion can fail even when
+the process exit code is zero.
+
+This is only the first oracle slice. Database state, HTTP/schema validation,
+files, distributed traces, UI state, business invariants, resource curves, and
+custom project runners remain future oracle families.
+
+## Supported first slice: four-axis truth
+
+Current run summaries keep these fields separate:
+
+```yaml
+workflow_status: PLANNED | COMPLETED | BLOCKED | FAILED
+test_outcome: NOT_RUN | PASS | FAIL | BLOCK | HOLD | ABORT
+gate_status: NOT_EVALUATED | ALLOWED | BLOCKED
+health_status: NOT_EVALUATED | HEALTHY | DEGRADED | UNHEALTHY
+probe_outcome: NOT_RUN | PASS | FAIL | BLOCK | HOLD  # auxiliary partial-probe result
+```
+
+- `workflow_status` answers where the lifecycle is.
+- `test_outcome` answers what the assertion set observed.
+- `gate_status` answers whether a gated next action may proceed.
+- `health_status` answers whether component/integration health was independently
+  evaluated. The current close-loop runner uses `NOT_EVALUATED`; it does not
+  infer health from QA PASS or a write gate.
+- `probe_outcome` preserves partial observations without promoting them to the
+  official test outcome.
+
+These axes intentionally allow states such as `test_outcome: PASS` with
+`gate_status: BLOCKED`, or `test_outcome: NOT_RUN` with
+`workflow_status: PLANNED`. The legacy top-level `status` may still exist for
+compatibility; reports and agents should use the four explicit fields when
+available. If every selected case is an `oracle_partial`/partial probe, the
+official `test_outcome` is `HOLD`; its observed result is recorded separately in
+`probe_outcome`.
 
 ## Bug-to-pattern workflow
 
-For every new confirmed bug, create a reusable knowledge card before closing QA:
+Target policy: for every new confirmed bug, create a reusable knowledge card
+before closing QA. Bug-pattern-card persistence and its complete issue-level
+gate are still Planned:
 
 ```yaml
 bug_pattern_card:
@@ -51,11 +149,50 @@ bug_pattern_card:
 
 `/quality-pilot cases generate` requires an explicit mode so users do not confuse first-time test design with incremental growth.
 
-`/quality-pilot cases generate --init` is the first-time full-repo SWQA map. It scans README, code inventory, package metadata, existing runners, existing cases, and project rules, then creates executable product-runtime command contracts for functional, positive, negative, boundary, side-effect-safe, and stress/timeout-risk coverage.
+`/quality-pilot cases generate --init` is the first-time repo SWQA map. It scans
+README, code inventory, package metadata, existing runners, existing cases, and
+project rules. Its first supported stratified selector puts one candidate from
+each available init operation stratum at the front of the pool before adding the
+remaining seed-by-stratum matrix:
 
-`/quality-pilot cases generate --growing` is the follow-up mode. It is intentionally aggressive and is not limited to issue-to-case conversion; it observes repo metadata, code inventory, current Gitea issue mirrors, linked PR references, recent git commit history, latest run state, reports, existing cases/runners, and project rules, then creates executable product-runtime command contracts from fresh signals. The default growth target is 20 cases, with a larger internal candidate pool for dedupe and selection. Duplicate existing cases or commands are treated as already-covered signals and do not consume the requested new-case budget.
+```text
+functional primary -> positive smoke -> negative invalid input
+-> boundary invalid value -> stress/timeout baseline -> sibling consistency
+```
 
-Before a growth candidate becomes YAML, it must pass through an SWQA operation matrix. The point is to create operation-level coverage, not just another command-shape smoke test.
+This means a small `--count` is less likely to be filled by one functional/help
+surface. It does not prove each generated command deeply realizes the named
+dimension. Generated contract v2 records `quality_pilot.swqa_operation`,
+`quality_pilot.oracle_strength`, `quality_pilot.dimension_realization`, and
+top-level `coverage_claims`. Operation wrappers emit a semantic marker when they
+can support a structured oracle; an exit-only surface probe remains
+`oracle_partial` rather than deep coverage. Each dimension is evaluated
+separately: only a dimension tied to an actual non-exit assertion may be
+`realized`; adjacent labels remain `partial` or `planned`.
+
+Generated negative and boundary wrappers do not accept arbitrary non-zero
+returns. They require a bounded rejection exit and invalid/usage/option/value
+diagnostic evidence, preserve the diagnostic in stdout evidence, and reject
+panic/traceback, permission, missing-dependency, command-not-found, and timeout
+signatures. This prevents an infrastructure failure from impersonating correct
+input validation.
+
+`/quality-pilot cases generate --growing` is the follow-up mode. It observes repo
+metadata, code inventory, current Gitea issue mirrors, linked PR references,
+recent git commit history, latest run state, reports, existing cases/runners,
+and project rules, then creates product-runtime command contracts from fresh
+signals. The default growth target is up to 20 cases, with a larger candidate
+pool for dedupe and operation selection. Duplicate commands do not consume the
+requested new-case budget. Generated count is not a coverage score.
+
+Before a growth candidate becomes YAML, it passes through the current first-slice
+SWQA operation matrix. The point is operation diversity; it is not a claim of
+complete semantic or code-path coverage.
+
+Externally supplied candidates are normalized before Contract v2 is written.
+Their assertions, exit-code consistency, regexes, IDs, and coverage references
+must match runner-effective assertion IDs; malformed or untraceable claims are
+rejected before a case file is created.
 
 ```yaml
 swqa_growth_operations:
@@ -113,7 +250,7 @@ growth_generation:
     - reports
   if_lab_command_or_fixture_is_unclear:
     generated_case: product_runtime_command_or_needs_input
-    review_required_before_run: false
+    review_required_before_run: true_when_safety_or_oracle_is_unproven
     lab_runner_status: advisory_until_configured
   ask_user_for:
     - target_or_feature_surface
@@ -128,9 +265,12 @@ Do not invent a destructive or credentialed command when only the testing idea i
 
 Hermes may use a separate growth session or agent for broader analysis, but that session may only produce candidate JSON. AI Quality Pilot remains the sole writer of case YAML and must validate schema, dedupe fingerprints, raw-secret leakage, internal prompt leakage, dangerous `.qa` runtime paths, and command fields before writing any contract.
 
-## CLI parser and flag-order matrix
+## Target strategy: CLI parser and flag-order matrix
 
-When a bug involves CLI flags, arguments, parser normalization, contextual help, or command contracts, test the matrix below. Do not stop at the one command reported by the user.
+When a bug involves CLI flags, arguments, parser normalization, contextual help,
+or command contracts, the target test strategy uses the matrix below. Some
+individual operation variants exist today, but complete automatic matrix
+expansion and issue-level enforcement are Planned.
 
 ```yaml
 cli_argument_order_matrix:
@@ -162,7 +302,7 @@ cli_argument_order_matrix:
 
 SWQA note: a global-flag fix does not prove local flags are safe. A command-local flag after a positional argument is a separate class and needs its own tests.
 
-## Boundary and invalid-value validation
+## Target strategy: boundary and invalid-value validation
 
 Parser acceptance is not semantic validation. Any option that controls retry, wait time, concurrency, destructive action, or polling must include invalid-value tests.
 
@@ -213,7 +353,11 @@ safe_repro_order:
 
 If a command can mutate external state, evidence must explain how the run avoided or controlled side effects.
 
-## PASS/HOLD decision rule
+## Target policy: PASS/HOLD decision rule
+
+The rule below defines intended issue-level readiness. Structured command
+assertions and evidence consistency are Supported; complete deterministic
+enforcement of every listed coverage/risk item is Partial.
 
 ```yaml
 pass_gate:

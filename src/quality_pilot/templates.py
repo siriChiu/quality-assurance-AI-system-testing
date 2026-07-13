@@ -5,11 +5,20 @@ title: Example deterministic smoke test
 owner: qa-team
 feature: example
 priority: P2
-contract_version: 1
+contract_version: 2
 commands:
   - id: smoke
     run: python3 --version
     expected_exit_code: 0
+    assertions:
+      - id: exit-success
+        type: exit_code
+        operator: equals
+        expected: 0
+      - id: version-output
+        type: stdout
+        operator: regex
+        expected: '^Python [0-9]+\\.[0-9]+'
 expected: command exits successfully and prints a version string
 artifacts:
   - evidence/stdout.log

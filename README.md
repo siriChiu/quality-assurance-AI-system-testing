@@ -9,7 +9,12 @@
 ![Hermes](https://img.shields.io/badge/hermes-dynamic%20skill-purple)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-AI Quality Pilot 是給 Hermes 使用的 repo-agnostic SWQA close-loop agent/plugin。使用者在 Hermes 聊天室輸入 `/quality-pilot ...`，Hermes 依 `SKILL.md` 呼叫 deterministic AI Quality Pilot engine，完成 Redmine/Gitea issue sync、testcase generation、test execution、evidence/report、Wiki status sync、write gate 與產品修復 PR handoff。
+AI Quality Pilot 是給 Hermes 使用的 repo-agnostic SWQA dynamic skill，背後由
+deterministic engine 執行。它不是 native Hermes plugin/router，也還不是完整
+autonomous、可 resume 的多 agent runtime。使用者在 Hermes 聊天室輸入
+`/quality-pilot ...`，可進行 Redmine/Gitea issue sync、testcase generation、
+test execution、evidence/report、Wiki status plan、write gate 與產品修復 PR
+handoff。
 
 English summary: AI Quality Pilot is a Hermes-first deterministic SWQA close-loop engine for Redmine/Gitea issue sync, executable test-case generation, evidence-based execution, truthful reporting, gated Wiki updates, and product repair workflows.
 
@@ -24,7 +29,11 @@ AI Quality Pilot 的目標不是多包一層 CLI，而是把 SWQA lifecycle 變�
 - 只有真的缺外部資訊時才詢問，例如 credential env name、lab target、fixture/config path、side-effect boundary。
 - Subagent 可以協助摘要、候選 testcase、報告文字、修復策略，但不能繞過 deterministic validation、write gate 或 evidence truth。
 
-完整 flowchart-based 改善計畫見 [Agent Close Loop Improvement Plan](docs/AGENT_CLOSE_LOOP_IMPROVEMENT_PLAN.md)，追蹤任務見 [Quality Pilot UX Hardening Tasks](docs/QUALITY_PILOT_UX_HARDENING_TASKS.md)。
+先看 [Capability Matrix](docs/CAPABILITY_MATRIX.md) 區分 Supported、Partial、
+Planned。完整 flowchart-based 改善計畫見
+[Agent Close Loop Improvement Plan](docs/AGENT_CLOSE_LOOP_IMPROVEMENT_PLAN.md)，
+追蹤任務見 [Quality Pilot UX Hardening Tasks](docs/QUALITY_PILOT_UX_HARDENING_TASKS.md)；
+這兩份是 roadmap，不是已實作功能清單。
 
 ## What Is AI Quality Pilot?
 
@@ -101,14 +110,18 @@ Analyze -> Normalize -> Generate -> Execute -> Report -> Fix -> Publish -> Re-en
 | A0 Orchestrator | `close-loop status`, `close-loop run-once`, `close-loop heartbeat` | Pipeline exists; heartbeat grows new work before execution; richer module contract/session roadmap pending |
 | A1 Redmine Intake | `issues sync --redmine-issues ...` | Full snapshot required, stale/trimmed payloads rejected |
 | A2 Issues Sync | `issues sync`, `issues status` | Redmine/Gitea mirrors, dedupe, gated Gitea issue create/update, canonical mapping audit |
-| A3 Case Generate | `cases generate --init/--growing/--redmine-issues ...` | Runtime-first, aggressive growing sensors from issues/PRs/git history/code roots/monkey sweeps, no placeholder cases when runtime missing |
-| A4 Case Run | `cases run [case_id]` | Evidence persisted with result metadata and contract hash |
+| A3 Case Generate | `cases generate --init/--growing/--redmine-issues ...` | Runtime-first；init 有第一版 stratified selection，growing 有 operation matrix；不代表完整深度白箱/黑箱 coverage |
+| A4 Case Run | `cases run [case_id]` | 支援 exit/stdout/stderr/duration structured assertions，保存 oracle evidence 與 contract hash |
 | A5 Issues Report | `issues report`, `report status/json` | Per-issue report exists and FAIL/BLOCK results create gated linked Gitea issue evidence update payloads; richer subagent wording and module session state remain roadmap work |
 | A6 Issues Fix | `issues fix ...`, `cases push-pr ...` | Repair/feature handoff exists after sync; PR bodies/linkage metadata now include issue/case/evidence paths; stricter post-fix retest loop remains roadmap work |
 | A7 Update Wiki | `publish wiki status/plan/apply` | Gated Wiki update, truth-source hardening in progress |
 | A8 Gitea Output | Hermes Gitea MCP request/result files | One ledger records issue create/update, evidence writeback, PR linkage, and Wiki write gates first-pass; richer reconciliation remains roadmap work |
 
-Current status: partial close loop. The tool can already sync, generate, run, report, gate writes, and hand off fixes, but the full A0-A8 module contract, resumable session state, subagent result ledger, and one-command autonomous loop are still roadmap work.
+Current status: partial close loop. The tool can already sync, generate, run,
+report, gate writes, and hand off fixes. Run truth now separates
+`workflow_status`、`test_outcome`、`gate_status`、`health_status`，但 full A0-A8
+module contract、resumable session、deep risk-based PASS/HOLD gate、subagent
+result ledger 與 one-command autonomous loop 仍未完整。
 
 ## Quick Start
 
@@ -136,30 +149,40 @@ PYTHONPATH="$SRC" python3 -m quality_pilot.hermes install-skill --force --runner
 /quality-pilot help
 ```
 
-3. Initialize a product repo:
+3. 在 Hermes 中切換到 **target product repo**；不要留在 AI Quality Pilot
+source checkout。依使用目的選一條 happy path。
+
+Local repo QA：
 
 ```text
 /quality-pilot setup
-/quality-pilot doctor --fix
 /quality-pilot doctor
-/quality-pilot audit state
-```
-
-4. Generate and run repo-level SWQA cases:
-
-```text
 /quality-pilot cases generate --init
-/quality-pilot cases generate --growing
-/quality-pilot cases validate
-/quality-pilot cases list
-/quality-pilot cases run <case_id>
-/quality-pilot report status
 ```
 
-5. Run all cases and publish Wiki only after the first case is healthy:
+只有當 `doctor` 建議修復 safe config/overlay skeleton 時，才使用
+`/quality-pilot doctor --fix`。Generation 後依 `next_actions` review/validate/run；
+不要在 fresh repo 無條件立刻跑 `--growing`。
+
+Issue-driven QA：
 
 ```text
-/quality-pilot cases run
+/quality-pilot issues sync --redmine-issues 145085
+```
+
+Hermes 應在同一流程完成 Redmine MCP live read 與 snapshot handoff，再呈現
+`cases generate --redmine-issues ...` 或 `issues fix --issue ...` 等下一步；
+使用者不需要自行換算 Redmine/Gitea/case IDs。
+
+Scheduled growth：先手動執行一次 `/quality-pilot close-loop heartbeat`。
+Heartbeat 是 single tick，不會安裝 timer；Hermes/cron 安全排程見
+[Heartbeat and external scheduling](docs/HEARTBEAT_CRON.md)。
+
+當 case assertions、side-effect boundary 與 evidence 都可信後，再執行：
+
+```text
+/quality-pilot cases run <case_id>
+/quality-pilot issues report
 /quality-pilot publish wiki status
 /quality-pilot publish wiki apply
 ```
@@ -186,7 +209,7 @@ Important behavior:
 - If a linked Gitea issue already exists, Redmine sync must reuse/update it through idempotent gated handoff instead of duplicating it.
 - Trimmed, legacy, or stale snapshots are rejected for Redmine-linked generation.
 - Redmine testcase commands must be product-binary/API/runner oriented. Developer commands such as `go test`, `go run`, pytest, build scripts, and internal unit-test names are treated as implementation hints, not QA commands.
-- If exact lab reproduction needs credentials, target resources, or fixtures, AI Quality Pilot records the environment requirements and uses product-entrypoint fallback probes until the missing external facts are provided.
+- If exact lab reproduction needs credentials, target resources, or fixtures, AI Quality Pilot records the environment requirements. A fallback surface probe is partial coverage, not proof that the reported behavior passed.
 - Generated testcase commands must use the configured/inferred product entrypoint or a user-confirmed runner. Repo-only probes, static metadata checks, synthetic invalid commands, and developer test commands are not allowed as `commands[].run`.
 
 ## Runtime Profile
@@ -219,7 +242,8 @@ Rules:
 
 Subagents are candidate-only helpers. They can draft Gitea issue bodies, PR bodies, Wiki summaries, Redmine summaries, case candidate analysis, and reviewer notes. They must not write files, create issues, update Wiki pages, open PRs, close issues, or bypass validation/write gates.
 
-Default profile:
+Open WebUI is a supported provider profile, but no private network endpoint is a
+universal product default. Each deployment supplies its own endpoint and model:
 
 ```yaml
 subagents:
@@ -228,7 +252,7 @@ subagents:
   profiles:
     open-webui:
       provider: open_webui
-      endpoint: "https://172.17.20.220/"
+      endpoint: ""
       model: ""
       api_base: ""
       api_key_env: ""
@@ -237,14 +261,14 @@ subagents:
 Simple setup options:
 
 ```yaml
-endpoint: "https://172.17.20.220/?model=qwen3.6-chat-direct"
+endpoint: "https://open-webui.example.invalid/?model=<model-name>"
 ```
 
 or:
 
 ```yaml
-endpoint: "https://172.17.20.220/"
-model: "qwen3.6-chat-direct"
+endpoint: "https://open-webui.example.invalid/"
+model: "<model-name>"
 api_key_env: "OPEN_WEBUI_API_KEY"
 ```
 
@@ -256,7 +280,10 @@ Use:
 /quality-pilot doctor --fix
 ```
 
-`doctor --fix` and `subagent configure` can create the Open WebUI skeleton. The user-owned model/API key env remain explicit config because the tool must not guess raw credentials.
+`doctor --fix` and `subagent configure` can create the Open WebUI routing
+skeleton. Endpoint/model/API key env remain user-owned because the tool must not
+guess private services or raw credentials. Local deterministic workflows remain
+usable without a configured subagent.
 
 ## Public Commands
 
@@ -331,7 +358,7 @@ Use:
 | 套用 Wiki 更新 | `/quality-pilot publish wiki apply` |
 | 查看 close-loop component health | `/quality-pilot close-loop status` |
 | 跑一輪 close-loop | `/quality-pilot close-loop run-once` |
-| 12 小時節奏 heartbeat | `/quality-pilot close-loop heartbeat` |
+| 執行一次 heartbeat tick（排程需外部設定） | `/quality-pilot close-loop heartbeat` |
 | 產生報告 | `/quality-pilot report status` |
 | 設定 subagent | `/quality-pilot subagent configure` |
 
@@ -372,6 +399,19 @@ commands:
   - id: help
     run: "${QUALITY_PILOT_BINARY:-python3 -m your_package} --help"
     expected_exit_code: 0
+    assertions:
+      - id: exit_ok
+        type: exit_code
+        operator: equals
+        expected: 0
+      - id: usage_visible
+        type: stdout
+        operator: regex
+        expected: "(?i)usage|help"
+      - id: bounded_runtime
+        type: duration_ms
+        operator: less_than_or_equal
+        expected: 2000
 expected:
   summary: CLI help exits 0 and prints usage.
 risk_controls:
@@ -379,7 +419,19 @@ risk_controls:
   requires_credentials: false
 ```
 
-Every runnable case must have `commands[].run`. If runtime is unknown, AI Quality Pilot must return `needs_input` and write no fake case. If a lab-only target, fixture, or credential is missing, it should generate a product-runtime command only when one can be proven safe, and record stronger lab checks as follow-up metadata.
+Every runnable case must have `commands[].run`. Contract v2 supports command-level
+`assertions` (`oracles` is a compatibility alias) for exit code, stdout/stderr
+contains/regex/equals, and duration bounds. Runner evidence records
+`oracle_results`, `duration_ms`, `oracle_strength`, and `oracle_partial`, with a
+case-level summary. Generated v2 contracts also record `coverage_claims` and
+`dimension_realization`; exit-only or mixed-oracle cases remain partial for
+official run counting. A generated dimension becomes `realized` only when its
+claim references a runner-visible semantic assertion.
+
+If runtime is unknown, AI Quality Pilot must return `needs_input` and write no
+fake case. If a lab-only target, fixture, or credential is missing, it should
+generate a product-runtime command only when one can be proven safe, and record
+stronger lab checks as follow-up metadata.
 
 ## Reports, Evidence, And Truth Gates
 
@@ -398,6 +450,11 @@ Normalized result includes:
 {
   "case_id": "INIT-CLI-HELP",
   "status": "PASS",
+  "workflow_status": "COMPLETED",
+  "test_outcome": "PASS",
+  "probe_outcome": "NOT_RUN",
+  "gate_status": "ALLOWED",
+  "health_status": "NOT_EVALUATED",
   "commands": [],
   "evidence": [],
   "contract_hash": "...",
@@ -416,6 +473,18 @@ Truth rules:
 - PASS evidence must map to the current case command and contract hash.
 - Wiki must not claim READY when latest run, state audit, or listed cases disagree.
 - Active Redmine/Gitea issues without runnable cases must be blockers, not hidden warnings.
+- `workflow_status`, `test_outcome`, `gate_status`, and `health_status` answer
+  different questions. A passing command assertion does not imply the workflow,
+  remote-write gate, or release is ready.
+- `close-loop` does not invent health from a test result: until `doctor` or a
+  dedicated component check supplies health evidence, `health_status` remains
+  `NOT_EVALUATED`.
+- Partial-probe observations live in `probe_outcome`. When all selected results
+  are partial probes, official `test_outcome` is `HOLD`, never a manufactured
+  PASS.
+- Full white-box/black-box, mutation, fuzz, security, UI, and load/soak
+  generation remain Planned; operation labels and generated counts are not a
+  substitute for a risk-based coverage review.
 
 ## Wiki Status
 
@@ -440,7 +509,10 @@ Wiki page structure:
 ## 六色帽回顧
 ```
 
-`publish wiki apply` is Wiki-only. It never creates issue comments, new issues, or PRs.
+`policy.auto_publish_wiki: true` refreshes local Wiki plan/status artifacts after
+relevant events; it does not silently perform a remote update. `publish wiki
+apply` is the explicit gated remote flow, is Wiki-only, and never creates issue
+comments, new issues, or PRs.
 
 AI Quality Pilot does not write Gitea through its own token. `publish wiki apply` returns a gated MCP request; Hermes uses its configured Gitea MCP server to update the exact Wiki page, writes the MCP result JSON path requested by AI Quality Pilot, then reports the result. There is no public second completion command.
 
@@ -558,13 +630,28 @@ Because generation has different modes. Use `--init` for first-time repo SWQA ma
 
 `--growing` is not a help-command generator. It expands repo/issues/PR/commit/run signals through SWQA operations such as invalid-option rejection, boundary invalid-value checks, sibling sweeps, repeatability, concurrency, timeout baselines, and bounded monkey sweeps. Duplicate existing commands are treated as already-covered signals and do not consume the requested new-case budget.
 
+Negative and boundary wrappers require both a bounded rejection exit and
+rejection-specific diagnostic text. Panic/traceback, permission,
+missing-dependency, command-not-found, and timeout diagnostics fail the oracle;
+they cannot manufacture a rejection marker. External candidates are normalized,
+and realized coverage claims must reference runner-effective semantic assertion
+IDs before YAML is written.
+
 ### What is the heartbeat command?
 
-Use `/quality-pilot close-loop heartbeat`. It runs one sensor-driven tick, defaults to 12-hour scheduling metadata, grows up to 20 new cases, and relies on Hermes or an external scheduler to call it again.
+Use `/quality-pilot close-loop heartbeat`. It runs one sensor-driven tick,
+defaults to 12-hour scheduling metadata, grows up to 20 new cases, and exits. It
+does not install a timer. Hermes or an external scheduler must call it again;
+see [Heartbeat and external scheduling](docs/HEARTBEAT_CRON.md).
 
 ### Do I need to review every generated testcase?
 
-No. `--init` and `--growing` should generate executable product-runtime command contracts after runtime is inferred or confirmed. Hermes should only ask category-level blocking questions when AI Quality Pilot returns `hermes_needs_input`.
+Not necessarily one-by-one, but generated does not mean deeply verified. `--init`
+and `--growing` can create executable product-runtime contracts after runtime is
+inferred or confirmed. Review is required when the assertion, fixture,
+side-effect boundary, `oracle_strength`, or `dimension_realization` is partial or
+unproven. Hermes should group safe category-level decisions and ask only the
+blocking external facts returned in `hermes_needs_input`.
 
 ### Why did it ask for runtime or environment details?
 

@@ -265,7 +265,7 @@ Hermes agent 收到 `/quality-pilot ...` 時必須：
 4. 把 `payload.next_actions` 呈現成繁中選單。
 5. 若 `payload.hermes_needs_input.status == "required"`，呼叫 `clarify`，只問大分類阻擋問題，不逐一審每個 testcase。
 6. 使用者明確輸入 `/quality-pilot ...` 後，可自動讀 MCP、寫本地 overlay state、執行已驗證 side-effect-safe 的 case；遠端寫入、Wiki apply、push branch、建立 PR、或可能碰觸外部資源的測試仍必須經 AI Quality Pilot gate 與必要確認。
-7. 長文字候選稿可透過 `/quality-pilot subagent status` 所設定的 subagent 產生；預設 Open WebUI endpoint 是 `https://172.17.20.220/`，使用者只需提供 model，例如 `https://172.17.20.220/?model=qwen3.6-chat-direct` 或分開填 `model`。API key 僅能以 `api_key_env` 指向環境變數。Subagent 只能回 candidate text/JSON，不可直接寫檔、建立 issue、更新 Wiki 或開 PR。
+7. 長文字候選稿可透過 `/quality-pilot subagent status` 所設定的 subagent 產生；Open WebUI endpoint 與 model 都由 deployment owner 提供，core 不預設 private network 位址。API key 僅能以 `api_key_env` 指向環境變數。Subagent 只能回 candidate text/JSON，不可直接寫檔、建立 issue、更新 Wiki 或開 PR。
 
 Dispatcher command shape:
 

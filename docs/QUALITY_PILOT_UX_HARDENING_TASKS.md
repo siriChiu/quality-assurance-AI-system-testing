@@ -4,7 +4,7 @@ status: needs_hardening_after_field_audit
 implementation_status: tool_checkout_hardening_complete
 field_overlay_status: blocked_until_product_overlay_is_regenerated_or_repaired
 created: 2026-06-24
-updated: 2026-06-26
+updated: 2026-07-13
 source: `/root/SPEC_ID quality-pilot-ux-hardening-.txt`
 field_audit_source: `/root/repo/test/irctool/.quality-pilot-project`
 scope: UX recovery, ID mapping, handoff consistency, readiness clarity, MCP transparency, repo-agnostic runtime onboarding, Redmine case safety, evidence truthfulness, and operational SWQA hardening
@@ -173,7 +173,7 @@ Goal: MCP readiness and subagent usage must be visible, auditable, and not impli
 
 ### P8 Implementation Notes
 
-- Default Open WebUI endpoint `https://172.17.20.220/` is only a default profile, not proof that a model has been selected.
+- Open WebUI endpoint and model are deployment-owned fields; a provider profile is not proof that either has been configured.
 - Missing MCP status should block remote writes, but it should not hide local semantic audit findings.
 
 ## Phase P9: Active Issue Coverage
@@ -241,7 +241,7 @@ Goal: Align generated cases, run evidence, issue reports, and Wiki readiness wit
 |---|---|---|---|---|
 | P15-01 | Persist bug pattern cards | Codex | Proposed | Each confirmed Redmine/Gitea bug can emit a structured card with trigger class, exact repro, shared surfaces, equivalence classes, boundary values, regression evidence, and residual risks |
 | P15-02 | Add sibling-surface and boundary matrix generation | Codex | Proposed | Case generation proposes sibling commands/features and positive/negative/boundary/invalid variants from repo and issue signals before writing YAML |
-| P15-03 | Add PASS/HOLD gate to reports | Codex | Proposed | A bug-linked issue cannot be reported as PASS unless exact repro, deterministic regression, user-facing smoke, sibling surfaces, boundary/invalid checks, and evidence paths are recorded; otherwise status is HOLD or BLOCK |
+| P15-03 | Add PASS/HOLD gate to reports | Codex | Partially implemented: truth/oracle first slice | Run truth now separates workflow/test/probe/gate/health; zero-case, dry-run, and partial-only runs cannot become official PASS. Complete bug-linked exact-repro/sibling/boundary/residual-risk enforcement remains pending |
 | P15-04 | Classify untested risk explicitly | Codex | Proposed | Reports and Wiki include what was intentionally not tested and why the remaining risk is acceptable, instead of silently omitting lab-only or side-effectful coverage |
 | P15-05 | Add CLI parser matrix support | Codex | Proposed | CLI bug patterns can generate/order-check cases for global flags, command-local flags, same-name flags, positional/inline/short/double-dash variants, and value-shape boundaries |
 | P15-06 | Prevent subagents from approving PASS | Codex | Proposed | Subagents may draft pattern cards or wording, but deterministic gates decide PASS/HOLD/FAIL from evidence and case metadata |

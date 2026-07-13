@@ -35,7 +35,7 @@ subagents:
   profiles:
     open-webui:
       provider: open_webui
-      endpoint: "https://172.17.20.220/"
+      endpoint: ""
       model: ""
       api_base: ""
       api_key_env: ""

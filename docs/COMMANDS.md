@@ -4,6 +4,10 @@ AI Quality Pilot 的公開入口是 Hermes 聊天室中的 `/quality-pilot ...`�
 
 `/quality-pilot help` 是唯一 help 指令。不再支援子分類 help。
 
+命令是否出現在 help，不代表對應的完整 autonomous agent module 已完成。
+使用前先看 [Capability Matrix](CAPABILITY_MATRIX.md)：目前可獨立呼叫多個
+workflow entry points，但 resumable A0-A8 module session 仍是 Partial。
+
 ## Public Commands
 
 ```text
@@ -49,35 +53,70 @@ AI Quality Pilot 的公開入口是 Hermes 聊天室中的 `/quality-pilot ...`�
 /quality-pilot subagent configure
 ```
 
-## Recommended Flow
+## Intent-based happy paths
+
+不要把所有公開命令當成一條必跑 checklist。先選使用目的，執行最短路徑，
+再依 dispatcher 的 `next_actions` 繼續。`doctor --fix` 只在 setup 尚未完成或
+`doctor` 建議修復 safe skeleton 時使用；不需要每次同時執行 `doctor` 和
+`doctor --fix`。
+
+### Local repo QA
+
+不需要 Redmine/Gitea 的第一次產品掃描：
 
 ```text
 /quality-pilot setup
 /quality-pilot doctor
-/quality-pilot doctor --fix
-/quality-pilot audit state
-/quality-pilot issues sync
 /quality-pilot cases generate --init
-/quality-pilot cases validate
-/quality-pilot cases list
-/quality-pilot cases run <case_id>
-/quality-pilot cases run
-/quality-pilot publish wiki status
-/quality-pilot publish wiki apply
 ```
 
-後續有新 issues、PR、git commits、code changes、latest run 或 reports 時，用：
+若 `doctor` 回報可安全修復的 config/overlay 缺口，才執行
+`/quality-pilot doctor --fix`。Generation 完成後，先看 `next_actions`；通常是
+`cases review`、`cases validate` 或執行一個已確認 side-effect boundary 的
+case。不要在 fresh repo 中無條件緊接著執行 `--growing`。
 
-```text
-/quality-pilot cases generate --growing
-```
+### Issue-driven QA
 
-Redmine issues 由 Hermes Redmine MCP 讀取 snapshot，再交給 AI Quality Pilot。`144780 144693` 只是 Redmine issue ID 範例；實際使用時可放任意多個 Redmine issue ID。
+使用者只需提供 Redmine ID 或目前 Gitea repo context，不需要自行換算
+Redmine/Gitea/case IDs：
 
 ```text
 /quality-pilot issues sync --redmine-issues 144780 144693
-/quality-pilot cases generate --redmine-issues 144780 144693
 ```
+
+Hermes 應先透過 Redmine MCP live-read 並完成 snapshot handoff，再由同一個
+使用者流程執行 sync。接著依 `next_actions` 選擇產生 linked cases 或直接進入
+feature/fix handoff：
+
+```text
+/quality-pilot cases generate --redmine-issues 144780 144693
+/quality-pilot issues fix --issue <id>
+```
+
+`144780 144693` 只是範例，可替換成任意多個 Redmine issue ID。
+
+### Developer fix and retest
+
+```text
+/quality-pilot issues fix --issue <id>
+/quality-pilot cases run <linked_case_id>
+/quality-pilot issues report
+```
+
+`--push-pr` 必須等 acceptance coverage/evidence 與 write gate 通過。不要因為
+單一 command `test_outcome: PASS` 就跳過 linked/sibling/boundary retest。
+
+### Scheduled growth
+
+先手動驗證單一 tick：
+
+```text
+/quality-pilot close-loop heartbeat
+```
+
+Heartbeat 只執行一次，不會安裝 12 小時計時器。Hermes 或外部 scheduler
+必須觸發下一次；cron、lock、cwd、log 與 recovery 範例見
+[Heartbeat and external scheduling](HEARTBEAT_CRON.md)。
 
 ## Command Groups
 
@@ -113,7 +152,12 @@ Redmine issues 由 Hermes Redmine MCP 讀取 snapshot，再交給 AI Quality Pil
 /quality-pilot cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]
 ```
 
-`--init` 是第一次導入產品時的全 repo SWQA 建案。它會掃 README、程式碼、package metadata、既有 cases/runners/rules，產生可執行的 product-runtime command contracts，覆蓋功能、正向、反向、邊界、invalid input、side-effect-safe、stress/timeout-risk。`--init` 預設就是快速且嚴謹的自主模式，不需要另外加 fast 參數。
+`--init` 是第一次導入產品時的 repo SWQA 建案。它會掃 README、程式碼、
+package metadata、既有 cases/runners/rules，並用第一版 stratified selector
+將 case budget 分散到可用的 operation/dimension strata，避免被單一 surface 填滿。
+它產生的是目前可證明安全且可執行的 product-runtime contracts，不代表已完成
+全部白箱、黑箱、mutation、security、UI 或 load/soak 測試。沒有 public
+`--fast` 參數。
 
 `--count <n>` 是唯一正式的數量限制：
 
@@ -121,13 +165,23 @@ Redmine issues 由 Hermes Redmine MCP 讀取 snapshot，再交給 AI Quality Pil
 /quality-pilot cases generate --init --count 5
 ```
 
-`--growing` 是後續積極擴散。它會讀 repo signals、code inventory、Gitea/local issues、Redmine imports、PR refs、recent git commits、latest run、reports、existing cases/runners/rules，產生新的 product-runtime command contracts。預設會嘗試寫出 20 個 growth cases；內部 candidate pool 更大，讓 dedupe/review 有足夠材料可選。已存在的 duplicate case/command 只算既有覆蓋，不會消耗新增 case budget；generator 會繼續往後找更深的候選。若只想小批量，使用 `--count <n>`。
+`--growing` 是後續擴散。它會讀 repo signals、code inventory、Gitea/local
+issues、Redmine imports、PR refs、recent git commits、latest run、reports、
+existing cases/runners/rules，產生新的 product-runtime command contracts。
+預設上限目標是 20 個 growth cases；duplicate command 不消耗新增 budget。
+數量不是品質保證，generator 的 operation diversity 也不是完整 risk coverage。
+若只想小批量，使用 `--count <n>`。
 
 Growing 不是單純測 help 指令是否存在。候選會先被轉成 SWQA operation matrix，再寫成 product-runtime command，例如 invalid-option rejection、boundary invalid-value rejection、repeatability loop、concurrency probe、timeout baseline、sibling surface sweep、bounded monkey sweep。這些 operation 都必須經過 command policy，使用已設定/已推論的產品 binary/API/runner，且保持 side-effect-safe。
 
 Monkey test 第一版是 bounded `monkey_cli_help_sweep`：只會把 README/產品 runtime 已知的 help/version surfaces 組成 side-effect-safe sweep，或在安全 envelope 內做 repeatability/concurrency 變體；不會產生 destructive random command、repo-only probe 或未受控的 synthetic invalid command。
 
-`close-loop heartbeat` 會先跑 sensors，第一版 sensor 包含 `cases generate --growing`。若有新增 cases，heartbeat 只執行新增或指定 scope；若沒有新增工作，回報 `idle`，避免一直重跑舊 cases。若 sensor 沒有找到真實 issue/code/advisory input，即使 runtime 尚未確認也會先 idle，不會為空專案強迫使用者補 runner。預設是單次 heartbeat tick，節奏 metadata 為 12 小時一次，且每次最多長出 20 個 cases；不再使用 `--iterations`。需要調整排程 metadata 時可用 `--every 6h` 或 `--every 24h`，實際週期由外部 scheduler/Hermes 觸發下一次 heartbeat。
+`close-loop heartbeat` 會先跑 sensors，第一版 sensor 包含
+`cases generate --growing`。若有新增 cases，heartbeat 只執行新增或指定 scope；
+若沒有新增工作，回報 `idle`。預設是單次 tick，12 小時只是 scheduling
+metadata，每次最多長出 20 個 cases；不再使用 `--iterations`。`--every 6h`
+或 `--every 24h` 只調整 metadata，不會安裝 timer。實際週期由外部
+scheduler/Hermes 觸發，詳見 [Heartbeat runbook](HEARTBEAT_CRON.md)。
 
 所有 generated `commands[].run` 都必須使用已設定/已推論的產品 binary/API/runner，或使用者確認的 runner。Repo-only checks、`python3 -c`、`compileall`、synthetic invalid command、`go test`、`go run` 不能偽裝成 testcase command，除非使用者明確把它們設定為產品 runner。
 
@@ -185,11 +239,9 @@ AI Quality Pilot 不保存 Gitea token，也不直接用 HTTP 寫 Wiki。`publis
 
 長文字候選稿可透過 subagent 產生，但 subagent 只產 candidate，不負責寫檔、建立 issue、更新 Wiki 或開 PR。
 
-預設 provider 是 Open WebUI：
-
-```text
-https://172.17.20.220/
-```
+預設 provider 類型可使用 Open WebUI，但沒有任何 private endpoint 是通用產品
+預設。每個 deployment 必須提供自己的 endpoint/model；不需要 subagent 的
+local workflow 可以保持未設定或停用。
 
 查看設定：
 
@@ -203,7 +255,9 @@ https://172.17.20.220/
 /quality-pilot subagent configure
 ```
 
-`setup`、`doctor --fix` 與 `configure` 只會寫 endpoint、provider、任務 routing；使用者只需要補 Open WebUI model，可直接貼 `https://172.17.20.220/?model=qwen3.6-chat-direct`，或分開填 `model`。API key 只允許用 `api_key_env` 指向環境變數；各任務 `task_prompts` 是 optional override。
+`setup`、`doctor --fix` 與 `configure` 只應建立安全 routing skeleton；使用者
+需要提供 deployment-owned Open WebUI endpoint/model。API key 只允許用
+`api_key_env` 指向環境變數；各任務 `task_prompts` 是 optional override。
 
 ## Removed Commands
 
@@ -231,7 +285,7 @@ Removed case-generation options:
 | Removed | Replacement |
 |---|---|
 | `--generated_count` | `--count` |
-| `--fast` | no longer needed; `--init` is autonomous high-standard mode |
+| `--fast` | no longer supported; use `--init` and optionally `--count <n>`; this does not imply complete deep coverage |
 | `--from-issues` | `--growing` |
 | `--candidate-json` | not public; external sessions may analyze, but AI Quality Pilot owns case writing |
 

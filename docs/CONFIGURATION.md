@@ -2,9 +2,16 @@
 
 The host project owns `.quality-pilot.yaml` and `.quality-pilot-project/`.
 
-AI Quality Pilot V1 is Hermes MCP-first. The config does **not** store Gitea base URLs, repo names, tracker token env names, or HTTP credentials. Hermes owns the Gitea/Redmine MCP connections; AI Quality Pilot owns validation, local snapshots, evidence, reports, and gated Wiki handoff payloads.
+AI Quality Pilot V1 is Hermes MCP-first for tracker integration. Local repo
+analysis, case generation, validation, execution, evidence, audit, and local
+reports can still be used when Gitea or Redmine is unavailable; only the
+corresponding integration is not ready. The config does **not** store Gitea base
+URLs, repo names, tracker token env names, or HTTP credentials. Hermes owns the
+Gitea/Redmine MCP connections; AI Quality Pilot owns validation, local
+snapshots, evidence, reports, and gated handoff payloads.
 
-Minimal config shape:
+Generated config skeleton (most users should run `setup` instead of writing it
+by hand):
 
 ```yaml
 project:
@@ -48,7 +55,7 @@ subagents:
   profiles:
     open-webui:
       provider: open_webui
-      endpoint: "https://172.17.20.220/"
+      endpoint: ""
       model: ""
       api_base: ""
       api_key_env: ""
@@ -70,11 +77,16 @@ policy:
   auto_publish_wiki: true
   prohibit_closed_issue_comments: true
   prohibit_raw_secrets_in_repo: true
-  require_swqa_pattern_expansion: true
-  require_sibling_surface_scan: true
-  require_boundary_invalid_tests: true
-  require_side_effect_safe_repro: true
+  require_swqa_pattern_expansion: true  # target policy; enforcement is partial
+  require_sibling_surface_scan: true    # target policy; enforcement is partial
+  require_boundary_invalid_tests: true  # target policy; enforcement is partial
+  require_side_effect_safe_repro: true  # target policy; enforcement is partial
 ```
+
+`required_servers` declares the integrations needed for the full tracker loop;
+it does not turn a local-only QA workflow into a failure. Interpret readiness by
+capability: local work may be ready while Redmine, Gitea, Wiki, or subagent
+health is unavailable. See [`CAPABILITY_MATRIX.md`](CAPABILITY_MATRIX.md).
 
 ## Runtime Profile
 
@@ -152,7 +164,10 @@ It must not contain raw secrets and must not be treated as verified test coverag
 
 `/quality-pilot setup` creates `.quality-pilot-project/rules/wiki-categories.yaml` and defaults `tracker.wiki_page` to `Quality Pilot Test Status`.
 
-Wiki auto-sync is enabled by default through `policy.auto_publish_wiki: true`. It runs after case generation, test execution, close-loop execution, and successful gated write summaries.
+Wiki auto-sync is enabled by default through `policy.auto_publish_wiki: true`.
+Here, **auto-sync means refreshing local Wiki plan/status artifacts** after case
+generation, test execution, close-loop execution, and successful gated write
+summaries. It does not grant a remote write and does not silently update Gitea.
 
 `/quality-pilot publish wiki apply` never uses an internal token. When the Wiki gate passes and Hermes Gitea MCP is available, AI Quality Pilot writes:
 
@@ -160,7 +175,9 @@ Wiki auto-sync is enabled by default through `policy.auto_publish_wiki: true`. I
 - `.quality-pilot-project/state/gitea-mcp/wiki-write-request.json`
 - `.quality-pilot-project/reports/wiki-status.md`
 
-Hermes then uses Gitea MCP to update only the requested Wiki page and writes the result JSON to:
+Only an explicit `/quality-pilot publish wiki apply` flow may cross the remote
+write gate. Hermes then uses Gitea MCP to update only the requested Wiki page
+and writes the result JSON to:
 
 ```text
 .quality-pilot-project/state/gitea-mcp/wiki-write-result.json
@@ -170,23 +187,19 @@ AI Quality Pilot must not use Wiki apply to create issue comments, create issues
 
 ## Subagent Text Generation
 
-`subagents` configures candidate-only text generation. The default profile is Open WebUI:
-
-```text
-https://172.17.20.220/
-```
-
-AI Quality Pilot writes the endpoint and routing defaults. The only required user-owned model setting is either:
+`subagents` configures candidate-only text generation. Open WebUI is a supported
+provider profile, but no private network address is a universal product default.
+The deployment owns the endpoint and model. For example:
 
 ```yaml
-endpoint: "https://172.17.20.220/?model=qwen3.6-chat-direct"
+endpoint: "https://open-webui.example.invalid/?model=<model-name>"
 ```
 
 or:
 
 ```yaml
-endpoint: "https://172.17.20.220/"
-model: "qwen3.6-chat-direct"
+endpoint: "https://open-webui.example.invalid/"
+model: "<model-name>"
 api_key_env: "OPEN_WEBUI_API_KEY"
 ```
 
@@ -200,11 +213,26 @@ Use:
 /quality-pilot doctor --fix
 ```
 
-`doctor --fix` and `subagent configure` can create the Open WebUI routing skeleton, but model/API settings remain user-owned. Configured subagents may draft candidate text for Gitea issue bodies, PR bodies, Wiki summaries, Redmine summaries, case candidate analysis, and reviewer notes. They must not write files, create issues, edit Wiki pages, open PRs, close issues, or bypass AI Quality Pilot validation/write gates.
+`doctor --fix` and `subagent configure` can create the Open WebUI routing
+skeleton, but endpoint/model/API settings remain user-owned. If the deployment
+has no subagent, leave it unconfigured or disable it; deterministic local
+features remain usable. Configured subagents may draft candidate text for Gitea
+issue bodies, PR bodies, Wiki summaries, Redmine summaries, case candidate
+analysis, and reviewer notes. They must not write files, create issues, edit
+Wiki pages, open PRs, close issues, or bypass AI Quality Pilot validation/write
+gates.
 
 ## Policy Fields
 
-The SWQA policy fields require every confirmed bug to be expanded into sibling-surface, boundary, invalid-value, and side-effect-safe regression coverage before it can be called PASS.
+The SWQA policy fields express the intended issue-level quality policy. The
+current checkout supports structured command assertions, four-axis truth, and a
+first stratified generation slice. Complete enforcement that every confirmed
+bug has deep sibling-surface, boundary, invalid-value, residual-risk, and
+white-box/black-box evidence is still Partial. A command-level
+`test_outcome: PASS` must not be presented as complete issue or release
+readiness. Exit-only/partial probes are summarized through `probe_outcome`; a
+partial-only run has official `test_outcome: HOLD`. See
+[`SWQA_TEST_DESIGN.md`](SWQA_TEST_DESIGN.md).
 
 `paths.issues` is optional for older configs. If it is missing, AI Quality Pilot uses `<workspace>/issues`.
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,7 @@ from .config import ProjectConfig, QAConfigError, load_yaml
 
 DEFAULT_SUBAGENT_PROFILE = "open-webui"
 DEFAULT_SUBAGENT_PROVIDER = "open_webui"
-DEFAULT_OPEN_WEBUI_ENDPOINT = "https://172.17.20.220/"
+DEFAULT_OPEN_WEBUI_ENDPOINT = ""
 DEFAULT_OPEN_WEBUI_API_KEY_ENV = "OPEN_WEBUI_API_KEY"
 SUBAGENT_TASKS = [
     "gitea_issue_body",
@@ -20,7 +21,7 @@ SUBAGENT_TASKS = [
     "redmine_issue_summary",
     "reviewer_notes",
 ]
-USER_OWNED_PROFILE_FIELDS = ["model"]
+USER_OWNED_PROFILE_FIELDS = ["endpoint", "model"]
 OPTIONAL_PROFILE_FIELDS = ["api_key_env", "api_base"]
 
 
@@ -67,7 +68,11 @@ def subagent_status(config: ProjectConfig) -> dict[str, Any]:
     endpoint = str(profile.get("endpoint") or "")
     provider = str(profile.get("provider") or "")
     resolved_model, model_source = _resolved_model(profile)
-    missing_user_fields = [] if resolved_model else ["model"]
+    missing_user_fields: list[str] = []
+    if not endpoint:
+        missing_user_fields.append("endpoint")
+    if not resolved_model:
+        missing_user_fields.append("model")
     task_prompts = settings.get("text_generation", {}).get("task_prompts") if isinstance(settings.get("text_generation"), dict) else {}
     configured_task_prompts = sorted(task for task in SUBAGENT_TASKS if str((task_prompts or {}).get(task) or "").strip())
     api_key_env = str(profile.get("api_key_env") or "")
@@ -93,7 +98,7 @@ def subagent_status(config: ProjectConfig) -> dict[str, Any]:
             "name": "subagent.user_content",
             "status": "WARN" if missing_user_fields else "PASS",
             "message": (
-                "Open WebUI model is missing. Paste an endpoint with ?model=<name> or set subagents.profiles.open-webui.model."
+                "Open WebUI endpoint/model is incomplete. Provide a deployment endpoint and either ?model=<name> or subagents.profiles.open-webui.model."
                 if missing_user_fields
                 else "Open WebUI endpoint/model are configured; task prompts are optional overrides."
             ),
@@ -157,6 +162,8 @@ def configure_subagent(
     if model is not None:
         configured_model = model
     if api_key_env is not None:
+        if api_key_env and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", api_key_env):
+            raise SubagentConfigError("api_key_env must be an environment variable name, not a credential value")
         configured_api_key_env = api_key_env
     if api_base is not None:
         configured_api_base = api_base
@@ -181,7 +188,7 @@ def configure_subagent(
         "path": _relative_or_str(path, config.root),
         "changed": before != data.get("subagents"),
         "subagents": subagent_status(updated_config),
-        "message": "Subagent profile configured; provide either endpoint ?model=<name> or the separate model field when ready.",
+        "message": "Subagent profile configured; provide a deployment endpoint and either endpoint ?model=<name> or the separate model field when ready.",
     }
 
 
@@ -207,7 +214,11 @@ def text_generation_handoff(config: ProjectConfig, task: str) -> dict[str, Any]:
         "api_key_env": str(profile.get("api_key_env") or ""),
         "candidate_only": True,
         "review_required": bool(text_generation.get("review_required", True)),
-        "user_content_required": [] if resolved_model else ["model"],
+        "user_content_required": [
+            field
+            for field, missing in (("endpoint", not endpoint), ("model", not resolved_model))
+            if missing
+        ],
         "task_prompt_required": False,
         "task_prompt_configured": bool(str(task_prompts.get(task) or "").strip()),
         "write_policy": "Subagent may draft candidate text only; AI Quality Pilot validates and performs any gated write.",

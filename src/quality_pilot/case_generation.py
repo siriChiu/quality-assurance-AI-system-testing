@@ -250,7 +250,7 @@ def generate_cases_init(
     existing_coverage_count = 0
 
     for index, candidate in enumerate(candidates, start=1):
-        if count is not None and len(generated) + existing_coverage_count >= count:
+        if count is not None and len(generated) >= count:
             break
         fingerprint = candidate_fingerprint(candidate)
         if fingerprint in seen or fingerprint in in_batch:
@@ -870,20 +870,36 @@ def build_init_candidates(context: dict[str, Any], *, count: int | None = None) 
     candidates: list[dict[str, Any]] = []
     seeds = context.get("init_seeds", [])
     specs = init_dimension_specs()
-    for spec in specs:
-        for seed in seeds:
+    if not seeds:
+        return candidates
+
+    # Put one candidate from every SWQA dimension at the front of the pool.
+    # This makes a small `--count` batch stratified instead of filling it with
+    # the first (usually functional/positive) dimension only. The remainder of
+    # the pool still contains the complete seed x dimension matrix.
+    leading_pairs: set[tuple[int, int]] = set()
+    for spec_index, spec in enumerate(specs):
+        seed_index = spec_index % len(seeds)
+        leading_pairs.add((spec_index, seed_index))
+        candidates.append(candidate_from_init_seed(context, seeds[seed_index], spec))
+    for spec_index, spec in enumerate(specs):
+        for seed_index, seed in enumerate(seeds):
+            if (spec_index, seed_index) in leading_pairs:
+                continue
             candidates.append(candidate_from_init_seed(context, seed, spec))
     return candidates
 
 
 def candidate_from_init_seed(context: dict[str, Any], seed: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
     feature = str(seed.get("title") or context["feature"])
+    operation = _init_operation_for_spec(spec)
     return {
         "title": f"{feature}: {spec['title']}",
         "feature": feature,
         "profile": context["resolved_profile"],
         "expected": spec["expected"],
         "swqa_dimensions": spec["dimensions"],
+        "swqa_operation": operation,
         "init_seed": seed,
         "analysis_reason": f"Initial full-repo SWQA map expands {seed.get('type')} through {spec['key']} coverage.",
         "questions": [],
@@ -897,6 +913,19 @@ def candidate_from_init_seed(context: dict[str, Any], seed: dict[str, Any], spec
     }
 
 
+def _init_operation_for_spec(spec: dict[str, Any]) -> dict[str, Any]:
+    key = str(spec.get("key") or "")
+    if key == "negative-invalid-input":
+        return _swqa_operation("invalid_option_rejection", "Invalid option rejection", ["negative", "invalid_input", "side_effect_safe"])
+    if key == "boundary-min-empty-large":
+        return _swqa_operation("boundary_invalid_value", "Boundary invalid value rejection", ["boundary", "invalid_input", "side_effect_safe"])
+    if key == "stress-timeout-baseline":
+        return _swqa_operation("timeout_baseline", "Bounded timeout baseline", ["stress_timeout_risk", "boundary", "side_effect_safe"])
+    if key == "sibling-surface-consistency":
+        return _swqa_operation("sibling_help_sweep", "Sibling surface sweep", ["sibling_surface", "side_effect_safe"])
+    return _swqa_operation("surface_probe", "Read-only surface probe", ["functional", "positive", "side_effect_safe"])
+
+
 def draft_contract_from_init(
     config: ProjectConfig,
     *,
@@ -907,6 +936,9 @@ def draft_contract_from_init(
     fingerprint = candidate_fingerprint(candidate)
     case_id = f"INIT-{_slug(str(candidate.get('feature') or context['feature']))}-{fingerprint[:8].upper()}"
     commands = safe_commands_for_generated_case(config, case_id=case_id, candidate=candidate, context=context)
+    coverage_claims = _coverage_claims(candidate, commands)
+    oracle_strength = _generated_oracle_strength(candidate, commands)
+    dimension_realization = _dimension_realization(candidate, commands, coverage_claims=coverage_claims)
     seed = candidate["init_seed"]
     executable_scope = (
         "prepared_environment_readonly_product_command"
@@ -927,7 +959,7 @@ def draft_contract_from_init(
         "profile": candidate.get("profile") or context["resolved_profile"],
         "feature": candidate.get("feature") or context["feature"],
         "priority": _priority_for_spec(str(candidate.get("swqa_dimensions", [""])[0])),
-        "contract_version": 1,
+        "contract_version": 2,
         "init_seed": candidate["init_seed"],
         "analysis_reason": candidate["analysis_reason"],
         "quality_pilot": {
@@ -939,6 +971,10 @@ def draft_contract_from_init(
             "safe_command_source": seed.get("command_source") or "",
             "requires_prepared_environment": bool(seed.get("requires_prepared_environment")),
             "environment_requirements": environment_requirements,
+            "swqa_operation": candidate.get("swqa_operation", {}),
+            "oracle_strength": oracle_strength,
+            "partial_probe": not any(claim["status"] == "realized" for claim in coverage_claims),
+            "dimension_realization": dimension_realization,
             "interaction_scope": context.get("interaction_scope", "category"),
             "fast_mode": bool(context.get("fast")),
             "fast_mode_assumptions": context.get("fast_mode_assumptions", []),
@@ -950,6 +986,7 @@ def draft_contract_from_init(
         },
         "swqa_dimensions": candidate["swqa_dimensions"],
         "commands": commands,
+        "coverage_claims": coverage_claims,
         "expected": str(candidate.get("expected") or "Expected behavior must be confirmed during cases review."),
         "risk_controls": candidate.get("risk_controls", []),
     }
@@ -1274,6 +1311,9 @@ def draft_contract_from_growth(
         candidate=candidate,
         context=context,
     )
+    coverage_claims = _coverage_claims(candidate, commands)
+    oracle_strength = _generated_oracle_strength(candidate, commands)
+    dimension_realization = _dimension_realization(candidate, commands, coverage_claims=coverage_claims)
     seed = candidate["growth_seed"]
     executable_scope = (
         "prepared_environment_readonly_product_command"
@@ -1294,7 +1334,7 @@ def draft_contract_from_growth(
         "profile": candidate.get("profile") or context["resolved_profile"],
         "feature": candidate.get("feature") or context["feature"],
         "priority": candidate.get("priority") or "P2",
-        "contract_version": 1,
+        "contract_version": 2,
         "growth_seed": candidate["growth_seed"],
         "six_hats": candidate["six_hats"],
         "growth_reason": candidate["growth_reason"],
@@ -1308,6 +1348,9 @@ def draft_contract_from_growth(
             "requires_prepared_environment": bool(seed.get("requires_prepared_environment")),
             "environment_requirements": environment_requirements,
             "swqa_operation": candidate.get("swqa_operation", {}),
+            "oracle_strength": oracle_strength,
+            "partial_probe": not any(claim["status"] == "realized" for claim in coverage_claims),
+            "dimension_realization": dimension_realization,
             "interaction_scope": context.get("interaction_scope", "category"),
             "fast_mode": bool(context.get("fast")),
             "fast_mode_assumptions": context.get("fast_mode_assumptions", []),
@@ -1319,6 +1362,7 @@ def draft_contract_from_growth(
         },
         "swqa_dimensions": candidate["swqa_dimensions"],
         "commands": commands,
+        "coverage_claims": coverage_claims,
         "expected": str(candidate.get("expected") or "Expected behavior must be confirmed during cases review."),
         "risk_controls": candidate.get("risk_controls", []),
     }
@@ -2607,7 +2651,7 @@ def load_candidate_json(path: str | Path) -> list[dict[str, Any]]:
 def normalize_external_candidates(candidates: list[dict[str, Any]], context: dict[str, Any]) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     for index, candidate in enumerate(candidates):
-        validate_candidate(candidate, index=index)
+        commands = validate_candidate(candidate, index=index)
         seed = candidate.get("growth_seed") if isinstance(candidate.get("growth_seed"), dict) else {
             "id": f"external-{index + 1}",
             "type": "external_candidate",
@@ -2624,18 +2668,21 @@ def normalize_external_candidates(candidates: list[dict[str, Any]], context: dic
                 "profile": str(candidate.get("profile") or context["resolved_profile"]),
                 "expected": str(candidate.get("expected") or "Expected behavior must be confirmed during cases review."),
                 "swqa_dimensions": [str(item) for item in dimensions],
+                "swqa_operation": candidate.get("swqa_operation") if isinstance(candidate.get("swqa_operation"), dict) else {},
                 "growth_seed": seed,
                 "growth_reason": str(candidate.get("growth_reason") or "Imported from Hermes growth session."),
                 "six_hats": candidate.get("six_hats") if isinstance(candidate.get("six_hats"), dict) else six_hats_for(seed, {"key": "external", "title": title}),
                 "questions": candidate.get("questions") if isinstance(candidate.get("questions"), list) else common_questions(feature=title, profile=context["resolved_profile"], has_confirmed_command=False),
                 "risk_controls": candidate.get("risk_controls") if isinstance(candidate.get("risk_controls"), list) else ["review_required_before_run", "side_effect_boundary_must_be_confirmed"],
-                "commands": candidate.get("commands"),
+                "commands": commands,
+                "coverage_claims": candidate.get("coverage_claims"),
+                "_external_candidate": True,
             }
         )
     return normalized
 
 
-def validate_candidate(candidate: dict[str, Any], *, index: int) -> None:
+def validate_candidate(candidate: dict[str, Any], *, index: int) -> list[dict[str, Any]] | None:
     if not candidate.get("title"):
         raise CaseGenerationError(f"candidates[{index}].title is required")
     secret_paths = find_raw_secret_paths(candidate)
@@ -2651,19 +2698,150 @@ def validate_candidate(candidate: dict[str, Any], *, index: int) -> None:
             raise CaseGenerationError("candidate contains raw secret material")
     commands = candidate.get("commands")
     if commands is None:
-        return
+        return None
+    return _normalize_external_candidate_commands(commands, candidate_index=index)
+
+
+def _normalize_external_candidate_commands(commands: Any, *, candidate_index: int) -> list[dict[str, Any]]:
     if not isinstance(commands, list) or not commands:
-        raise CaseGenerationError(f"candidates[{index}].commands must be a non-empty list when provided")
+        raise CaseGenerationError(f"candidates[{candidate_index}].commands must be a non-empty list when provided")
+    normalized: list[dict[str, Any]] = []
+    command_ids: set[str] = set()
     for command_index, command in enumerate(commands):
+        location = f"candidates[{candidate_index}].commands[{command_index}]"
         if not isinstance(command, dict):
-            raise CaseGenerationError(f"candidates[{index}].commands[{command_index}] must be a mapping")
-        for key in ["id", "run", "expected_exit_code"]:
+            raise CaseGenerationError(f"{location} must be a mapping")
+        for key in ["id", "run"]:
             if key not in command or command[key] in ("", None):
-                raise CaseGenerationError(f"candidates[{index}].commands[{command_index}].{key} is required")
+                raise CaseGenerationError(f"{location}.{key} is required")
+        command_id = str(command["id"]).strip()
+        if command_id in command_ids:
+            raise CaseGenerationError(f"candidates[{candidate_index}] has duplicate command id: {command_id}")
+        command_ids.add(command_id)
+
+        assertions: list[dict[str, Any]] = []
+        assertion_ids: set[str] = set()
+        for field in ("assertions", "oracles"):
+            raw_assertions = command.get(field)
+            if raw_assertions is None:
+                continue
+            if not isinstance(raw_assertions, list):
+                raise CaseGenerationError(f"{location}.{field} must be a list")
+            for assertion_index, raw_assertion in enumerate(raw_assertions):
+                assertion_location = f"{location}.{field}[{assertion_index}]"
+                assertion = _normalize_external_assertion(
+                    raw_assertion,
+                    assertion_location=assertion_location,
+                    default_id=f"assertion-{len(assertions) + 1}",
+                )
+                assertion_id = str(assertion["id"])
+                if assertion_id in assertion_ids:
+                    raise CaseGenerationError(f"{location} has duplicate assertion id: {assertion_id}")
+                assertion_ids.add(assertion_id)
+                assertions.append(assertion)
+
+        exit_assertions = [
+            assertion
+            for assertion in assertions
+            if assertion["type"] == "exit_code" and assertion["operator"] == "equals"
+        ]
+        explicit_exit_code = command.get("expected_exit_code")
+        if explicit_exit_code not in (None, ""):
+            expected_exit_code = _external_int(
+                explicit_exit_code,
+                message=f"{location}.expected_exit_code must be an integer",
+            )
+        elif exit_assertions:
+            expected_exit_code = int(exit_assertions[0]["expected"])
+        else:
+            raise CaseGenerationError(f"{location}.expected_exit_code or an exit_code assertion is required")
+        if any(int(assertion["expected"]) != expected_exit_code for assertion in exit_assertions):
+            raise CaseGenerationError(f"{location} exit_code assertion conflicts with expected_exit_code")
+        if not exit_assertions:
+            implicit_id = "expected-exit-code"
+            if implicit_id in assertion_ids:
+                raise CaseGenerationError(
+                    f"{location} assertion id {implicit_id} conflicts with the effective exit assertion"
+                )
+            assertions.insert(
+                0,
+                {
+                    "id": implicit_id,
+                    "type": "exit_code",
+                    "operator": "equals",
+                    "expected": expected_exit_code,
+                },
+            )
+
+        normalized_command = dict(command)
+        normalized_command["id"] = command_id
+        normalized_command["run"] = str(command["run"])
+        normalized_command["expected_exit_code"] = expected_exit_code
+        normalized_command["assertions"] = assertions
+        normalized_command.pop("oracles", None)
+        normalized.append(normalized_command)
+    return normalized
+
+
+def _normalize_external_assertion(
+    value: Any,
+    *,
+    assertion_location: str,
+    default_id: str,
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise CaseGenerationError(f"{assertion_location} must be a mapping")
+    for key in ("type", "operator", "expected"):
+        if key not in value or value[key] is None:
+            raise CaseGenerationError(f"{assertion_location}.{key} is required")
+    assertion_id = str(value.get("id") or default_id).strip()
+    if "id" in value and not assertion_id:
+        raise CaseGenerationError(f"{assertion_location}.id must not be empty")
+    assertion_type = str(value["type"]).strip().lower()
+    operator = str(value["operator"]).strip().lower()
+    operators = {
+        "exit_code": {"equals"},
+        "stdout": {"contains", "regex", "equals"},
+        "stderr": {"contains", "regex", "equals"},
+        "duration_ms": {"less_than", "less_than_or_equal"},
+    }
+    if assertion_type not in operators:
+        raise CaseGenerationError(
+            f"{assertion_location}.type must be one of: {', '.join(sorted(operators))}"
+        )
+    if operator not in operators[assertion_type]:
+        raise CaseGenerationError(f"{assertion_location}.operator is not supported for {assertion_type}")
+    expected: str | int | float
+    if assertion_type == "exit_code":
+        expected = _external_int(value["expected"], message=f"{assertion_location}.expected must be an integer")
+    elif assertion_type == "duration_ms":
+        if isinstance(value["expected"], bool):
+            raise CaseGenerationError(f"{assertion_location}.expected must be a non-negative number")
         try:
-            int(command["expected_exit_code"])
+            expected = float(value["expected"])
         except (TypeError, ValueError) as exc:
-            raise CaseGenerationError(f"candidates[{index}].commands[{command_index}].expected_exit_code must be an integer") from exc
+            raise CaseGenerationError(f"{assertion_location}.expected must be a non-negative number") from exc
+        if expected < 0:
+            raise CaseGenerationError(f"{assertion_location}.expected must be a non-negative number")
+    else:
+        if not isinstance(value["expected"], str):
+            raise CaseGenerationError(f"{assertion_location}.expected must be a string")
+        expected = value["expected"]
+        if operator == "regex":
+            try:
+                re.compile(expected)
+            except re.error as exc:
+                raise CaseGenerationError(f"{assertion_location}.expected is not a valid regex: {exc}") from exc
+    return {"id": assertion_id, "type": assertion_type, "operator": operator, "expected": expected}
+
+
+def _external_int(value: Any, *, message: str) -> int:
+    if isinstance(value, bool):
+        raise CaseGenerationError(message)
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise CaseGenerationError(message) from exc
 
 
 def existing_case_summaries(config: ProjectConfig) -> list[dict[str, Any]]:
@@ -2896,8 +3074,240 @@ def safe_commands_for_generated_case(
             "id": "safe_probe",
             "run": _safe_probe_command(config, candidate=candidate, context=context),
             "expected_exit_code": 0,
+            "assertions": _generated_assertions(candidate),
         }
     ]
+
+
+def _generated_assertions(candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    assertions: list[dict[str, Any]] = [
+        {
+            "id": "expected_exit_code",
+            "type": "exit_code",
+            "operator": "equals",
+            "expected": 0,
+        }
+    ]
+    marker = _oracle_marker_for_operation(candidate)
+    if marker:
+        assertions.append(
+            {
+                "id": "operation_marker",
+                "type": "stdout",
+                "operator": "contains",
+                "expected": f"QUALITY_PILOT_ORACLE={marker}",
+            }
+        )
+    return assertions
+
+
+def _oracle_marker_for_operation(candidate: dict[str, Any]) -> str:
+    operation = candidate.get("swqa_operation") if isinstance(candidate.get("swqa_operation"), dict) else {}
+    key = str(operation.get("key") or "")
+    return {
+        "invalid_option_rejection": "invalid_option_rejected",
+        "boundary_invalid_value": "boundary_invalid_value_rejected",
+        "sibling_help_sweep": "group_completed",
+        "monkey_help_sweep": "group_completed",
+        "repeatability_probe": "repeatability_completed",
+        "monkey_repeatability": "repeat_group_completed",
+        "concurrency_probe": "concurrency_completed",
+        "monkey_concurrency": "concurrent_group_completed",
+        "timeout_baseline": "timeout_baseline_completed",
+    }.get(key, "")
+
+
+def _generated_oracle_strength(candidate: dict[str, Any], commands: list[dict[str, Any]]) -> str:
+    semantic_assertions = [
+        assertion
+        for command in commands
+        for assertion in _effective_generation_assertions(command)
+        if assertion["type"] != "exit_code"
+    ]
+    if any(str(assertion.get("expected") or "").startswith("QUALITY_PILOT_ORACLE=") for assertion in semantic_assertions):
+        return "semantic_marker"
+    return "semantic_assertion" if semantic_assertions else "exit_only"
+
+
+def _dimension_realization(
+    candidate: dict[str, Any],
+    commands: list[dict[str, Any]],
+    *,
+    coverage_claims: list[dict[str, Any]],
+) -> dict[str, Any]:
+    operation = candidate.get("swqa_operation") if isinstance(candidate.get("swqa_operation"), dict) else {}
+    statuses = [str(claim.get("status") or "planned") for claim in coverage_claims]
+    if statuses and all(status == "realized" for status in statuses):
+        status = "realized"
+    elif any(status in {"realized", "partial"} for status in statuses):
+        status = "partial"
+    else:
+        status = "planned"
+    return {
+        "operation": operation.get("key") or "surface_probe",
+        "command_ids": [str(command.get("id")) for command in commands if command.get("id")],
+        "assertion_ids": sorted({
+            str(assertion_id)
+            for claim in coverage_claims
+            for assertion_id in claim.get("assertion_ids", [])
+            if str(assertion_id).strip()
+        }),
+        "status": status,
+        "dimensions": [
+            {
+                "dimension": claim["dimension"],
+                "status": claim["status"],
+                "assertion_ids": list(claim.get("assertion_ids", [])),
+            }
+            for claim in coverage_claims
+        ],
+    }
+
+
+_OPERATION_REALIZED_DIMENSIONS = {
+    "invalid_option_rejection": {"negative", "invalid_input"},
+    "boundary_invalid_value": {"boundary", "invalid_input"},
+    "sibling_help_sweep": {"sibling_surface"},
+    "monkey_help_sweep": {"monkey", "sibling_surface"},
+    "repeatability_probe": {"stress_timeout_risk"},
+    "monkey_repeatability": {"monkey", "stress_timeout_risk"},
+    "concurrency_probe": {"stress_timeout_risk"},
+    "monkey_concurrency": {"monkey", "stress_timeout_risk"},
+    "timeout_baseline": {"stress_timeout_risk"},
+}
+
+
+def _coverage_claims(candidate: dict[str, Any], commands: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if isinstance(candidate.get("coverage_claims"), list):
+        return _normalize_external_coverage_claims(candidate, commands)
+
+    command_ids = [str(command.get("id")) for command in commands if command.get("id")]
+    semantic_ids = [
+        str(assertion["id"])
+        for command in commands
+        for assertion in _effective_generation_assertions(command)
+        if assertion["type"] != "exit_code"
+    ]
+    operation = candidate.get("swqa_operation") if isinstance(candidate.get("swqa_operation"), dict) else {}
+    operation_key = str(operation.get("key") or "")
+    realized_dimensions = set() if candidate.get("_external_candidate") else _OPERATION_REALIZED_DIMENSIONS.get(operation_key, set())
+    return [
+        {
+            "dimension": str(dimension),
+            "step_ids": list(command_ids),
+            "assertion_ids": list(semantic_ids) if str(dimension) in realized_dimensions and semantic_ids else [],
+            "status": "realized" if str(dimension) in realized_dimensions and semantic_ids else "partial",
+        }
+        for dimension in candidate.get("swqa_dimensions", [])
+        if str(dimension).strip()
+    ]
+
+
+def _normalize_external_coverage_claims(
+    candidate: dict[str, Any],
+    commands: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    claims = candidate.get("coverage_claims")
+    if not isinstance(claims, list):
+        return []
+    dimensions = {str(item) for item in candidate.get("swqa_dimensions", []) if str(item).strip()}
+    assertions_by_command = {
+        str(command.get("id")): {
+            str(assertion["id"]): assertion
+            for assertion in _effective_generation_assertions(command)
+        }
+        for command in commands
+        if command.get("id")
+    }
+    normalized: list[dict[str, Any]] = []
+    seen_dimensions: set[str] = set()
+    for claim_index, claim in enumerate(claims):
+        location = f"coverage_claims[{claim_index}]"
+        if not isinstance(claim, dict):
+            raise CaseGenerationError(f"{location} must be a mapping")
+        dimension = str(claim.get("dimension") or "").strip()
+        if not dimension:
+            raise CaseGenerationError(f"{location}.dimension is required")
+        if dimension not in dimensions:
+            raise CaseGenerationError(f"{location}.dimension is not listed in swqa_dimensions: {dimension}")
+        if dimension in seen_dimensions:
+            raise CaseGenerationError(f"duplicate coverage claim for dimension: {dimension}")
+        seen_dimensions.add(dimension)
+        status = str(claim.get("status") or "partial").strip().lower()
+        if status not in {"realized", "partial", "planned"}:
+            raise CaseGenerationError(f"{location}.status must be realized, partial, or planned")
+        raw_step_ids = claim.get("step_ids", claim.get("command_ids", []))
+        raw_assertion_ids = claim.get("assertion_ids", [])
+        if not isinstance(raw_step_ids, list) or not isinstance(raw_assertion_ids, list):
+            raise CaseGenerationError(f"{location}.step_ids and assertion_ids must be lists")
+        step_ids = [str(item).strip() for item in raw_step_ids if str(item).strip()]
+        assertion_ids = [str(item).strip() for item in raw_assertion_ids if str(item).strip()]
+        unknown_steps = [step_id for step_id in step_ids if step_id not in assertions_by_command]
+        if unknown_steps:
+            raise CaseGenerationError(f"{location} references unknown command id: {unknown_steps[0]}")
+        selected_steps = step_ids or list(assertions_by_command)
+        for assertion_id in assertion_ids:
+            if not any(assertion_id in assertions_by_command[step_id] for step_id in selected_steps):
+                raise CaseGenerationError(
+                    f"{location} assertion id does not match a runner-effective assertion: {assertion_id}"
+                )
+        semantic_ids = [
+            assertion_id
+            for assertion_id in assertion_ids
+            if any(
+                assertions_by_command[step_id].get(assertion_id, {}).get("type") != "exit_code"
+                for step_id in selected_steps
+                if assertion_id in assertions_by_command[step_id]
+            )
+        ]
+        if status == "realized" and not semantic_ids:
+            raise CaseGenerationError(f"{location} realized coverage requires a semantic assertion id")
+        normalized.append(
+            {
+                "dimension": dimension,
+                "step_ids": selected_steps,
+                "assertion_ids": semantic_ids if status == "realized" else assertion_ids,
+                "status": status,
+            }
+        )
+    for dimension in candidate.get("swqa_dimensions", []):
+        dimension = str(dimension).strip()
+        if dimension and dimension not in seen_dimensions:
+            normalized.append(
+                {
+                    "dimension": dimension,
+                    "step_ids": list(assertions_by_command),
+                    "assertion_ids": [],
+                    "status": "planned",
+                }
+            )
+    return normalized
+
+
+def _effective_generation_assertions(command: dict[str, Any]) -> list[dict[str, Any]]:
+    assertions: list[dict[str, Any]] = []
+    for field in ("assertions", "oracles"):
+        raw_assertions = command.get(field)
+        if not isinstance(raw_assertions, list):
+            continue
+        for raw_assertion in raw_assertions:
+            if not isinstance(raw_assertion, dict):
+                continue
+            assertion = dict(raw_assertion)
+            assertion["id"] = str(assertion.get("id") or f"assertion-{len(assertions) + 1}")
+            assertion["type"] = str(assertion.get("type") or "").lower()
+            assertions.append(assertion)
+    if not any(assertion.get("type") == "exit_code" for assertion in assertions):
+        assertions.insert(
+            0,
+            {
+                "id": "expected-exit-code",
+                "type": "exit_code",
+                "operator": "equals",
+                "expected": int(command.get("expected_exit_code", 0)),
+            },
+        )
+    return assertions
 
 
 def _safe_probe_command(config: ProjectConfig, *, candidate: dict[str, Any], context: dict[str, Any]) -> str:
@@ -2969,10 +3379,23 @@ def _candidate_operation_slug(candidate: dict[str, Any], prefix: str) -> str:
 def _base_args_for_operation(seed_args: list[str]) -> list[str]:
     args = [str(item) for item in seed_args if str(item).strip()]
     if args and args[-1] == "--help":
-        return args[:-1]
+        args = args[:-1]
     if args in (["--version"], ["-v"]):
         return []
-    return [arg for arg in args if not arg.startswith("-")][:3]
+    positional: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        next_value = args[index + 1] if index + 1 < len(args) else ""
+        if arg.startswith("-"):
+            if next_value and _fixture_env_name_for_flag_value(arg, next_value):
+                index += 2
+                continue
+            index += 1
+            continue
+        positional.append(arg)
+        index += 1
+    return positional[:3]
 
 
 def _safe_args_for_repeated_operation(seed_args: list[str]) -> list[str]:
@@ -3021,45 +3444,72 @@ def _runtime_binary_exec_command(binary: str, args: list[str]) -> str:
 
 def _runtime_binary_group_command(binary: str, groups: list[list[str]]) -> str:
     checks = " && ".join(_runtime_binary_exec_fragment(binary, args) for args in groups[:8])
-    return _shell_command(checks)
+    return _shell_command(checks + " && printf 'QUALITY_PILOT_ORACLE=group_completed\\n'")
 
 
 def _runtime_binary_repeat_group_command(binary: str, groups: list[list[str]]) -> str:
     checks = " && ".join(_runtime_binary_repeat_fragment(binary, args, repeats=3) for args in groups[:4])
-    return _shell_command(checks)
+    return _shell_command(checks + " && printf 'QUALITY_PILOT_ORACLE=repeat_group_completed\\n'")
 
 
 def _runtime_binary_concurrent_group_command(binary: str, groups: list[list[str]]) -> str:
     checks = " && ".join(_runtime_binary_concurrent_fragment(binary, args) for args in groups[:4])
-    return _shell_command(checks)
+    return _shell_command(checks + " && printf 'QUALITY_PILOT_ORACLE=concurrent_group_completed\\n'")
 
 
 def _runtime_binary_invalid_option_command(binary: str, args: list[str], slug: str) -> str:
     invalid_flag = f"--quality-pilot-invalid-{slug}"
-    args_text = " ".join(_redmine_shell_arg_fragments([*args, invalid_flag]))
-    script = (
-        f'binary="${{QUALITY_PILOT_BINARY:-{binary}}}"; command -v "$binary" >/dev/null 2>&1 || test -x "$binary"; '
-        f'"$binary" {args_text} >/dev/null 2>&1; rc=$?; test "$rc" -ne 0'
+    return _runtime_binary_rejection_command(
+        binary,
+        [*args, invalid_flag],
+        marker="invalid_option_rejected",
     )
-    return _shell_command(script)
 
 
 def _runtime_binary_boundary_invalid_value_command(binary: str, args: list[str], slug: str) -> str:
     invalid_flag = f"--quality-pilot-boundary-{slug}"
-    args_text = " ".join(_redmine_shell_arg_fragments([*args, invalid_flag, ""]))
+    return _runtime_binary_rejection_command(
+        binary,
+        [*args, invalid_flag, ""],
+        marker="boundary_invalid_value_rejected",
+    )
+
+
+def _runtime_binary_rejection_command(binary: str, args: list[str], *, marker: str) -> str:
+    args_text = " ".join(_redmine_shell_arg_fragments(args))
+    rejection_pattern = (
+        "invalid|unknown|unrecognized|unsupported|usage|option|argument|"
+        "value|requires?|expected|must be|out of range"
+    )
+    infrastructure_pattern = (
+        "traceback|panic:|segmentation fault|core dumped|permission denied|"
+        "operation not permitted|command not found|no such file or directory|"
+        "modulenotfounderror|module not found|importerror|shared librar|"
+        "cannot execute|missing dependency|timed out|timeout"
+    )
     script = (
         f'binary="${{QUALITY_PILOT_BINARY:-{binary}}}"; command -v "$binary" >/dev/null 2>&1 || test -x "$binary"; '
-        f'"$binary" {args_text} >/dev/null 2>&1; rc=$?; test "$rc" -ne 0'
+        f'output=$("$binary" {args_text} 2>&1); rc=$?; printf "%s\\n" "$output"; '
+        'test "$rc" -ge 1 && test "$rc" -le 123 && '
+        f'printf "%s\\n" "$output" | grep -Eiq {shlex.quote(rejection_pattern)} && '
+        f'! printf "%s\\n" "$output" | grep -Eiq {shlex.quote(infrastructure_pattern)} && '
+        f"printf 'QUALITY_PILOT_ORACLE={marker}\\n'"
     )
     return _shell_command(script)
 
 
 def _runtime_binary_repeat_command(binary: str, args: list[str]) -> str:
-    return _shell_command(_runtime_binary_repeat_fragment(binary, args, repeats=5))
+    return _shell_command(
+        _runtime_binary_repeat_fragment(binary, args, repeats=5)
+        + " && printf 'QUALITY_PILOT_ORACLE=repeatability_completed\\n'"
+    )
 
 
 def _runtime_binary_concurrent_command(binary: str, args: list[str]) -> str:
-    return _shell_command(_runtime_binary_concurrent_fragment(binary, args))
+    return _shell_command(
+        _runtime_binary_concurrent_fragment(binary, args)
+        + " && printf 'QUALITY_PILOT_ORACLE=concurrency_completed\\n'"
+    )
 
 
 def _runtime_binary_timeout_command(binary: str, args: list[str]) -> str:
@@ -3070,7 +3520,7 @@ def _runtime_binary_timeout_command(binary: str, args: list[str]) -> str:
     )
     if args_text:
         script += f" {args_text}"
-    script += " >/dev/null"
+    script += " >/dev/null && printf 'QUALITY_PILOT_ORACLE=timeout_baseline_completed\\n'"
     return _shell_command(script)
 
 
@@ -3079,7 +3529,7 @@ def _runtime_binary_repeat_fragment(binary: str, args: list[str], *, repeats: in
     command = f'"$binary" {args_text} >/dev/null' if args_text else '"$binary" --help >/dev/null'
     return (
         f'binary="${{QUALITY_PILOT_BINARY:-{binary}}}"; command -v "$binary" >/dev/null 2>&1 || test -x "$binary"; '
-        f'for i in $(seq 1 {repeats}); do {command}; done'
+        f'for i in $(seq 1 {repeats}); do {command} || exit $?; done'
     )
 
 
@@ -3088,7 +3538,8 @@ def _runtime_binary_concurrent_fragment(binary: str, args: list[str]) -> str:
     command = f'"$binary" {args_text} >/dev/null' if args_text else '"$binary" --help >/dev/null'
     return (
         f'binary="${{QUALITY_PILOT_BINARY:-{binary}}}"; command -v "$binary" >/dev/null 2>&1 || test -x "$binary"; '
-        f'{command} & p1=$!; {command} & p2=$!; wait "$p1"; wait "$p2"'
+        f'{command} & p1=$!; {command} & p2=$!; rc=0; '
+        'wait "$p1" || rc=$?; wait "$p2" || rc=$?; test "$rc" -eq 0'
     )
 
 

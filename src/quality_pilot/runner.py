@@ -6,12 +6,13 @@ import os
 import re
 import shlex
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .contracts import CaseContract, CommandContract
+from .contracts import CaseContract, CommandAssertion, CommandContract
 
 DEFAULT_TIMEOUT_SEC = 120
 TIMEOUT_ENV = "QUALITY_PILOT_RUN_TIMEOUT_SEC"
@@ -67,20 +68,24 @@ def run_case(contract: CaseContract, context: RunContext, *, dry_run: bool = Fal
             status = "BLOCK"
             exit_code = result["exit_code"]
             break
-        if result["exit_code"] != command.expected_exit_code:
+        if result.get("status") == "FAIL":
             status = "FAIL"
-            exit_code = result["exit_code"]
+            # A semantic oracle can fail even when the product process exits 0.
+            # The case-level code represents the QA result; the command's actual
+            # process code remains available in commands[].exit_code.
+            exit_code = result["exit_code"] if result["exit_code"] != command.expected_exit_code else 1
             break
     ended_at = utc_now()
     swqa_gate = evaluate_swqa_gate(contract, command_results)
     if not dry_run and status == "PASS" and not swqa_gate["allowed"]:
         status = "BLOCK"
         exit_code = 2
+    oracle_profile = _case_oracle_profile(contract)
     payload = {
         "case_id": contract.case_id,
         "title": contract.title,
         "status": "NOT_RUN" if dry_run else status,
-        "partial_probe": _is_partial_probe(contract),
+        "partial_probe": _is_partial_probe(contract) or bool(oracle_profile["oracle_partial"]),
         "commands": command_results,
         "evidence": sorted(_relative_or_str(path, context.root) for path in case_evidence_dir.glob("*")),
         "contract_hash": contract.contract_hash,
@@ -88,6 +93,7 @@ def run_case(contract: CaseContract, context: RunContext, *, dry_run: bool = Fal
         "ended_at": ended_at,
         "exit_code": 0 if dry_run else exit_code,
         "swqa_gate": swqa_gate,
+        **oracle_profile,
     }
     result_path = case_evidence_dir / "result.json"
     result_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
@@ -138,6 +144,7 @@ def _has_side_effect_evidence(command_results: list[dict[str, Any]]) -> bool:
 
 def _blocked_case(contract: CaseContract, root: Path, evidence_dir: Path, started_at: str) -> dict[str, Any]:
     ended_at = utc_now()
+    oracle_profile = _case_oracle_profile(contract)
     command_results = [
         {
             "id": command.id,
@@ -152,6 +159,9 @@ def _blocked_case(contract: CaseContract, root: Path, evidence_dir: Path, starte
             "rc": None,
             "meta": None,
             "blocked_reason": "review_required_before_run",
+            "duration_ms": None,
+            "oracle_results": _not_evaluated_oracle_results(command, "review_required_before_run"),
+            **_command_oracle_profile(command),
         }
         for command in contract.commands
     ]
@@ -159,7 +169,7 @@ def _blocked_case(contract: CaseContract, root: Path, evidence_dir: Path, starte
         "case_id": contract.case_id,
         "title": contract.title,
         "status": "BLOCK",
-        "partial_probe": _is_partial_probe(contract),
+        "partial_probe": _is_partial_probe(contract) or bool(oracle_profile["oracle_partial"]),
         "commands": command_results,
         "evidence": [],
         "contract_hash": contract.contract_hash,
@@ -167,6 +177,7 @@ def _blocked_case(contract: CaseContract, root: Path, evidence_dir: Path, starte
         "ended_at": ended_at,
         "exit_code": 2,
         "blocked_reason": "review_required_before_run",
+        **oracle_profile,
     }
     result_path = evidence_dir / "result.json"
     result_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
@@ -190,6 +201,7 @@ def _run_command(command: CommandContract, root: Path, evidence_dir: Path) -> di
         "started_at": started_at,
         "timeout_sec": timeout_sec,
         "risk": risk,
+        "assertions": [_assertion_payload(assertion, source) for assertion, source in _effective_assertions(command)],
     }, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     if risk["decision"] == "block":
         stdout_path.write_text("", encoding="utf-8")
@@ -208,7 +220,10 @@ def _run_command(command: CommandContract, root: Path, evidence_dir: Path) -> di
             started_at=started_at,
             ended_at=ended_at,
             blocked_reason=risk["reason"],
+            duration_ms=0.0,
+            oracle_results=_not_evaluated_oracle_results(command, risk["reason"]),
         )
+    monotonic_started = time.monotonic()
     try:
         completed = subprocess.run(
             command.run,
@@ -223,14 +238,24 @@ def _run_command(command: CommandContract, root: Path, evidence_dir: Path) -> di
         exit_code = completed.returncode
         stdout = completed.stdout
         stderr = completed.stderr
-        status = "PASS" if completed.returncode == command.expected_exit_code else "FAIL"
+        duration_ms = (time.monotonic() - monotonic_started) * 1000
+        oracle_results = _evaluate_command_oracles(
+            command,
+            exit_code=exit_code,
+            stdout=stdout,
+            stderr=stderr,
+            duration_ms=duration_ms,
+        )
+        status = "PASS" if all(result["passed"] for result in oracle_results) else "FAIL"
         blocked_reason = None
     except subprocess.TimeoutExpired as exc:
+        duration_ms = (time.monotonic() - monotonic_started) * 1000
         exit_code = 124
         stdout = exc.stdout if isinstance(exc.stdout, str) else ""
         stderr = (exc.stderr if isinstance(exc.stderr, str) else "") + f"\ncommand timed out after {timeout_sec}s"
         status = "BLOCK"
         blocked_reason = "command_timeout"
+        oracle_results = _not_evaluated_oracle_results(command, blocked_reason)
     stdout_path.write_text(redact_secrets(stdout), encoding="utf-8")
     stderr_path.write_text(redact_secrets(stderr), encoding="utf-8")
     rc_path.write_text(f"{exit_code}\n", encoding="utf-8")
@@ -247,6 +272,8 @@ def _run_command(command: CommandContract, root: Path, evidence_dir: Path) -> di
         started_at=started_at,
         ended_at=ended_at,
         blocked_reason=blocked_reason,
+        duration_ms=duration_ms,
+        oracle_results=oracle_results,
     )
 
 
@@ -263,6 +290,8 @@ def _command_payload(
     started_at: str,
     ended_at: str,
     blocked_reason: str | None = None,
+    duration_ms: float | None = None,
+    oracle_results: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     payload = {
         "id": command.id,
@@ -272,6 +301,7 @@ def _command_payload(
         "status": status,
         "started_at": started_at,
         "ended_at": ended_at,
+        "duration_ms": duration_ms,
         "stdout": _relative_or_str(stdout_path, root),
         "stderr": _relative_or_str(stderr_path, root),
         "rc": _relative_or_str(rc_path, root),
@@ -282,6 +312,8 @@ def _command_payload(
             "rc": _sha256_file(rc_path),
             "meta": _sha256_file(meta_path),
         },
+        "oracle_results": oracle_results or [],
+        **_command_oracle_profile(command),
     }
     if blocked_reason:
         payload["blocked_reason"] = blocked_reason
@@ -302,6 +334,112 @@ def _dry_command(command: CommandContract, evidence_dir: Path) -> dict[str, Any]
         "rc": None,
         "meta": str(evidence_dir / f"{command.id}.meta"),
         "risk": classify_command_risk(command.run),
+        "duration_ms": None,
+        "oracle_results": _not_evaluated_oracle_results(command, "dry_run"),
+        **_command_oracle_profile(command),
+    }
+
+
+def _effective_assertions(command: CommandContract) -> list[tuple[CommandAssertion, str]]:
+    assertions = [(assertion, "contract") for assertion in command.assertions]
+    if not any(assertion.type == "exit_code" for assertion in command.assertions):
+        assertions.insert(
+            0,
+            (
+                CommandAssertion(type="exit_code", operator="equals", expected=command.expected_exit_code),
+                "legacy_expected_exit_code",
+            ),
+        )
+    return assertions
+
+
+def _evaluate_command_oracles(
+    command: CommandContract,
+    *,
+    exit_code: int,
+    stdout: str,
+    stderr: str,
+    duration_ms: float,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for assertion, source in _effective_assertions(command):
+        if assertion.type == "exit_code":
+            actual: Any = exit_code
+            passed = actual == assertion.expected
+        elif assertion.type == "duration_ms":
+            actual = round(duration_ms, 3)
+            if assertion.operator == "less_than":
+                passed = duration_ms < float(assertion.expected)
+            else:
+                passed = duration_ms <= float(assertion.expected)
+        else:
+            actual_text = stdout if assertion.type == "stdout" else stderr
+            actual = {
+                "length": len(actual_text),
+                "excerpt": redact_secrets(actual_text[:500]),
+            }
+            if assertion.operator == "contains":
+                passed = str(assertion.expected) in actual_text
+            elif assertion.operator == "regex":
+                passed = re.search(str(assertion.expected), actual_text) is not None
+            else:
+                passed = actual_text == assertion.expected
+        result = {
+            **_assertion_payload(assertion, source),
+            "actual": actual,
+            "passed": passed,
+            "status": "PASS" if passed else "FAIL",
+        }
+        if not passed:
+            result["reason"] = "oracle_mismatch"
+        results.append(result)
+    return results
+
+
+def _not_evaluated_oracle_results(command: CommandContract, reason: str) -> list[dict[str, Any]]:
+    return [
+        {
+            **_assertion_payload(assertion, source),
+            "actual": None,
+            "passed": None,
+            "status": "NOT_EVALUATED",
+            "reason": reason,
+        }
+        for assertion, source in _effective_assertions(command)
+    ]
+
+
+def _assertion_payload(assertion: CommandAssertion, source: str) -> dict[str, Any]:
+    return {
+        "id": assertion.id or "expected-exit-code",
+        "type": assertion.type,
+        "operator": assertion.operator,
+        "expected": assertion.expected,
+        "source": source,
+    }
+
+
+def _command_oracle_profile(command: CommandContract) -> dict[str, Any]:
+    has_semantic_oracle = any(assertion.type != "exit_code" for assertion in command.assertions)
+    return {
+        "oracle_strength": "semantic" if has_semantic_oracle else "exit_only",
+        "oracle_partial": not has_semantic_oracle,
+    }
+
+
+def _case_oracle_profile(contract: CaseContract) -> dict[str, Any]:
+    semantic_count = sum(
+        1 for command in contract.commands if any(assertion.type != "exit_code" for assertion in command.assertions)
+    )
+    if semantic_count == len(contract.commands):
+        strength = "semantic"
+    elif semantic_count:
+        strength = "mixed"
+    else:
+        strength = "exit_only"
+    return {
+        "oracle_strength": strength,
+        "oracle_partial": semantic_count != len(contract.commands),
     }
 
 
