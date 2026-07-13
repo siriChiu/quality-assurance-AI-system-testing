@@ -5,12 +5,26 @@ engine. It is not yet a fully autonomous collection of resumable agent modules.
 Start with the [capability matrix](CAPABILITY_MATRIX.md) so Supported, Partial,
 and Planned behavior are not confused.
 
-Hermes integration is guided and interactive: `/quality-pilot ...` responses
-include `next_actions`, and the skill should present those actions as a
-Traditional Chinese numbered menu instead of acting like a passive command
-relay. When user input is required, the payload includes `hermes_needs_input`;
+Hermes integration is guided and interactive: typing `/quality-pilot` in the
+input box now opens an input-time completion dropdown before Enter (the first
+row preserves the bare overview, followed by nested workflows such as
+`cases generate`, `publish wiki status`, and `close-loop heartbeat`). Leaf
+options such as `--init` and `--growing` are suggested as well. Bare `/quality-pilot` opens the
+Traditional Chinese overview and menu, while `/quality-pilot ...` responses
+include `next_actions`; the skill should present those actions as a Traditional
+Chinese numbered menu instead of acting like a passive command relay. When user
+input is required, the payload includes `hermes_needs_input`;
 Hermes should call `clarify` only for facts the repo, config, tracker snapshots,
 and existing state cannot establish.
+
+For any workflow that involves requirements, issue analysis, test design,
+case generation/review/run, close-loop growth, publishing, tracker work, or
+subagent work, Hermes now enforces the installed `grill-me` companion as a
+blocking system-level preflight. The agent executes the interview itself (the
+user does not need to type `/grill-me`), waits for answers, and carries them
+into the subsequent Quality Pilot command. Only explicitly listed deterministic
+read-only commands bypass this gate; a missing companion stops with
+`grill_me_required`.
 
 ## Choose your journey
 

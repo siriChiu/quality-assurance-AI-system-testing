@@ -33,6 +33,187 @@ AGENT_MANIFEST_NAME = "quality-pilot.agent.json"
 AGENT_WRAPPER_NAME = "quality-pilot-agent.sh"
 HERMES_SKILL_NAME = "quality-pilot"
 HERMES_SKILL_FILE_NAME = "SKILL.md"
+GRILL_ME_SKILL_NAME = "grill-me"
+
+# Hermes uses this metadata to populate its input-time slash-command
+# completion menu. The tree deliberately mirrors the public dispatcher
+# surface, including nested command groups and safe option hints. Values are
+# suggestions only: the dispatcher remains the source of truth and validates
+# every command at execution time.
+HERMES_COMPLETION_TREE = {
+    "help": {"description": "顯示完整 QA 指令與使用說明"},
+    "setup": {
+        "description": "建立或更新專案 QA 設定",
+        "options": {"--force": "覆寫安全的 starter files"},
+    },
+    "doctor": {
+        "description": "檢查環境、MCP 與設定是否可用",
+        "options": {"--fix": "修復安全的 config/overlay 缺口"},
+    },
+    "audit": {
+        "description": "查看目前 QA 狀態與證據",
+        "subcommands": {
+            "state": {"description": "稽核 cases、issues、evidence 與 reports"},
+        },
+    },
+    "issues": {
+        "description": "同步、檢視與處理 tracker issues",
+        "subcommands": {
+            "sync": {
+                "description": "同步 issue mirrors 與 gated remote actions",
+                "options": {
+                    "--issues-json": "使用離線 issues JSON",
+                    "--redmine-issues": "同步一個或多個 Redmine issue IDs",
+                    "--dry-run": "預覽而不寫入",
+                },
+            },
+            "status": {"description": "查看 issue sync 與 fix queue 狀態"},
+            "report": {"description": "產生 per-issue QA/evidence report"},
+            "show": {
+                "description": "查看單一 issue mirror",
+                "args_hint": "<issue_id>",
+            },
+            "fix": {
+                "description": "修復 synced issues 並依 gate 選擇建立 PR",
+                "options": {
+                    "--all": "處理所有 open issues",
+                    "--issue": "指定 issue ID",
+                    "--push-pr": "verification 通過後建立 PR",
+                },
+            },
+        },
+    },
+    "cases": {
+        "description": "產生、審查、驗證與執行測試 cases",
+        "subcommands": {
+            "generate": {
+                "description": "產生 executable SWQA case contracts",
+                "args_hint": "[--init|--growing|--redmine-issues ...]",
+                "options": {
+                    "--init": "首次全 repo case generation",
+                    "--growing": "依變更訊號增長 cases",
+                    "--redmine-issues": "依 Redmine issue IDs 產生 linked cases",
+                    "--feature": "指定要偏重的產品 surface",
+                    "--profile": "指定 auto/cli/api/hardware/repo profile",
+                    "--count": "限制產生 case 數量",
+                    "--force": "覆寫既有 generated case YAML",
+                },
+            },
+            "review": {"description": "查看 generated drafts 與補強提示"},
+            "validate": {"description": "驗證 generated case contracts"},
+            "list": {"description": "列出可執行的 case contracts"},
+            "run": {
+                "description": "執行全部 cases 或指定 case",
+                "args_hint": "[<case_id>]",
+            },
+            "push-pr": {
+                "description": "依 failing case/evidence 建立修復 PR",
+                "args_hint": "[<case_id>]",
+            },
+        },
+    },
+    "publish": {
+        "description": "預覽或套用 Wiki / tracker 發布",
+        "subcommands": {
+            "wiki": {
+                "description": "管理 Gitea Wiki status page",
+                "subcommands": {
+                    "status": {"description": "查看最新 Wiki plan/apply 狀態"},
+                    "plan": {"description": "建立 gated Wiki-only plan"},
+                    "apply": {"description": "套用已確認的 Wiki plan"},
+                },
+            },
+        },
+    },
+    "close-loop": {
+        "description": "執行 heartbeat 與成長性 QA 循環",
+        "subcommands": {
+            "status": {"description": "查看 close-loop pipeline 與 latest run"},
+            "run-once": {
+                "description": "執行固定 pipeline 一次",
+                "options": {
+                    "--case-id": "只執行指定 case",
+                    "--dry-run": "預覽而不執行寫入",
+                    "--fail-on-test-failure": "測試失敗時回傳非零",
+                },
+            },
+            "heartbeat": {
+                "description": "執行 sensor-driven growth heartbeat",
+                "options": {
+                    "--every": "排程間隔，例如 30m、1h、12h",
+                    "--grow-count": "每次最多新增 growth cases",
+                    "--case-id": "只執行指定 case",
+                    "--dry-run": "預覽而不執行寫入",
+                    "--run-existing-if-no-growth": "沒有新 growth 時跑既有 cases",
+                    "--fail-on-test-failure": "測試失敗時回傳非零",
+                },
+            },
+        },
+    },
+    "report": {
+        "description": "查看 QA 報告與 JSON 證據",
+        "subcommands": {
+            "status": {"description": "產生 Markdown status report"},
+            "json": {"description": "輸出 latest run JSON"},
+        },
+    },
+    "tracker": {
+        "description": "檢視 tracker write-gate 計畫",
+        "subcommands": {
+            "plan-write": {
+                "description": "只檢查單一 tracker write gate",
+                "options": {
+                    "--result": "指定 QA result",
+                    "--target-state": "指定 open/closed/missing/unknown",
+                    "--expected-contract-hash": "指定 expected contract hash",
+                },
+            },
+        },
+    },
+    "subagent": {
+        "description": "檢視或設定 QA subagent",
+        "subcommands": {
+            "status": {"description": "查看 subagent handoff 設定"},
+            "configure": {
+                "description": "設定 Open WebUI subagent profile",
+                "options": {
+                    "--profile": "指定 profile 名稱",
+                    "--endpoint": "指定 Open WebUI endpoint",
+                    "--model": "指定 model 名稱",
+                    "--api-base": "指定 API base URL",
+                    "--api-key-env": "指定 API key env 名稱",
+                    "--force": "重設使用者 model/API 欄位",
+                },
+            },
+        },
+    },
+}
+
+# Backwards-compatible flat view used by older installers and tests.
+HERMES_COMPLETION_SUBCOMMANDS = {
+    name: str(node.get("description", ""))
+    for name, node in HERMES_COMPLETION_TREE.items()
+}
+
+
+def _render_completion_tree(tree: dict[str, Any], indent: str = "        ") -> str:
+    """Render the nested completion tree as conservative YAML frontmatter."""
+    lines: list[str] = []
+    for name, node in tree.items():
+        lines.append(f"{indent}{name}:")
+        lines.append(f"{indent}  description: {json.dumps(str(node.get('description', '')), ensure_ascii=False)}")
+        if node.get("args_hint"):
+            lines.append(f"{indent}  args_hint: {json.dumps(str(node['args_hint']), ensure_ascii=False)}")
+        options = node.get("options")
+        if isinstance(options, dict) and options:
+            lines.append(f"{indent}  options:")
+            for option, description in options.items():
+                lines.append(f"{indent}    {json.dumps(str(option), ensure_ascii=False)}: {json.dumps(str(description), ensure_ascii=False)}")
+        children = node.get("subcommands")
+        if isinstance(children, dict) and children:
+            lines.append(f"{indent}  subcommands:")
+            lines.append(_render_completion_tree(children, indent + "    "))
+    return "\n".join(lines)
 
 
 @dataclass(frozen=True)
@@ -48,10 +229,10 @@ def parse_chat_command(message: str, *, root: str | Path = ".") -> HermesCommand
     prefix = parts[0]
     if prefix not in ACCEPTED_PREFIXES:
         raise ValueError("not_a_quality_pilot_command")
-    if len(parts) == 1:
-        raise ValueError("empty_quality_pilot_command")
-
-    engine_argv = list(parts[1:])
+    # Treat the bare slash command as an interactive entry point. Hermes users
+    # should see the overview/menu immediately instead of an avoidable parser
+    # error before choosing their first workflow.
+    engine_argv = list(parts[1:]) or ["help"]
     if not _has_option(engine_argv, "--json"):
         engine_argv.insert(0, "--json")
     _inject_project_context(engine_argv, Path(root).resolve())
@@ -1057,6 +1238,12 @@ license: MIT
 metadata:
   hermes:
     tags: [qa, testing, deterministic, evidence, write-gate, tracker, dynamic-skill]
+    required_companion_skills:
+      - grill-me
+    completion:
+      args_hint: "[help|setup|doctor|audit|issues|cases|publish|close-loop|report|tracker|subagent]"
+      subcommands:
+{_render_completion_tree(HERMES_COMPLETION_TREE)}
 ---
 
 # AI Quality Pilot Hermes Skill
@@ -1071,6 +1258,7 @@ AI Quality Pilot is responsible for issue sync, case contracts, test execution, 
 
 Only these `/quality-pilot` commands are public:
 
+- `/quality-pilot` (opens the Traditional Chinese overview and suggested menu)
 - `/quality-pilot help`
 - `/quality-pilot setup`
 - `/quality-pilot doctor`
@@ -1126,6 +1314,10 @@ When the user invokes `/quality-pilot <arguments>`, you must:
 8. Treat `payload.readiness.mode` as the single readiness summary. Do not suggest remote writes when it is `WRITE_BLOCKED_MCP` or `SYNC_BLOCKED`.
 9. If `chat_response` is missing, summarize `status`, `payload.status`, `payload.error`, `payload.message`, `latest_run_json`, `report_path`, and evidence paths.
 10. Preserve failures. If the dispatcher exits non-zero or emits invalid JSON, tell the user the exit code and useful stderr/stdout details.
+
+When the user invokes bare `/quality-pilot`, treat it as the interactive entry
+point: show the overview and the returned numbered `next_actions` menu. Do not
+turn the bare command into an `empty_quality_pilot_command` error.
 
 Hermes MCP rule: AI Quality Pilot does not store Gitea/Redmine URLs, repo names, or token environment variables in `.quality-pilot.yaml`. It relies on the user's Hermes session to provide MCP servers. At the start of setup/doctor, make the available server list visible to AI Quality Pilot through `QUALITY_PILOT_HERMES_MCP_SERVERS=gitea,redmine` or the configured `.quality-pilot-project/state/hermes-mcp/status.json`. If Gitea or Redmine MCP is missing or unknown, tell the user immediately and do not pretend remote sync/write is ready.
 
@@ -1201,6 +1393,32 @@ Subagent text generation rule: AI Quality Pilot may delegate long human-facing d
 ## Interactive Guidance Model
 
 Do not behave like a passive command relay. After every AI Quality Pilot turn, guide the user toward the next useful step in Traditional Chinese.
+
+## MANDATORY SYSTEM GATE — grill-me
+
+The `grill-me` companion skill is a blocking preflight for every
+`/quality-pilot` workflow that involves requirements, test intent, issue
+analysis, case generation/review/run, close-loop growth, publishing, tracker
+work, or subagent work. This is an execution requirement, not a suggestion:
+
+1. Hermes MUST load and execute the installed `grill-me` skill (the canonical
+   Hermes command is `/grill-me`) before calling the AI Quality Pilot
+   dispatcher for those workflows.
+2. Do not ask the user to run `/grill-me`, merely recommend it, or continue
+   directly to the dispatcher. Run the grilling interview yourself, wait for
+   the user's answers, and carry those answers into the next dispatcher call.
+3. The only bypasses are fully deterministic/read-only commands: `help`,
+   `doctor`, `audit state`, `report status`, `report json`, `cases list`,
+   `cases validate`, and `cases run <case_id>` when every contract input is
+   already explicit.
+4. If the companion skill is missing or cannot be loaded, stop and return
+   `grill_me_required`; repair the installation before running the requested
+   workflow. Never silently fall back to a normal clarification flow.
+
+The interview itself is not QA evidence and never bypasses validation, safety,
+or write gates. Use the answers to sharpen product surface, expected and
+negative behavior, risk priorities, boundaries, environment, oracle strength,
+and evidence requirements before writing or expanding case contracts.
 
 Hermes clarify / needs-input contract:
 
@@ -1414,6 +1632,25 @@ def install_skill(
     base = Path(skills_dir).expanduser().resolve() if skills_dir else default_skills_dir().expanduser().resolve()
     skill_dir = base / HERMES_SKILL_NAME
     skill_path = skill_dir / HERMES_SKILL_FILE_NAME
+    # The quality-pilot system gate requires grill-me as a companion. Seed a
+    # minimal local copy only when the user has not already installed or
+    # customized it; never overwrite user-owned skill content. This check also
+    # runs when quality-pilot already exists and force=False.
+    companion_dir = base / GRILL_ME_SKILL_NAME
+    companion_path = companion_dir / HERMES_SKILL_FILE_NAME
+    companion_installed = False
+    if not companion_path.exists():
+        companion_dir.mkdir(parents=True, exist_ok=True)
+        companion_path.write_text(
+            "---\n"
+            "name: grill-me\n"
+            "description: A relentless interview to sharpen a plan or design.\n"
+            "disable-model-invocation: true\n"
+            "---\n\n"
+            "Run a `/grilling` session.\n",
+            encoding="utf-8",
+        )
+        companion_installed = True
     if skill_path.exists() and not force:
         return {
             "status": "error",
@@ -1423,6 +1660,8 @@ def install_skill(
             "skill_dir": str(skill_dir),
             "skill_path": str(skill_path),
             "command_prefix": PRIMARY_PREFIX,
+            "companion_skill_path": str(companion_path),
+            "companion_skill_installed": companion_installed,
         }
     skill_dir.mkdir(parents=True, exist_ok=True)
     skill_path.write_text(build_skill_markdown(runner_command=runner_command), encoding="utf-8")
@@ -1438,6 +1677,8 @@ def install_skill(
         "command_prefix": PRIMARY_PREFIX,
         "reload_command": "/reload-skills",
         "runner_command": runner_command,
+        "companion_skill_path": str(companion_path),
+        "companion_skill_installed": companion_installed,
     }
 
 
@@ -1450,6 +1691,7 @@ def skill_status(skills_dir: str | Path | None = None) -> dict[str, Any]:
     if exists:
         text = skill_path.read_text(encoding="utf-8")
         valid = "name: quality-pilot" in text and "AI Quality Pilot Hermes Skill" in text
+    companion_path = base / GRILL_ME_SKILL_NAME / HERMES_SKILL_FILE_NAME
     return {
         "status": "ok" if valid else "missing",
         "skills_dir": str(base),
@@ -1458,6 +1700,8 @@ def skill_status(skills_dir: str | Path | None = None) -> dict[str, Any]:
         "skill_exists": exists,
         "skill_valid": valid,
         "command_prefix": PRIMARY_PREFIX if valid else None,
+        "companion_skill_path": str(companion_path),
+        "companion_skill_exists": companion_path.exists(),
     }
 
 

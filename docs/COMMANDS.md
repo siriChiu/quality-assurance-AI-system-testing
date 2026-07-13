@@ -2,6 +2,20 @@
 
 AI Quality Pilot 的公開入口是 Hermes 聊天室中的 `/quality-pilot ...`。CLI 只是 Hermes 背後呼叫的 deterministic engine；CI 或本機除錯可以直接用同一組參數。
 
+直接輸入 `/quality-pilot` 不需要再補 `help`：Hermes 會開啟繁中總覽，並自動顯示最多四個依目前狀態排序的建議功能。選單中的唯讀動作可直接執行；涉及寫檔、測試、MCP、Wiki、issue 或 PR 的項目會標示「需確認」。
+
+在 Hermes 輸入框中，輸入 `/quality-pilot` 尚未按 Enter 時也會出現即時下拉補全：第一列保留裸指令的總覽入口，後面列出 `help`、`setup`、`doctor`、`issues`、`cases`、`publish`、`close-loop`、`report`、`tracker` 與 `subagent`。輸入空格後會沿著 nested command tree 繼續補全，例如 `/quality-pilot cases generate`、`/quality-pilot publish wiki status`、`/quality-pilot close-loop heartbeat`；leaf command 後也會提示安全選項如 `--init`、`--growing`。按 Tab 或點選即可帶入建議；按 Enter 仍會執行目前輸入的指令。
+
+注意：`/reload-skills` 只會重新掃描 `SKILL.md` 與 skill map，不會重新載入已在記憶體中的 Hermes Python slash completer。若剛更新 Hermes completion integration，必須退出並重新啟動目前的 Hermes CLI/TUI process；只執行 `/reload-skills` 仍會看到舊的單一指令補全。
+
+涉及需求判斷、issue 分析、測試策略、case 生成/審查/執行、close-loop、發布、
+tracker 或 subagent 的 `/quality-pilot` workflow，會由 Hermes 系統級提示強制先執行
+已安裝的 `grill-me` companion skill。這不是建議，也不需要使用者另外輸入
+`/grill-me`；Hermes 必須完成訪談、等待回答，再把答案帶入 dispatcher。只有
+`help`、`doctor`、`audit state`、`report status/json`、`cases list`、`cases validate`
+與輸入完整 contract 的 `cases run <case_id>` 可以 bypass。缺少 companion 時必須停止並
+回報 `grill_me_required`，不能靜默退回一般 clarify 流程。
+
 `/quality-pilot help` 是唯一 help 指令。不再支援子分類 help。
 
 命令是否出現在 help，不代表對應的完整 autonomous agent module 已完成。
@@ -11,6 +25,7 @@ workflow entry points，但 resumable A0-A8 module session 仍是 Partial。
 ## Public Commands
 
 ```text
+/quality-pilot
 /quality-pilot help
 /quality-pilot setup
 /quality-pilot doctor

@@ -30,6 +30,17 @@ class HermesDispatchTest(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def test_bare_quality_pilot_opens_interactive_menu(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = hermes.dispatch_chat_command("/quality-pilot", root=tmp)
+            self.assertEqual(result["exit_code"], 0)
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["payload"]["topic"], "overview")
+            self.assertIn("下一步可以選：", result["chat_response"])
+            self.assertIn("/quality-pilot setup", result["chat_response"])
+            self.assertIn("/quality-pilot doctor", result["chat_response"])
+            self.assertNotIn("empty_quality_pilot_command", result["chat_response"])
+
     def test_help_command_returns_traditional_chinese_manual(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             result = hermes.dispatch_chat_command("/quality-pilot help", root=tmp)
@@ -296,10 +307,19 @@ class HermesDispatchTest(unittest.TestCase):
             self.assertEqual(payload["status"], "ok")
             skill_path = Path(payload["skill_path"])
             self.assertTrue(skill_path.exists())
+            self.assertTrue(Path(payload["companion_skill_path"]).exists())
+            self.assertTrue(payload["companion_skill_installed"])
             text = skill_path.read_text(encoding="utf-8")
             frontmatter = text.split("---", 2)[1]
             self.assertIn("name: quality-pilot", text)
             self.assertIn("license: MIT", frontmatter)
+            self.assertIn("completion:", frontmatter)
+            self.assertIn("required_companion_skills:", frontmatter)
+            self.assertIn("- grill-me", frontmatter)
+            self.assertIn('args_hint: "[help|setup|doctor|audit|issues|cases|publish|close-loop|report|tracker|subagent]"', frontmatter)
+            self.assertIn('        doctor:', frontmatter)
+            self.assertIn('            generate:', frontmatter)
+            self.assertIn('                "--init": "首次全 repo case generation"', frontmatter)
             self.assertNotIn("version:", frontmatter)
             self.assertNotIn("author:", frontmatter)
             self.assertNotIn("platforms:", frontmatter)
@@ -319,6 +339,8 @@ class HermesDispatchTest(unittest.TestCase):
             self.assertNotIn("Hermes needs your input", text)
             self.assertIn("product repository root", text)
             self.assertIn("/quality-pilot help", text)
+            self.assertIn("/quality-pilot` (opens the Traditional Chinese overview and suggested menu)", text)
+            self.assertIn("empty_quality_pilot_command", text)
             self.assertIn("/quality-pilot doctor --fix", text)
             self.assertNotIn("/quality-pilot help qa-test", text)
             self.assertIn("/quality-pilot cases generate --init", text)
@@ -326,6 +348,10 @@ class HermesDispatchTest(unittest.TestCase):
             self.assertNotIn("/quality-pilot close-loop watch", text)
             self.assertIn("/quality-pilot subagent status", text)
             self.assertIn("/quality-pilot subagent configure", text)
+            self.assertIn("MANDATORY SYSTEM GATE — grill-me", text)
+            self.assertIn("not a suggestion", text)
+            self.assertIn("grill_me_required", text)
+            self.assertIn("/grill-me", text)
             self.assertNotIn("172.17.20.220", text)
             self.assertIn("No private endpoint is a universal default", text)
             self.assertIn("candidate-only", text)
@@ -354,6 +380,14 @@ class HermesDispatchTest(unittest.TestCase):
             duplicate = hermes.install_skill(skills_tmp)
             self.assertEqual(duplicate["status"], "error")
             self.assertEqual(duplicate["error"], "skill_exists")
+
+            companion_path = Path(payload["companion_skill_path"])
+            companion_path.unlink()
+            repaired = hermes.install_skill(skills_tmp)
+            self.assertEqual(repaired["status"], "error")
+            self.assertEqual(repaired["error"], "skill_exists")
+            self.assertTrue(Path(repaired["companion_skill_path"]).exists())
+            self.assertTrue(repaired["companion_skill_installed"])
 
     def test_skill_console_commands(self) -> None:
         with tempfile.TemporaryDirectory() as skills_tmp:

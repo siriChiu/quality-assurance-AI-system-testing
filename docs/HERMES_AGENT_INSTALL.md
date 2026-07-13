@@ -61,6 +61,23 @@ PYTHONPATH="/root/repo/AI Quality Pilot/src" python3 -m quality_pilot.hermes ski
 /reload-skills
 ```
 
+`/reload-skills` 只刷新 skill 檔案與 skill map；若是剛安裝或更新 Hermes 的
+slash completion integration，還要退出並重新啟動目前的 Hermes CLI/TUI
+process，讓 Python completer 載入新程式。背景 gateway 若由 systemd 管理，也
+需要一併重啟；重掃 skill 本身不會 hot-reload 已執行中的 process。
+
+`install-skill` 也會在 Hermes skills directory 缺少 `grill-me` 時植入最小
+companion `SKILL.md`；若使用者已經有自己的 `grill-me`，安裝器不會覆寫它。
+
+重掃並重啟後，在輸入框鍵入 `/quality-pilot` 尚未按 Enter 時，Hermes 會顯示輸入期下拉補全。第一列是裸指令總覽，後面可沿著 nested tree 繼續選擇 `cases generate`、`publish wiki status`、`close-loop heartbeat`，leaf command 也會提示 `--init`、`--growing` 等安全選項。這個選單來自 `SKILL.md` 的 `metadata.hermes.completion`，不是 dispatcher 回傳後的 `next_actions`。若舊版 Hermes 只顯示 `/quality-pilot` 名稱而沒有子功能，需更新 Hermes 的 slash completer；本環境目前已在 `/usr/local/lib/hermes-agent` 套用這項 completion integration，日後更新 Hermes 時需保留同等支援。
+
+涉及需求判斷、issue 分析、測試策略、case 生成/審查/執行、close-loop、發布、tracker
+或 subagent 的 `/quality-pilot` workflow，系統會強制執行已安裝的 `grill-me`
+companion 作為 preflight。使用者不需要另外輸入 `/grill-me`；Hermes 會自行完成訪談、
+等待回答後才呼叫 dispatcher。只有 `help`、`doctor`、`audit state`、`report status/json`、
+`cases list`、`cases validate` 與輸入完整 contract 的 `cases run <case_id>` 可以 bypass。
+若 companion 缺少，流程會停止並回報 `grill_me_required`，不會靜默改走一般 clarify。
+
 再確認：
 
 ```text
@@ -72,6 +89,7 @@ PYTHONPATH="/root/repo/AI Quality Pilot/src" python3 -m quality_pilot.hermes ski
 - `~/.hermes/skills/quality-pilot/SKILL.md` 是否存在。
 - frontmatter 是否有 `name: quality-pilot`。
 - Hermes 是否已執行 `/reload-skills`。
+- 若 completion 程式剛更新，是否已退出並重新啟動 Hermes CLI/TUI。
 - Hermes 是否使用不同 `$HERMES_HOME`。
 
 ## Public Commands
