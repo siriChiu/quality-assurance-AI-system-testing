@@ -206,6 +206,9 @@ def resolve_identifier(config: Any, value: Any) -> dict[str, Any]:
 
     result["input_domain"] = "unknown"
     result["candidates"] = _case_candidates(config, raw)
+    if len(result["candidates"]) == 1:
+        result["resolved_case_id"] = result["candidates"][0]
+        result["resolution_source"] = "case-name-candidate"
     return result
 
 

@@ -46,6 +46,9 @@ RISK_PATTERNS = [
 class RunContext:
     root: Path
     evidence_dir: Path
+    # CLI supplies the redacted environment profile.  Direct library callers
+    # may omit it to preserve the existing low-level runner behaviour.
+    environment_profile: dict[str, Any] | None = None
 
 
 def utc_now() -> str:
@@ -58,11 +61,23 @@ def run_case(contract: CaseContract, context: RunContext, *, dry_run: bool = Fal
     case_evidence_dir.mkdir(parents=True, exist_ok=True)
     if not dry_run and _review_required_before_run(contract):
         return _blocked_case(contract, context.root, case_evidence_dir, started_at)
+    if not dry_run:
+        environment_block = _environment_blocker(contract, context.environment_profile)
+        if environment_block:
+            return _blocked_case(
+                contract,
+                context.root,
+                case_evidence_dir,
+                started_at,
+                blocked_reason=environment_block["reason"],
+                blocked_details=environment_block,
+                environment_profile=context.environment_profile,
+            )
     command_results = []
     status = "PASS"
     exit_code = 0
     for command in contract.commands:
-        result = _dry_command(command, case_evidence_dir) if dry_run else _run_command(command, context.root, case_evidence_dir)
+        result = _dry_command(command, case_evidence_dir) if dry_run else _run_command(command, context.root, case_evidence_dir, context.environment_profile)
         command_results.append(result)
         if result.get("status") == "BLOCK":
             status = "BLOCK"
@@ -86,6 +101,12 @@ def run_case(contract: CaseContract, context: RunContext, *, dry_run: bool = Fal
         "title": contract.title,
         "status": "NOT_RUN" if dry_run else status,
         "partial_probe": _is_partial_probe(contract) or bool(oracle_profile["oracle_partial"]),
+        "official_result": not (_is_partial_probe(contract) or bool(oracle_profile["oracle_partial"])),
+        "truth_status": (
+            "NOT_RUN"
+            if dry_run
+            else ("HOLD" if (_is_partial_probe(contract) or bool(oracle_profile["oracle_partial"])) else status)
+        ),
         "commands": command_results,
         "evidence": sorted(_relative_or_str(path, context.root) for path in case_evidence_dir.glob("*")),
         "contract_hash": contract.contract_hash,
@@ -93,6 +114,7 @@ def run_case(contract: CaseContract, context: RunContext, *, dry_run: bool = Fal
         "ended_at": ended_at,
         "exit_code": 0 if dry_run else exit_code,
         "swqa_gate": swqa_gate,
+        "environment_profile": _safe_environment_profile(context.environment_profile),
         **oracle_profile,
     }
     result_path = case_evidence_dir / "result.json"
@@ -110,6 +132,47 @@ def _is_partial_probe(contract: CaseContract) -> bool:
     qa = contract.raw.get("quality_pilot") if isinstance(contract.raw.get("quality_pilot"), dict) else {}
     wiki = contract.raw.get("wiki") if isinstance(contract.raw.get("wiki"), dict) else {}
     return bool(contract.raw.get("partial_probe") or qa.get("partial_probe") or wiki.get("partial_probe"))
+
+
+def _requires_prepared_environment(contract: CaseContract) -> bool:
+    qa = contract.raw.get("quality_pilot") if isinstance(contract.raw.get("quality_pilot"), dict) else {}
+    requirements = qa.get("environment_requirements")
+    source = str(qa.get("safe_command_source_type") or "")
+    return bool(
+        qa.get("requires_prepared_environment")
+        or (isinstance(requirements, list) and requirements)
+        or source in {"prepared_environment_readonly_product_command", "readme_cli_operation"}
+    )
+
+
+def _environment_blocker(contract: CaseContract, profile: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not _requires_prepared_environment(contract) or profile is None:
+        return None
+    if profile.get("ready"):
+        return None
+    blockers = [str(item) for item in profile.get("blockers", []) if item]
+    return {
+        "reason": "environment_profile_required",
+        "blockers": blockers,
+        "case_requires_prepared_environment": True,
+    }
+
+
+def _safe_environment_profile(profile: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not profile:
+        return None
+    # The status object is intentionally already redacted; copy only stable
+    # readiness fields into evidence so later reports explain a BLOCK without
+    # leaking target or credential values.
+    return {
+        "status": profile.get("status"),
+        "execution_mode": profile.get("execution_mode"),
+        "environment_confirmed": profile.get("environment_confirmed"),
+        "blockers": profile.get("blockers", []),
+        "target": profile.get("target", {}),
+        "fixtures": profile.get("fixtures", []),
+        "credentials": profile.get("credentials", []),
+    }
 
 
 def evaluate_swqa_gate(contract: CaseContract, command_results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -142,7 +205,16 @@ def _has_side_effect_evidence(command_results: list[dict[str, Any]]) -> bool:
     return any(marker in text for marker in ["side_effect", "readonly", "read-only", "dry-run", "safe_probe"])
 
 
-def _blocked_case(contract: CaseContract, root: Path, evidence_dir: Path, started_at: str) -> dict[str, Any]:
+def _blocked_case(
+    contract: CaseContract,
+    root: Path,
+    evidence_dir: Path,
+    started_at: str,
+    *,
+    blocked_reason: str = "review_required_before_run",
+    blocked_details: dict[str, Any] | None = None,
+    environment_profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     ended_at = utc_now()
     oracle_profile = _case_oracle_profile(contract)
     command_results = [
@@ -158,9 +230,9 @@ def _blocked_case(contract: CaseContract, root: Path, evidence_dir: Path, starte
             "stderr": None,
             "rc": None,
             "meta": None,
-            "blocked_reason": "review_required_before_run",
+            "blocked_reason": blocked_reason,
             "duration_ms": None,
-            "oracle_results": _not_evaluated_oracle_results(command, "review_required_before_run"),
+            "oracle_results": _not_evaluated_oracle_results(command, blocked_reason),
             **_command_oracle_profile(command),
         }
         for command in contract.commands
@@ -170,13 +242,17 @@ def _blocked_case(contract: CaseContract, root: Path, evidence_dir: Path, starte
         "title": contract.title,
         "status": "BLOCK",
         "partial_probe": _is_partial_probe(contract) or bool(oracle_profile["oracle_partial"]),
+        "official_result": False,
+        "truth_status": "BLOCK",
         "commands": command_results,
         "evidence": [],
         "contract_hash": contract.contract_hash,
         "started_at": started_at,
         "ended_at": ended_at,
         "exit_code": 2,
-        "blocked_reason": "review_required_before_run",
+        "blocked_reason": blocked_reason,
+        "environment_profile": _safe_environment_profile(environment_profile),
+        **(blocked_details or {}),
         **oracle_profile,
     }
     result_path = evidence_dir / "result.json"
@@ -186,7 +262,12 @@ def _blocked_case(contract: CaseContract, root: Path, evidence_dir: Path, starte
     return payload
 
 
-def _run_command(command: CommandContract, root: Path, evidence_dir: Path) -> dict[str, Any]:
+def _run_command(
+    command: CommandContract,
+    root: Path,
+    evidence_dir: Path,
+    environment_profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     stdout_path = evidence_dir / f"{command.id}.stdout.log"
     stderr_path = evidence_dir / f"{command.id}.stderr.log"
     rc_path = evidence_dir / f"{command.id}.rc"
@@ -233,7 +314,7 @@ def _run_command(command: CommandContract, root: Path, evidence_dir: Path) -> di
             capture_output=True,
             check=False,
             timeout=timeout_sec,
-            env=_runner_env(),
+            env=_runner_env(environment_profile),
         )
         exit_code = completed.returncode
         stdout = completed.stdout
@@ -248,6 +329,10 @@ def _run_command(command: CommandContract, root: Path, evidence_dir: Path) -> di
         )
         status = "PASS" if all(result["passed"] for result in oracle_results) else "FAIL"
         blocked_reason = None
+        if exit_code in {126, 127} and command.expected_exit_code not in {126, 127}:
+            status = "BLOCK"
+            blocked_reason = "executable_not_found" if exit_code == 127 else "executable_not_executable"
+            oracle_results = _not_evaluated_oracle_results(command, blocked_reason)
     except subprocess.TimeoutExpired as exc:
         duration_ms = (time.monotonic() - monotonic_started) * 1000
         exit_code = 124
@@ -484,11 +569,16 @@ def _redacted_secret(value: str) -> str:
     return "[REDACTED]"
 
 
-def _runner_env() -> dict[str, str]:
+def _runner_env(environment_profile: dict[str, Any] | None = None) -> dict[str, str]:
     env: dict[str, str] = {}
     for key, value in os.environ.items():
         if key in ENV_ALLOWLIST or key.startswith("QUALITY_PILOT_"):
             env[key] = value
+    configured = environment_profile.get("configured", {}) if isinstance(environment_profile, dict) else {}
+    names = [configured.get("target_host_env"), *(configured.get("credential_envs") or [])]
+    for name in names:
+        if isinstance(name, str) and name and name in os.environ:
+            env[name] = os.environ[name]
     env.setdefault("PATH", os.environ.get("PATH", "/usr/bin:/bin"))
     return env
 

@@ -11,7 +11,12 @@ from .config import ProjectConfig, json_dumps
 from .contracts import load_contracts
 from .gitea import GiteaClient, gitea_config_from_project
 from .gitea_ledger import reconcile_gitea_mcp_write_results, record_gitea_mcp_write_request, write_ledger_path
-from .issues import dedupe_issues, load_issue_snapshot
+from .issues import (
+    dedupe_issues,
+    load_issue_snapshot,
+    local_case_work_item_path,
+    local_failure_report_path,
+)
 from .runner import utc_now
 from .subagents import text_generation_handoff
 
@@ -81,6 +86,51 @@ def plan_fix_issue(config: ProjectConfig, *, issue_id: int) -> dict[str, Any]:
     return {**plan, "plan_path": _relative_or_str(path, config.root)}
 
 
+def plan_fix_case(config: ProjectConfig, *, case_id: str) -> dict[str, Any]:
+    """Plan a local case-driven fix when no remote Gitea issue exists yet."""
+    contracts = {contract.case_id: contract for contract in load_contracts(config.paths.cases)}
+    contract = contracts.get(case_id)
+    latest_results = _latest_results_for_cases(config, [case_id])
+    result = latest_results[-1] if latest_results else None
+    blockers: list[str] = []
+    if contract is None:
+        blockers.append("case_not_found")
+    if result is None:
+        blockers.append("case_evidence_required")
+    elif str(result.get("status") or "").upper() not in {"FAIL", "BLOCK"}:
+        blockers.append("case_not_failed")
+    local_work_item = local_case_work_item_path(config, case_id)
+    plan = {
+        "schema": "quality-pilot.fix-plan.v1",
+        "status": "blocked" if blockers else "ready",
+        "workflow_mode": "local_case_fix",
+        "issue_id": None,
+        "issue": None,
+        "case_ids": [case_id],
+        "local_work_item_path": _relative_or_str(local_work_item, config.root),
+        "local_report_path": _relative_or_str(local_failure_report_path(config), config.root),
+        "latest_results": latest_results,
+        "push_pr_blockers": ["remote_issue_id_required_before_pr"],
+        "branch": None,
+        "base_branch": config.data.get("project", {}).get("default_branch", "main"),
+        "blockers": blockers,
+        "duplicate_issue_ids": [],
+        "preflight": [
+            f"/quality-pilot cases run {case_id}",
+            "/quality-pilot cases generate --growing",
+        ],
+        "handoff": (
+            "Inspect the local failure work item, make the minimal product change, and rerun the linked case."
+            if not blockers
+            else "Resolve the local case evidence blocker before attempting a fix."
+        ),
+    }
+    path = fix_plan_path(config)
+    config.paths.state.mkdir(parents=True, exist_ok=True)
+    path.write_text(json_dumps(plan) + "\n", encoding="utf-8")
+    return {**plan, "plan_path": _relative_or_str(path, config.root)}
+
+
 def run_fix_issue(config: ProjectConfig, *, issue_id: int) -> dict[str, Any]:
     plan = plan_fix_issue(config, issue_id=issue_id)
     if plan["status"] != "ready":
@@ -103,6 +153,31 @@ def run_fix_issue(config: ProjectConfig, *, issue_id: int) -> dict[str, Any]:
         "case_ids": plan["case_ids"],
         "push_pr_blockers": plan.get("push_pr_blockers", []),
         "instructions": _fix_handoff_instructions(plan),
+    }
+    path = config.paths.state / FIX_RUN_NAME
+    path.write_text(json_dumps(payload) + "\n", encoding="utf-8")
+    return {**payload, "handoff_path": _relative_or_str(path, config.root)}
+
+
+def run_fix_case(config: ProjectConfig, *, case_id: str) -> dict[str, Any]:
+    plan = plan_fix_case(config, case_id=case_id)
+    if plan["status"] != "ready":
+        return {"status": "blocked", "error": "local_case_fix_plan_blocked", "plan": plan}
+    payload = {
+        "schema": "quality-pilot.fix-run-handoff.v1",
+        "status": "handoff",
+        "workflow_mode": "local_case_fix",
+        "issue_id": None,
+        "case_ids": [case_id],
+        "local_work_item_path": plan.get("local_work_item_path"),
+        "local_report_path": plan.get("local_report_path"),
+        "push_pr_blockers": plan.get("push_pr_blockers", []),
+        "instructions": [
+            "Read the local SWQA failure work item before changing product code.",
+            "Make the minimal product change needed for the failing testcase.",
+            f"Rerun /quality-pilot cases run {case_id} and inspect the resulting evidence.",
+            "Obtain or create a remote Gitea issue before requesting a product PR.",
+        ],
     }
     path = config.paths.state / FIX_RUN_NAME
     path.write_text(json_dumps(payload) + "\n", encoding="utf-8")

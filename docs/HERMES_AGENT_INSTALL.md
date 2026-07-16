@@ -71,12 +71,13 @@ companion `SKILL.md`；若使用者已經有自己的 `grill-me`，安裝器不�
 
 重掃並重啟後，在輸入框鍵入 `/quality-pilot` 尚未按 Enter 時，Hermes 會顯示輸入期下拉補全。第一列是裸指令總覽，後面可沿著 nested tree 繼續選擇 `cases generate`、`publish wiki status`、`close-loop heartbeat`，leaf command 也會提示 `--init`、`--growing` 等安全選項。這個選單來自 `SKILL.md` 的 `metadata.hermes.completion`，不是 dispatcher 回傳後的 `next_actions`。若舊版 Hermes 只顯示 `/quality-pilot` 名稱而沒有子功能，需更新 Hermes 的 slash completer；本環境目前已在 `/usr/local/lib/hermes-agent` 套用這項 completion integration，日後更新 Hermes 時需保留同等支援。
 
-涉及需求判斷、issue 分析、測試策略、case 生成/審查/執行、close-loop、發布、tracker
-或 subagent 的 `/quality-pilot` workflow，系統會強制執行已安裝的 `grill-me`
-companion 作為 preflight。使用者不需要另外輸入 `/grill-me`；Hermes 會自行完成訪談、
-等待回答後才呼叫 dispatcher。只有 `help`、`doctor`、`audit state`、`report status/json`、
-`cases list`、`cases validate` 與輸入完整 contract 的 `cases run <case_id>` 可以 bypass。
-若 companion 缺少，流程會停止並回報 `grill_me_required`，不會靜默改走一般 clarify。
+只有生產型 `/quality-pilot` workflow 會強制執行已安裝的 `grill-me` companion：
+`setup`、`doctor --fix`、`environment configure`、`issues sync/create-from-failure/fix`、所有 `cases generate ...`、`cases push-pr`、
+`publish wiki plan/apply`、所有 `close-loop ...`、`tracker plan-write` 與
+`subagent configure`。使用者不需要另外輸入 `/grill-me`；Hermes 會自行完成訪談、等待回答
+後才呼叫 dispatcher。status/list/report/validate、Wiki status、issue show 與已明確的
+`cases run <case_id>` 不會觸發 gate。若 production scope 缺少 companion，流程會停止並
+回報 `grill_me_required`，不會靜默改走一般 clarify。
 
 再確認：
 
@@ -101,15 +102,22 @@ companion 作為 preflight。使用者不需要另外輸入 `/grill-me`；Hermes
 /quality-pilot setup
 /quality-pilot doctor
 /quality-pilot doctor --fix
+/quality-pilot environment status
+/quality-pilot environment configure --mode <local|remote>
 /quality-pilot audit state
 
 /quality-pilot issues sync
 /quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]
 /quality-pilot issues status
 /quality-pilot issues report
+/quality-pilot issues create-from-failure --local --case <case_id>
+/quality-pilot issues create-from-failure --remote --case <case_id>
+/quality-pilot issues create-from-failure --local --all
+/quality-pilot issues create-from-failure --remote --all
 /quality-pilot issues show <issue_id>
 /quality-pilot issues fix --all
 /quality-pilot issues fix --issue <id>
+/quality-pilot issues fix --case <case_id>
 /quality-pilot issues fix --issue <id> --push-pr
 
 /quality-pilot cases generate --init
@@ -190,11 +198,13 @@ QUALITY_PILOT_HERMES_MCP_SERVERS=gitea,redmine
 
 ## Gitea MCP Workflow
 
-MCP backend 在 V1 只允許三件事：
+MCP backend 在 V1 只允許五件事：
 
 1. 讀 Gitea issues snapshot，供 `/quality-pilot issues sync` 使用。
 2. 在 `/quality-pilot issues sync --redmine-issues ...` gate 通過後，依 gated `mcp_issue_write_request` 建立或更新 linked Gitea issues。
-3. 在 `/quality-pilot publish wiki apply` gate 通過後，只更新設定中的 Wiki page。
+3. 在明確的 `/quality-pilot issues create-from-failure --remote ...` gate 通過後，依 gated `mcp_issue_write_request` 建立由 official FAIL/BLOCK 產生的新 Gitea issue；`--local` 永遠不建立遠端 request。
+4. 在 `/quality-pilot issues report` gate 通過後，更新 linked FAIL/BLOCK evidence。
+5. 在 `/quality-pilot publish wiki apply` gate 通過後，只更新設定中的 Wiki page。
 
 ### Issue Sync
 
@@ -205,6 +215,21 @@ MCP backend 在 V1 只允許三件事：
 3. Hermes 再執行 `/quality-pilot issues sync`。
 
 AI Quality Pilot 會負責 mirror、dedupe、prune、closed issue 移除、remote duplicate action plan。Hermes 不可以把 MCP read 當作 sync 完成。
+
+### Failed Case to Issue
+
+`/quality-pilot issues report` 會同時顯示 linked evidence 與沒有 tracker mapping 的 standalone official FAIL/BLOCK。若輸出有 `standalone_issue_create_candidate_count > 0`，使用：
+
+```text
+/quality-pilot issues create-from-failure --local --case <case_id>
+/quality-pilot issues create-from-failure --remote --case <case_id>
+/quality-pilot issues create-from-failure --local --all
+/quality-pilot issues create-from-failure --remote --all
+```
+
+`--local` 只產生本地完整技術報告；`--remote` 會先同時產生這份本地報告，再建立 gated `mcp_issue_write_request`。Hermes 必須確認每個 action 的 `operation: gitea.issue.create`、`action_safety_class: new_issue_from_failed_case` 與 `write_gate_result.allowed: true`，並確認 body 是不含 credentials、token、工作站路徑、內部 run identifier 的完整 SWQA 報告，再用 Gitea MCP 建立 issue，將結果寫入 `mcp_issue_write_result_path`。完成後重跑 `/quality-pilot issues sync`。`partial_probe` 預設排除，只有明確加 `--include-partial` 才納入。
+
+後續修復使用同一個通用入口：remote Gitea work item 使用 issue ID；local failure work item 使用 testcase ID，兩者分別位於 `.quality-pilot-project/issues/remote/` 與 `.quality-pilot-project/issues/local/`，由 `/quality-pilot issues fix --issue <id>` 或 `/quality-pilot issues fix --case <case_id>` 消費。
 
 ### Wiki Apply
 
@@ -237,7 +262,7 @@ Hermes 接著在同一個 `/quality-pilot publish wiki apply` 使用者流程裡
 3. 將 MCP 結果 JSON 寫入 `mcp_write_result_path`。
 4. 回覆使用者結果，建議 `/quality-pilot publish wiki status`。
 
-不要暴露第二個 completion 指令。Wiki apply 不可以建立 issue comment、建立 issue、建立 PR 或修改任意 Wiki page。唯一例外是 `/quality-pilot issues sync --redmine-issues ...` 回傳 gated `mcp_issue_write_request` 時，Hermes 可以在同一流程用 Gitea MCP 建立或更新 linked issue；仍禁止任意 comment、edit、close/reopen issue 或建立 PR。
+不要暴露第二個 completion 指令。Wiki apply 不可以建立 issue comment、建立 issue、建立 PR 或修改任意 Wiki page。`/quality-pilot issues sync --redmine-issues ...` 與明確的 `/quality-pilot issues create-from-failure --remote ...` 回傳 gated `mcp_issue_write_request` 時，Hermes 可以在同一流程用 Gitea MCP 建立或更新 linked/failed-case issue；`--local` 完全不進入 MCP 寫入流程。仍禁止任意 comment、edit、close/reopen issue 或建立 PR。
 
 ## Redmine MCP Workflow
 

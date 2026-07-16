@@ -52,8 +52,8 @@ pipeline:
 V1 implements the deterministic order with Hermes MCP handoff files for remote
 state. The engine validates, mirrors, plans, gates, and persists request/result
 JSON; it does not store tracker tokens or write directly through Gitea/Redmine
-HTTP. Hermes MCP applies only the gated request payloads for linked Gitea issue
-create/update and Wiki updates.
+HTTP. Hermes MCP applies only the gated request payloads for linked or
+failure-derived Gitea issue create/update and Wiki updates.
 
 ## Four-axis truth model
 
@@ -76,6 +76,30 @@ repair before all four axes are present.
 The current close-loop runner marks `health_status: NOT_EVALUATED` because it
 does not execute the `doctor` health checks. QA and write-gate outcomes never
 stand in for independent component health.
+
+## Environment-confirmed execution
+
+Repository analysis can infer a likely executable, but it cannot infer whether
+that executable is allowed to touch the checkout, an isolated lab, or a remote
+target. Production flows therefore use a mandatory `grill-me` interview before
+generation or prepared-environment execution. The answers are persisted as a
+redacted `runtime` environment profile:
+
+```text
+grill-me -> setup -> reconcile repo analysis -> environment configure
+         -> environment status -> doctor -> cases generate --init
+         -> cases validate -> cases run
+```
+
+The profile records `execution_mode` (`local` or `remote`), confirmation,
+entrypoint, fixture paths, credential env names, target env name, and the
+side-effect boundary. It never records raw target, credential, or secret
+values. A case with `quality_pilot.requires_prepared_environment: true` (which
+includes recognized README CLI operations) is preflighted against this profile.
+Missing mode/confirmation/fixture/credential/remote target or an unavailable
+executable produces `BLOCK` with a reason and evidence; it cannot become
+`PASS` merely because a shell process returned a superficially acceptable
+status. A run containing only partial probes is `HOLD`, not official `PASS`.
 
 `probe_outcome` is an auxiliary result for partial probes. When a run contains
 only `oracle_partial`/partial-probe cases, their observations are preserved in
@@ -154,6 +178,32 @@ Generated case commands must use the configured or inferred product binary/API/r
 ## Issue Sync And Fix Entry
 
 `issues sync` accepts Gitea issue snapshots and Redmine issue IDs. Redmine sync creates local Redmine mirrors, generates QA-focused summaries, and emits gated Gitea issue create/update requests. The canonical issue mapping ties Redmine ID, Gitea issue ID, case ID, evidence path, and PR linkage together.
+
+`issues create-from-failure` has an explicit publication boundary: `--local`
+writes a detailed local SWQA failure report and never creates a remote request;
+`--remote` writes that same full local report first, then renders one complete,
+independently readable report per failed case, redacts credentials and
+workstation-specific paths, and emits only a gated Gitea MCP issue-create
+handoff. The remote report is deliberately free of internal run identifiers and
+automation-specific evidence paths.
+
+The canonical local work-item layout is split by ownership rather than by
+report format:
+
+```text
+.quality-pilot-project/issues/
+├── local/                  # testcase-id work items and full technical reports
+│   ├── failure-report.md
+│   └── <case-id>.md
+├── remote/                 # synced Gitea issue-id mirrors
+│   └── <gitea-issue-id>.md
+└── <gitea-issue-id>.md     # legacy mirror kept for compatibility
+```
+
+`state/issues-snapshot.json` remains the synced remote truth; the two folders
+are local, inspectable work queues. The generic `issues fix` entry resolves a
+Gitea issue ID to the remote workflow or a testcase ID/name to the local case
+workflow. It never requires manually copying a report between folders.
 
 After sync, `issues fix --issue <id>` may start directly for feature/development issues even before a runnable case exists. That mode is marked `issue_driven_development`; PR creation remains blocked until acceptance cases/evidence are available.
 

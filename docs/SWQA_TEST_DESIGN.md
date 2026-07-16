@@ -353,6 +353,20 @@ safe_repro_order:
 
 If a command can mutate external state, evidence must explain how the run avoided or controlled side effects.
 
+## Environment gate and README reproduction
+
+README instructions are first-class black-box input. The generator should
+extract safe, documented CLI operations and preserve their command arguments,
+expected behavior, and fixture requirements as `readme_cli_operation` seeds.
+Before executing those cases, Hermes must run the mandatory `grill-me`
+interview and persist a confirmed local or remote environment profile. The
+profile must identify the product entrypoint, fixture/config paths, credential
+environment variable names, remote target environment variable (if any), and
+side-effect boundary. Missing preparation is an infrastructure `BLOCK`, not a
+product `PASS`; a command-not-found or non-executable entrypoint is also
+`BLOCK`. Exit-only probes remain supplemental evidence and produce `HOLD` when
+they are the only observations in a run.
+
 ## Target policy: PASS/HOLD decision rule
 
 The rule below defines intended issue-level readiness. Structured command

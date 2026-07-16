@@ -108,6 +108,9 @@ tracker:
 
 runtime:
   primary_entrypoint: ""
+  # Must be confirmed by the user after the mandatory grill-me interview.
+  execution_mode: ""
+  environment_confirmed: false
   binary_env: QUALITY_PILOT_BINARY
   target_host_env: QUALITY_PILOT_TARGET_HOST
   fixture_paths: []

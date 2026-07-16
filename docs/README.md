@@ -17,14 +17,23 @@ input is required, the payload includes `hermes_needs_input`;
 Hermes should call `clarify` only for facts the repo, config, tracker snapshots,
 and existing state cannot establish.
 
-For any workflow that involves requirements, issue analysis, test design,
-case generation/review/run, close-loop growth, publishing, tracker work, or
-subagent work, Hermes now enforces the installed `grill-me` companion as a
-blocking system-level preflight. The agent executes the interview itself (the
-user does not need to type `/grill-me`), waits for answers, and carries them
-into the subsequent Quality Pilot command. Only explicitly listed deterministic
-read-only commands bypass this gate; a missing companion stops with
-`grill_me_required`.
+For production-type workflows only—`setup`, `doctor --fix`, `environment configure`, issue sync/create-from-failure/fix,
+all `cases generate ...` variants, `cases push-pr`, Wiki plan/apply, all
+`close-loop ...` commands, `tracker plan-write`, and `subagent configure`—Hermes
+enforces the installed `grill-me` companion as a blocking system-level
+preflight. The agent executes the interview itself (the user does not need to
+type `/grill-me`), waits for answers, and carries them into the subsequent
+Quality Pilot command. Status/list/report/validate commands and explicit case
+runs do not trigger the gate; a missing companion in production scope stops
+with `grill_me_required`.
+
+The inferred runner is not an execution authorization. Before prepared cases
+or close-loop runs, the interview must establish local versus remote execution,
+entrypoint, README fixtures, credential/target env names, and the side-effect
+boundary. Hermes persists only those non-secret facts through
+`/quality-pilot environment configure --mode <local|remote>`. Until
+`/quality-pilot environment status` is ready, prepared-environment cases return
+`BLOCK`; exit-only probes alone return `HOLD`, never official `PASS`.
 
 ## Choose your journey
 

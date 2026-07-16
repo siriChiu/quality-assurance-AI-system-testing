@@ -169,7 +169,8 @@ expected: Safe probe remains runnable.
             code, payload = self.run_cli(["cases", "run", "--root", tmp, "--json", "ISSUE-99"])
 
             self.assertEqual(code, 0)
-            self.assertEqual(payload["status"], "PASS")
+            self.assertEqual(payload["status"], "HOLD")
+            self.assertEqual(payload["results"][0]["truth_status"], "HOLD")
             self.assertEqual(payload["id_resolution"]["resolved_case_id"], "REDMINE-145085")
             self.assertEqual(payload["results"][0]["case_id"], "REDMINE-145085")
 

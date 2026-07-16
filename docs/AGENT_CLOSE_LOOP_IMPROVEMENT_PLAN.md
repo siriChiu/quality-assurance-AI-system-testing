@@ -255,13 +255,14 @@ Acceptance:
 
 ### A5: Issues Report Agent
 
-Purpose: 將 run/evidence/traceability 整理成人類可讀、可協作、可修復的 report，並在 FAIL/BLOCK 時產生 linked Gitea issue evidence update payload。
+Purpose: 將 run/evidence/traceability 整理成人類可讀、可協作、可修復的 report；linked FAIL/BLOCK 產生 evidence update，沒有 tracker mapping 的 official FAIL/BLOCK 則產生明確的 failure-derived issue candidate。
 
 Already available:
 - `/quality-pilot issues report`
 - `reports/issues-report.md`
 - `state/issues-report.json`
 - gated `gitea.issue.update` evidence payload for linked FAIL/BLOCK latest results.
+- standalone official FAIL/BLOCK candidates plus explicit `create-from-failure --local` local report and `create-from-failure --remote` local report + gated, redacted, complete SWQA issue handoff.
 - `report status`
 - `issues status`
 - Wiki status.
@@ -281,6 +282,7 @@ Required changes:
   - fix readiness
   - recommended next module
 - Generate gated Gitea issue update payload for FAIL/BLOCK evidence when a linked issue exists.
+- Keep unlinked official FAIL/BLOCK visible; write a detailed local report with `--local`, and create new remote issue candidates only through explicit gated `--remote`; exclude partial probes by default.
 - Use subagent only for human wording; factual table from deterministic state.
 
 Acceptance:
@@ -629,6 +631,8 @@ Acceptance:
 | Redmine live full payload can be consumed | `redmine.py`, Hermes skill rule | Partial |
 | Gitea issue/Wiki writes are gated | `write_gate.py`, `wiki.py`, Gitea MCP request files | Partial |
 | Runtime can be inferred before asking user | `runtime_profile.py` | Mostly ready |
+| Environment is explicitly confirmed before prepared execution | `environment.py`, `environment status/configure`, runner preflight | Ready for new setup profiles; legacy profiles are surfaced for migration |
+| README operations are executable QA inputs | `case_generation.py` `readme_cli_operation`, runner environment gate | Partial; command extraction is deterministic, semantic depth still grows |
 | Placeholder cases are blocked | `generate_cases_init/growing` runtime gate | Ready for init/growing |
 | Redmine case generation avoids developer commands | `case_generation.py`, tests | Mostly ready |
 | Product-runtime generated command policy exists | `command_policy.py`, `case_generation.py`, `state_audit.py`, tests | Mostly ready |
@@ -668,6 +672,7 @@ Regression tests to add or keep:
 - Evidence truth:
   - stale evidence hash mismatch blocks PASS.
   - shallow single-command evidence without sibling/boundary/invalid/risk coverage yields HOLD/BLOCK.
+  - environment-unconfirmed prepared cases return BLOCK; command-not-found and missing fixtures are infrastructure evidence, never PASS.
 - Issues report:
   - active issue with no runnable case is blocker.
   - report includes Redmine/Gitea/case/evidence mapping.

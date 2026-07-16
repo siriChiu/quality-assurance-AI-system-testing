@@ -411,6 +411,7 @@ democtl = "demo.cli:main"
             self.assertEqual(payload["closed_issue_ids"], [2])
             self.assertEqual(payload["removed_mirror_ids"], [2])
             self.assertTrue((root / ".quality-pilot-project" / "issues" / "1.md").exists())
+            self.assertTrue((root / ".quality-pilot-project" / "issues" / "remote" / "1.md").exists())
             self.assertFalse(stale.exists())
             snapshot = json.loads((root / ".quality-pilot-project" / "state" / "issues-snapshot.json").read_text(encoding="utf-8"))
             self.assertEqual(snapshot["items"][0]["issue_id"], 1)
@@ -774,6 +775,89 @@ democtl = "demo.cli:main"
             self.assertEqual(entry["source_module"], "issues_report")
             self.assertEqual(entry["redmine_issue_id"], 144780)
 
+    def test_standalone_failure_is_reported_and_has_explicit_issue_create_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.init_gitea_project(tmp)
+            case = root / ".quality-pilot-project" / "cases" / "FAIL-001.yaml"
+            case.write_text(
+                """case_id: FAIL-001
+title: Standalone product failure
+commands:
+  - id: reproduce
+    run: python3 --version
+    expected_exit_code: 99
+    assertions:
+      - type: stdout
+        operator: contains
+        expected: Python
+expected: The product command should fail with the documented error.
+""",
+                encoding="utf-8",
+            )
+
+            code, run_payload = self.run_cli(["cases", "run", "--root", tmp, "--json", "FAIL-001"])
+            self.assertEqual(code, 1)
+            self.assertEqual(run_payload["status"], "FAIL")
+
+            code, report_payload = self.run_cli(["issues", "report", "--root", tmp, "--json"])
+            self.assertEqual(code, 0)
+            self.assertEqual(report_payload["issue_count"], 0)
+            self.assertEqual(report_payload["standalone_failure_count"], 1)
+            self.assertEqual(report_payload["standalone_issue_create_candidate_count"], 1)
+            self.assertIn("FAIL-001", report_payload["standalone_failure_candidates"][0]["case_id"])
+
+            code, create_payload = self.run_cli([
+                "issues", "create-from-failure", "--root", tmp, "--remote", "--case", "FAIL-001", "--json",
+            ])
+            self.assertEqual(code, 0)
+            self.assertEqual(create_payload["status"], "needs_mcp_apply")
+            self.assertEqual(create_payload["issue_create_count"], 1)
+            request = json.loads((root / create_payload["mcp_issue_write_request_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(request["operation"], "gitea.issue.create_from_failure")
+            self.assertEqual(request["safety"]["allowed_targets"], ["issues"])
+            action = request["actions"][0]
+            self.assertEqual(action["operation"], "gitea.issue.create")
+            self.assertEqual(action["case_id"], "FAIL-001")
+            self.assertTrue(action["write_gate_result"]["allowed"])
+            self.assertEqual(action["action_safety_class"], "new_issue_from_failed_case")
+            self.assertTrue(create_payload["local_report_written"])
+            self.assertTrue(create_payload["local_report_path"].endswith("issues/local/failure-report.md"))
+            self.assertTrue(any(path.endswith("issues/local/FAIL-001.md") for path in create_payload["local_case_work_items"]))
+            remote_local_report = (root / create_payload["local_report_path"]).read_text(encoding="utf-8")
+            self.assertIn("# Local SWQA Failure Report", remote_local_report)
+            self.assertIn("## Local Evidence References", remote_local_report)
+            self.assertIn("## Reproduction Procedure", action["body"])
+            self.assertIn("## Oracle / Verification Evidence", action["body"])
+            self.assertIn("## Risk and Follow-up", action["body"])
+            self.assertNotIn("AI Quality Pilot", action["body"])
+            self.assertNotIn(".quality-pilot-project", action["body"])
+
+            code, local_fix_payload = self.run_cli([
+                "issues", "fix", "--root", tmp, "--case", "FAIL-001", "--json",
+            ])
+            self.assertEqual(code, 0)
+            self.assertEqual(local_fix_payload["status"], "handoff")
+            self.assertEqual(local_fix_payload["workflow_mode"], "local_case_fix")
+            self.assertEqual(local_fix_payload["case_ids"], ["FAIL-001"])
+
+            code, local_payload = self.run_cli([
+                "issues", "create-from-failure", "--root", tmp, "--local", "--case", "FAIL-001", "--json",
+            ])
+            self.assertEqual(code, 0)
+            self.assertEqual(local_payload["status"], "local_report_ready")
+            self.assertEqual(local_payload["remote_write"], "not_requested")
+            self.assertIsNone(local_payload["mcp_issue_write_request"])
+            local_report = (root / local_payload["local_report_path"]).read_text(encoding="utf-8")
+            self.assertIn("## Local Evidence References", local_report)
+            self.assertIn("## Oracle / Verification Evidence", local_report)
+
+            code, second_payload = self.run_cli([
+                "issues", "create-from-failure", "--root", tmp, "--remote", "--case", "FAIL-001", "--json",
+            ])
+            self.assertEqual(code, 0)
+            self.assertEqual(second_payload["issue_create_count"], 0)
+            self.assertEqual(second_payload["skipped"][0]["reason"], "issue_create_already_requested")
+
     def test_cases_generate_redmine_issues_uses_user_confirmed_safe_probe_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self.init_gitea_project(tmp)
@@ -1040,7 +1124,8 @@ commands:
             self.write_issue_case(root)
             run_code, run_payload = self.run_cli(["cases", "run", "--root", tmp, "ISSUE-1", "--json"])
             self.assertEqual(run_code, 0)
-            self.assertEqual(run_payload["status"], "PASS")
+            self.assertEqual(run_payload["status"], "HOLD")
+            self.assertEqual(run_payload["results"][0]["truth_status"], "HOLD")
 
             payload = submit_fix_pr(load_project_config(root), issue_id=1, dry_run=True)
 
@@ -1075,7 +1160,8 @@ commands:
             self.write_issue_case(root)
             run_code, run_payload = self.run_cli(["cases", "run", "--root", tmp, "ISSUE-1", "--json"])
             self.assertEqual(run_code, 0)
-            self.assertEqual(run_payload["status"], "PASS")
+            self.assertEqual(run_payload["status"], "HOLD")
+            self.assertEqual(run_payload["results"][0]["truth_status"], "HOLD")
 
             code, payload = self.run_cli(["issues", "fix", "--root", tmp, "--issue", "1", "--push-pr", "--json"])
 
@@ -1178,7 +1264,8 @@ commands:
 
             code, run_one = self.run_cli(["cases", "run", "--root", tmp, "--json", first_case])
             self.assertEqual(code, 0)
-            self.assertEqual(run_one["status"], "PASS")
+            self.assertEqual(run_one["status"], "HOLD")
+            self.assertEqual(run_one["results"][0]["truth_status"], "HOLD")
             self.assertTrue(run_one["results"][0]["evidence"])
 
     def test_cases_generate_growing_aggressively_uses_pr_git_code_and_monkey_sensors(self) -> None:
@@ -1433,7 +1520,8 @@ democtl = "demo.cli:main"
 
             code, run_one = self.run_cli(["cases", "run", "--root", tmp, "--json", first_case])
             self.assertEqual(code, 0)
-            self.assertEqual(run_one["status"], "PASS")
+            self.assertEqual(run_one["status"], "HOLD")
+            self.assertEqual(run_one["results"][0]["truth_status"], "HOLD")
             self.assertEqual(run_one["results"][0]["commands"][0]["id"], "safe_probe")
 
             code, second = self.run_cli([
@@ -1507,7 +1595,8 @@ democtl = "demo.cli:main"
             first_case = generated["generated"][0]["case_id"]
             code, run_one = self.run_cli(["cases", "run", "--root", tmp, "--json", first_case])
             self.assertEqual(code, 0)
-            self.assertEqual(run_one["status"], "PASS")
+            self.assertEqual(run_one["status"], "HOLD")
+            self.assertEqual(run_one["results"][0]["truth_status"], "HOLD")
 
     def test_generated_negative_case_detects_invalid_option_acceptance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

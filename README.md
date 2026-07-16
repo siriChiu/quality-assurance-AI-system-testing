@@ -155,7 +155,9 @@ source checkout。依使用目的選一條 happy path。
 Local repo QA：
 
 ```text
-/quality-pilot setup
+/quality-pilot setup   # Hermes 先強制 grill-me；同輪答案會帶入環境設定
+/quality-pilot environment configure --mode <local|remote> --entrypoint '<product command>' --side-effect-boundary '<readonly/sandbox boundary>'
+/quality-pilot environment status
 /quality-pilot doctor
 /quality-pilot cases generate --init
 ```
@@ -214,7 +216,22 @@ Important behavior:
 
 ## Runtime Profile
 
-`doctor` and `setup` analyze the repo before asking the user anything. They inspect package metadata, README command examples, common executable output paths, Go `cmd/*`, Python console scripts, npm bins, Cargo bins, and existing project state.
+`doctor` and `setup` analyze the repo before asking repo-derived runtime questions. They inspect package metadata, README command examples, common executable output paths, Go `cmd/*`, Python console scripts, npm bins, Cargo bins, and existing project state. For the initial Hermes `/quality-pilot setup` gate, grill-me may first collect the user's known local/remote and safety facts; after setup/doctor analysis, Hermes reconciles the inferred runner with those answers. The inferred executable only identifies a candidate runner; it does not identify a safe test environment.
+
+For an actual test run, Hermes performs the mandatory `grill-me`
+interview and confirms local versus remote execution, the product entrypoint,
+README fixtures/config, credential env names, remote target env name, and the
+side-effect boundary. It then persists the redacted profile:
+
+```text
+/quality-pilot environment status
+/quality-pilot environment configure --mode <local|remote>
+```
+
+Cases requiring a prepared environment are blocked until this profile is ready.
+README command failures, missing binaries, missing fixtures, and invalid
+commands are recorded as `BLOCK`/`FAIL` with evidence; they are never treated
+as a success solely because no assertion was written.
 
 If a product executable is found, `runtime_profile.status` becomes `ready_inferred` and Hermes should not ask the user to confirm the binary path. If no runnable entrypoint can be proven, `cases generate --init` and `--growing` return `needs_input`, write no placeholder YAML, and show bullet-listed questions for only the missing external facts.
 

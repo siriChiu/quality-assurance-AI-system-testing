@@ -17,6 +17,8 @@ from .runner import utc_now
 ISSUE_SNAPSHOT_NAME = "issues-snapshot.json"
 TRACEABILITY_MAP_NAME = "traceability-map.json"
 MCP_ISSUES_ENV = "QUALITY_PILOT_GITEA_MCP_ISSUES_JSON"
+LOCAL_ISSUES_DIR_NAME = "local"
+REMOTE_ISSUES_DIR_NAME = "remote"
 
 
 class IssueSyncError(RuntimeError):
@@ -50,29 +52,40 @@ def sync_issues(
     issues, source_info = _load_input_issues(config, issues_json)
     normalized = [normalize_issue(issue) for issue in issues]
     config.paths.issues.mkdir(parents=True, exist_ok=True)
+    remote_issue_dir(config).mkdir(parents=True, exist_ok=True)
     config.paths.state.mkdir(parents=True, exist_ok=True)
 
     open_issues = [issue for issue in normalized if issue.open]
     closed_ids = sorted(issue.issue_id for issue in normalized if not issue.open)
     existing_mirrors = {int(path.stem): path for path in config.paths.issues.glob("*.md") if path.stem.isdigit()}
+    existing_remote_mirrors = {int(path.stem): path for path in remote_issue_dir(config).glob("*.md") if path.stem.isdigit()}
     removed: list[int] = []
     mirror_paths: list[str] = []
+    remote_mirror_paths: list[str] = []
     closed_archive_paths: list[str] = []
 
     for issue_id in closed_ids:
         path = existing_mirrors.get(issue_id)
-        if path and path.exists():
+        remote_path = existing_remote_mirrors.get(issue_id)
+        if (path and path.exists()) or (remote_path and remote_path.exists()):
             removed.append(issue_id)
             if not dry_run:
-                archived = archive_closed_issue(config, issue_id=issue_id, mirror_path=path)
-                closed_archive_paths.append(_relative_or_str(archived, config.root))
-                path.unlink()
+                if path and path.exists():
+                    archived = archive_closed_issue(config, issue_id=issue_id, mirror_path=path)
+                    closed_archive_paths.append(_relative_or_str(archived, config.root))
+                    path.unlink()
+                if remote_path and remote_path.exists():
+                    remote_path.unlink()
 
     for issue in open_issues:
         path = issue_mirror_path(config, issue.issue_id)
+        remote_path = remote_issue_mirror_path(config, issue.issue_id)
         mirror_paths.append(_relative_or_str(path, config.root))
+        remote_mirror_paths.append(_relative_or_str(remote_path, config.root))
         if not dry_run:
-            path.write_text(render_issue_mirror(issue, config), encoding="utf-8")
+            mirror = render_issue_mirror(issue, config)
+            path.write_text(mirror, encoding="utf-8")
+            remote_path.write_text(mirror, encoding="utf-8")
 
     snapshot = build_issue_snapshot(config, open_issues)
     snapshot_path = issue_snapshot_path(config)
@@ -90,11 +103,14 @@ def sync_issues(
         "snapshot_path": _relative_or_str(snapshot_path, config.root),
         "traceability_map_path": _relative_or_str(traceability_path, config.root),
         "issues_dir": _relative_or_str(config.paths.issues, config.root),
+        "local_issues_dir": _relative_or_str(local_issue_dir(config), config.root),
+        "remote_issues_dir": _relative_or_str(remote_issue_dir(config), config.root),
         "open_active_issue_ids": [issue.issue_id for issue in open_issues],
         "closed_issue_ids": closed_ids,
         "closed_archive_paths": closed_archive_paths,
         "removed_mirror_ids": removed,
         "mirror_paths": mirror_paths,
+        "remote_mirror_paths": remote_mirror_paths,
         "open_count": len(open_issues),
         "closed_count": len(closed_ids),
     }
@@ -102,7 +118,14 @@ def sync_issues(
 
 def issue_status(config: ProjectConfig, *, persist_traceability: bool = True) -> dict[str, Any]:
     snapshot = load_issue_snapshot(config)
-    mirrors = sorted(path for path in config.paths.issues.glob("*.md")) if config.paths.issues.exists() else []
+    mirrors: list[Path] = []
+    local_mirrors: list[Path] = []
+    remote_mirrors: list[Path] = []
+    if config.paths.issues.exists():
+        mirrors.extend(path for path in config.paths.issues.glob("*.md"))
+        remote_mirrors = [path for path in remote_issue_dir(config).glob("*.md") if path.is_file()]
+        mirrors.extend(remote_mirrors)
+        local_mirrors = [path for path in local_issue_dir(config).glob("*.md") if path.is_file()]
     readiness = issue_sync_readiness(config)
     write_ledger = reconcile_gitea_mcp_write_results(config)
     traceability_map = build_traceability_map(config, snapshot)
@@ -123,8 +146,12 @@ def issue_status(config: ProjectConfig, *, persist_traceability: bool = True) ->
             "entries": write_ledger.get("entries", []),
         },
         "issues_dir": _relative_or_str(config.paths.issues, config.root),
+        "local_issues_dir": _relative_or_str(local_issue_dir(config), config.root),
+        "remote_issues_dir": _relative_or_str(remote_issue_dir(config), config.root),
         "open_count": len(snapshot.get("items", [])),
-        "mirror_count": len(mirrors),
+        "mirror_count": len({path.stem for path in mirrors}),
+        "local_work_item_count": len([path for path in local_mirrors if path.stem != "failure-report"]),
+        "remote_mirror_count": len(remote_mirrors),
         "open_active_issue_ids": [item.get("issue_id") for item in snapshot.get("items", [])],
         "synced_at": snapshot.get("synced_at"),
         "issue_sync": readiness,
@@ -290,6 +317,7 @@ def build_issue_snapshot(config: ProjectConfig, open_issues: list[NormalizedIssu
                 "comment_count": len(issue.comments),
                 "pull_requests": issue.pull_requests,
                 "mirror": _relative_or_str(issue_mirror_path(config, issue.issue_id), config.root),
+                "remote_mirror": _relative_or_str(remote_issue_mirror_path(config, issue.issue_id), config.root),
                 "case_id": case_id_for_issue(issue),
                 "fingerprint": issue_fingerprint(issue.title, issue.body),
             }
@@ -380,6 +408,31 @@ def traceability_map_path(config: ProjectConfig) -> Path:
 
 def issue_mirror_path(config: ProjectConfig, issue_id: int) -> Path:
     return config.paths.issues / f"{issue_id}.md"
+
+
+def local_issue_dir(config: ProjectConfig) -> Path:
+    return config.paths.issues / LOCAL_ISSUES_DIR_NAME
+
+
+def remote_issue_dir(config: ProjectConfig) -> Path:
+    return config.paths.issues / REMOTE_ISSUES_DIR_NAME
+
+
+def local_failure_report_path(config: ProjectConfig) -> Path:
+    return local_issue_dir(config) / "failure-report.md"
+
+
+def local_failure_metadata_path(config: ProjectConfig) -> Path:
+    return config.paths.state / "failure-report.json"
+
+
+def local_case_work_item_path(config: ProjectConfig, case_id: str) -> Path:
+    safe_case_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(case_id).strip()) or "unknown-case"
+    return local_issue_dir(config) / f"{safe_case_id}.md"
+
+
+def remote_issue_mirror_path(config: ProjectConfig, issue_id: int) -> Path:
+    return remote_issue_dir(config) / f"{issue_id}.md"
 
 
 def archive_closed_issue(config: ProjectConfig, *, issue_id: int, mirror_path: Path) -> Path:

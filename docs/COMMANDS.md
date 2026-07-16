@@ -4,17 +4,21 @@ AI Quality Pilot 的公開入口是 Hermes 聊天室中的 `/quality-pilot ...`�
 
 直接輸入 `/quality-pilot` 不需要再補 `help`：Hermes 會開啟繁中總覽，並自動顯示最多四個依目前狀態排序的建議功能。選單中的唯讀動作可直接執行；涉及寫檔、測試、MCP、Wiki、issue 或 PR 的項目會標示「需確認」。
 
-在 Hermes 輸入框中，輸入 `/quality-pilot` 尚未按 Enter 時也會出現即時下拉補全：第一列保留裸指令的總覽入口，後面列出 `help`、`setup`、`doctor`、`issues`、`cases`、`publish`、`close-loop`、`report`、`tracker` 與 `subagent`。輸入空格後會沿著 nested command tree 繼續補全，例如 `/quality-pilot cases generate`、`/quality-pilot publish wiki status`、`/quality-pilot close-loop heartbeat`；leaf command 後也會提示安全選項如 `--init`、`--growing`。按 Tab 或點選即可帶入建議；按 Enter 仍會執行目前輸入的指令。
+在 Hermes 輸入框中，輸入 `/quality-pilot` 尚未按 Enter 時也會出現即時下拉補全：第一列保留裸指令的總覽入口，後面列出 `help`、`setup`、`doctor`、`environment`、`issues`、`cases`、`publish`、`close-loop`、`report`、`tracker` 與 `subagent`。輸入空格後會沿著 nested command tree 繼續補全，例如 `/quality-pilot environment configure`、`/quality-pilot cases generate`、`/quality-pilot publish wiki status`、`/quality-pilot close-loop heartbeat`；leaf command 後也會提示安全選項如 `--init`、`--growing`。按 Tab 或點選即可帶入建議；按 Enter 仍會執行目前輸入的指令。
+`environment` 也包含在同一棵 nested completion tree：輸入 `/quality-pilot environment` 後會建議 `status` 與 `configure`，並提示 `--mode local|remote`、`--entrypoint`、`--fixture` 等欄位。
 
 注意：`/reload-skills` 只會重新掃描 `SKILL.md` 與 skill map，不會重新載入已在記憶體中的 Hermes Python slash completer。若剛更新 Hermes completion integration，必須退出並重新啟動目前的 Hermes CLI/TUI process；只執行 `/reload-skills` 仍會看到舊的單一指令補全。
 
-涉及需求判斷、issue 分析、測試策略、case 生成/審查/執行、close-loop、發布、
-tracker 或 subagent 的 `/quality-pilot` workflow，會由 Hermes 系統級提示強制先執行
-已安裝的 `grill-me` companion skill。這不是建議，也不需要使用者另外輸入
-`/grill-me`；Hermes 必須完成訪談、等待回答，再把答案帶入 dispatcher。只有
-`help`、`doctor`、`audit state`、`report status/json`、`cases list`、`cases validate`
-與輸入完整 contract 的 `cases run <case_id>` 可以 bypass。缺少 companion 時必須停止並
-回報 `grill_me_required`，不能靜默退回一般 clarify 流程。
+只有生產型 `/quality-pilot` 指令會由 Hermes 系統級提示強制先執行已安裝的
+`grill-me` companion：`setup`、`doctor --fix`、`environment configure`、`issues sync/create-from-failure/fix`、所有
+`cases generate ...`、`cases push-pr`、`publish wiki plan/apply`、所有
+`close-loop ...`、`tracker plan-write` 與 `subagent configure`。這不是建議，也不需要
+使用者另外輸入 `/grill-me`；Hermes 必須完成訪談、等待回答，再把答案帶入 dispatcher。
+`status`、`list`、`report`、`validate`、Wiki status、issue show，以及已明確的
+`cases run <case_id>` 不會觸發 gate。缺少 companion 時必須停止並回報
+`grill_me_required`，不能靜默退回一般 clarify 流程。
+
+首次 `/quality-pilot setup` 的順序是 `grill-me -> setup -> reconcile repo analysis -> environment configure -> environment status`；先收集使用者已知的 local/remote、入口、fixture、credential env 名稱與副作用邊界，setup/doctor 完成 repo 分析後，再補問真正缺失的入口或 fixture。Hermes 應沿用同一輪答案，不要在同一回合重複 grill-me。這樣不會用 repo 推測冒充「已取得測試環境授權」。
 
 `/quality-pilot help` 是唯一 help 指令。不再支援子分類 help。
 
@@ -30,6 +34,8 @@ workflow entry points，但 resumable A0-A8 module session 仍是 Partial。
 /quality-pilot setup
 /quality-pilot doctor
 /quality-pilot doctor --fix
+/quality-pilot environment status
+/quality-pilot environment configure --mode <local|remote>
 /quality-pilot audit state
 
 /quality-pilot issues sync
@@ -81,11 +87,14 @@ workflow entry points，但 resumable A0-A8 module session 仍是 Partial。
 
 ```text
 /quality-pilot setup
+/quality-pilot environment configure --mode <local|remote> --entrypoint '<product command>' --side-effect-boundary 'readonly/sandbox boundary'
+/quality-pilot environment status
 /quality-pilot doctor
 /quality-pilot cases generate --init
 ```
 
-若 `doctor` 回報可安全修復的 config/overlay 缺口，才執行
+若 `environment status` 仍是 `needs_user_input`，不要執行準備環境的 case；先完成
+`grill-me` 訪談，再由 Hermes 寫入 `environment configure`。若 `doctor` 回報可安全修復的 config/overlay 缺口，才執行
 `/quality-pilot doctor --fix`。Generation 完成後，先看 `next_actions`；通常是
 `cases review`、`cases validate` 或執行一個已確認 side-effect boundary 的
 case。不要在 fresh repo 中無條件緊接著執行 `--growing`。
@@ -138,6 +147,7 @@ Heartbeat 只執行一次，不會安裝 12 小時計時器。Hermes 或外部 s
 | Group | Commands | Purpose |
 |---|---|---|
 | root | `help`, `setup`, `doctor`, `doctor --fix` | 看手冊、初始化、檢查/修復 config skeleton、檢查 Gitea/Redmine MCP readiness |
+| environment | `status`, `configure` | 確認 local/remote、入口、fixture、credential env 與副作用邊界；不保存秘密值 |
 | audit | `state` | 只讀檢查 overlay 語意一致性：case、evidence、issues、reports、MCP、subagent |
 | issues | `sync`, `status`, `report`, `show`, `fix` | 同步、去重、prune、issue QA report、Gitea evidence writeback handoff、修復 handoff、產品修復 PR |
 | cases | `generate`, `review`, `validate`, `list`, `run`, `push-pr` | 產生與執行 test case contracts，依 linked case/evidence 建產品修復或驗證 PR |
@@ -210,6 +220,12 @@ scheduler/Hermes 觸發，詳見 [Heartbeat runbook](HEARTBEAT_CRON.md)。
 /quality-pilot cases run
 ```
 
+執行前會檢查 environment profile。README 指南中可辨識的唯讀命令會被標記為
+`readme_cli_operation`，並保留原始命令與 fixture 要求；環境未確認、fixture
+不存在、remote target env 未設定、credential env 不存在或入口找不到時，case
+會回 `BLOCK`，不會執行後把錯誤包裝成 `PASS`。只有全為 partial probe 時，整體
+結果是 `HOLD`（partial 統計仍保留），不是正式 QA `PASS`。
+
 ## Issues
 
 `issues sync` 內建 sync、dedupe、prune 與遠端 duplicate action plan。closed/resolved issue 以遠端為事實來源：本地 active mirror 會移除，不留言、不 reopen。
@@ -219,20 +235,41 @@ scheduler/Hermes 觸發，詳見 [Heartbeat runbook](HEARTBEAT_CRON.md)。
 /quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]
 /quality-pilot issues status
 /quality-pilot issues report
+/quality-pilot issues create-from-failure --local --case <case_id>
+/quality-pilot issues create-from-failure --remote --case <case_id>
+/quality-pilot issues create-from-failure --local --all
+/quality-pilot issues create-from-failure --remote --all
 /quality-pilot issues show <issue_id>
+/quality-pilot issues fix --issue <id>
+/quality-pilot issues fix --case <case_id>
+/quality-pilot issues fix --all
 ```
 
 `issues sync --redmine-issues ...` 會透過 Hermes Redmine MCP snapshot 解析多個 Redmine issue ID，同步本地 Redmine mirror，產生 gated `mcp_issue_write_request`，並由 Hermes Gitea MCP 在同一流程建立或更新 linked Gitea issues。CLI engine 本身不保存 token，也不直接打 Gitea HTTP。
 
 `issues report` 會從 canonical issue map 和 latest-run 產生 `reports/issues-report.md` 與 `state/issues-report.json`。若 linked case 最新結果是 FAIL/BLOCK，會產生 gated `gitea.issue.update` evidence handoff，目標是 linked Gitea issue；內容是人類可讀摘要、reproduction command、result/evidence path 和下一步，不是 raw JSON。
 
+`issues report` 也會列出沒有 tracker mapping 的 standalone official FAIL/BLOCK。這些失敗不會因為 `issue_count: 0` 而被當成不存在；`partial_probe` 會另外標記，預設不直接建立產品缺陷 issue。要把正式失敗轉成 Gitea issue 建立 handoff，使用：
+
+```text
+/quality-pilot issues create-from-failure --local --case <case_id>
+/quality-pilot issues create-from-failure --remote --case <case_id>
+/quality-pilot issues create-from-failure --local --all
+/quality-pilot issues create-from-failure --remote --all
+```
+
+`--local` 只寫入 `issues/local/failure-report.md`、每個 testcase 的 local work item，以及 `state/failure-report.json`，不建立 Gitea request 或 issue ledger；`--remote` 會同時寫入同一份本地完整技術報告，再產生 gated `mcp_issue_write_request`。遠端每個 issue 都包含測試範圍、重現步驟、預期/實際結果、oracle evidence、風險與後續行動，並自動移除 credentials、token、工作站路徑與內部工具細節，讓沒有 Quality Pilot 的協作者也能獨立閱讀。Hermes 確認後以 Gitea MCP 建立 issue，再執行 `/quality-pilot issues sync`；partial/environment probe 只有明確加上 `--include-partial` 才會納入。
+
 產品修復與新功能開發 handoff 集中在 `issues fix`。`issues sync` 後即可對 synced issue 執行 `issues fix --issue <id>`；如果該 issue 尚未有 runnable linked case，會進入 issue-driven development handoff，要求先補 acceptance cases/evidence 再建立 PR：
 
 ```text
 /quality-pilot issues fix --issue 123
+/quality-pilot issues fix --case FAIL-001
 /quality-pilot issues fix --issue 123 --push-pr
 /quality-pilot issues fix --all
 ```
+
+`issues` 是後續修復流程的通用 work-item 入口：Gitea remote work item 使用 issue ID（例如 `123` 或 `ISSUE-123`），本地 failure work item 使用 testcase ID（例如 `FAIL-001`）。本地完整報告與 testcase work item 會放在 `.quality-pilot-project/issues/local/`；同步的 Gitea mirror 會放在 `.quality-pilot-project/issues/remote/`，根目錄下的舊 mirror 仍保留作為相容層。兩者都由 `issues fix` 消費，不需要人工搬移檔案。
 
 `--push-pr` 只有在 preflight、linked cases/evidence 或 issue-driven acceptance coverage、write gate 通過後才建立產品修復/新功能 PR。
 

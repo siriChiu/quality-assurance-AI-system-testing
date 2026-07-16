@@ -7,6 +7,7 @@ from typing import Any
 
 from .config import ProjectConfig
 from .contracts import select_contracts
+from .environment import environment_profile_status
 from .reports import render_status_report
 from .runner import RunContext, run_case, utc_now
 from .write_gate import evaluate_write_gate
@@ -63,7 +64,12 @@ def run_close_loop(
             _mark(steps, "select_scope", "PASS", {"case_count": len(contracts)})
         else:
             _mark(steps, "select_scope", "HOLD", {"case_count": 0, "reason": "no_case_contracts_selected"})
-        context = RunContext(root=config.root, evidence_dir=run_evidence_dir)
+        environment_profile = environment_profile_status(config)
+        context = RunContext(
+            root=config.root,
+            evidence_dir=run_evidence_dir,
+            environment_profile=environment_profile,
+        )
         for contract in contracts:
             result = run_case(contract, context, dry_run=dry_run)
             results.append(result)
@@ -110,6 +116,7 @@ def run_close_loop(
             config.paths.reports / "status.md",
             blocked_by_gate,
             gate_results,
+            environment_profile,
         )
         report_path = render_status_report(results, config.paths.reports / "status.md", latest_run=payload)
         payload["report_path"] = str(report_path)
@@ -155,6 +162,7 @@ def _summary_payload(
     report_path: Path,
     blocked_by_gate: int,
     gate_results: list[dict[str, Any]],
+    environment_profile: dict[str, Any],
 ) -> dict[str, Any]:
     counts = {"PASS": 0, "FAIL": 0, "BLOCK": 0, "ABORT": 0, "NOT_RUN": 0}
     partial_counts = {"PASS": 0, "FAIL": 0, "BLOCK": 0, "ABORT": 0, "NOT_RUN": 0}
@@ -174,6 +182,7 @@ def _summary_payload(
         "partial_probe_counts": partial_counts,
         "steps": steps,
         "results": results,
+        "environment_profile": environment_profile,
         "latest_run_json": None,
         "report_path": str(report_path),
         "tracker_writes": {"created": 0, "updated": 0, "blocked_by_gate": blocked_by_gate},

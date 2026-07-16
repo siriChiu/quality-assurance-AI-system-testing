@@ -43,6 +43,8 @@ tracker:
 
 runtime:
   primary_entrypoint: ""
+  execution_mode: ""          # local | remote; grill-me must confirm this
+  environment_confirmed: false
   binary_env: QUALITY_PILOT_BINARY
   target_host_env: QUALITY_PILOT_TARGET_HOST
   fixture_paths: []
@@ -90,7 +92,30 @@ health is unavailable. See [`CAPABILITY_MATRIX.md`](CAPABILITY_MATRIX.md).
 
 ## Runtime Profile
 
-`runtime` is intentionally user-overridable, but AI Quality Pilot analyzes the repo first and infers it when possible. If a product executable is found under common output paths such as `cmd/<name>/<name>`, `bin/<name>`, `dist/<name>`, or the repo root, `runtime_profile.status` becomes `ready_inferred` and no entrypoint question is asked.
+`runtime` is intentionally user-overridable, but AI Quality Pilot analyzes the repo first and infers it when possible. If a product executable is found under common output paths such as `cmd/<name>/<name>`, `bin/<name>`, `dist/<name>`, or the repo root, `runtime_profile.status` becomes `ready_inferred`; this only resolves a likely runner and does not authorize execution.
+
+Before any prepared-environment case runs, Hermes must use the mandatory
+`grill-me` interview to establish whether execution is `local` or `remote`, then
+persist the non-secret profile:
+
+```text
+/quality-pilot environment status
+/quality-pilot environment configure --mode local --entrypoint './bin/product --readonly' --side-effect-boundary 'sandbox/read-only test data'
+```
+
+For a remote target, configure only an environment variable name and keep the
+value outside the project:
+
+```text
+/quality-pilot environment configure --mode remote --entrypoint './bin/product' --target-host-env QUALITY_PILOT_TARGET_HOST --side-effect-boundary 'isolated lab target; no production writes'
+```
+
+`environment status` reports `ready` only when mode, confirmation, entrypoint,
+side-effect boundary, fixture paths, credentials and (for remote mode) target
+availability are satisfied. It reports env names and presence booleans only;
+raw target, credential and secret values are never stored. `cases run` and
+`close-loop` BLOCK a contract marked `requires_prepared_environment` until this
+profile is ready.
 
 Use these fields to prepare automation once:
 

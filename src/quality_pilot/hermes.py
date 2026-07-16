@@ -20,6 +20,7 @@ ACCEPTED_PREFIXES = {PRIMARY_PREFIX, ALIAS_PREFIX}
 ROOT_COMMANDS = {
     "setup",
     "doctor",
+    "environment",
     "audit",
     "issues",
     "cases",
@@ -50,6 +51,24 @@ HERMES_COMPLETION_TREE = {
         "description": "檢查環境、MCP 與設定是否可用",
         "options": {"--fix": "修復安全的 config/overlay 缺口"},
     },
+    "environment": {
+        "description": "確認 local/remote 測試環境與執行前阻塞條件",
+        "subcommands": {
+            "status": {"description": "查看去機密化環境 readiness"},
+            "configure": {
+                "description": "保存 grill-me 確認的測試環境",
+                "args_hint": "--mode <local|remote>",
+                "options": {
+                    "--mode": "選擇 local 或 remote",
+                    "--entrypoint": "產品入口命令或 binary",
+                    "--target-host-env": "只填 remote target 的 env 名稱",
+                    "--fixture": "準備好的 fixture/config 路徑",
+                    "--credential-env": "credential env 名稱，不填 secret 值",
+                    "--side-effect-boundary": "允許的副作用邊界",
+                },
+            },
+        },
+    },
     "audit": {
         "description": "查看目前 QA 狀態與證據",
         "subcommands": {
@@ -69,6 +88,18 @@ HERMES_COMPLETION_TREE = {
             },
             "status": {"description": "查看 issue sync 與 fix queue 狀態"},
             "report": {"description": "產生 per-issue QA/evidence report"},
+            "create-from-failure": {
+                "description": "產生本地完整 SWQA 報告，或準備去機密化的遠端 Gitea issue 報告",
+                "args_hint": "(--local|--remote) (--case <case_id>|--all)",
+                "options": {
+                    "--local": "只寫入本地完整報告，不建立遠端 request",
+                    "--remote": "準備完整、去機密化的 SWQA 報告，交由 Gitea MCP gated 建立",
+                    "--case": "只處理指定 failed case",
+                    "--all": "處理全部 official FAIL/BLOCK cases",
+                    "--include-partial": "連 partial probe failure 一起納入",
+                    "--dry-run": "只預覽 candidate 與 gate 結果",
+                },
+            },
             "show": {
                 "description": "查看單一 issue mirror",
                 "args_hint": "<issue_id>",
@@ -77,7 +108,8 @@ HERMES_COMPLETION_TREE = {
                 "description": "修復 synced issues 並依 gate 選擇建立 PR",
                 "options": {
                     "--all": "處理所有 open issues",
-                    "--issue": "指定 issue ID",
+                    "--issue": "指定 Gitea issue ID 或 testcase ID/name",
+                    "--case": "指定 local testcase ID/name",
                     "--push-pr": "verification 通過後建立 PR",
                 },
             },
@@ -388,6 +420,10 @@ def render_chat_response(payload: dict[str, Any], *, exit_code: int = 0) -> str:
         lines.append(f"         write_gate: {payload['write_gate_result'].get('reason')}")
     if "open_count" in payload:
         lines.append(f"         open_issues: {payload.get('open_count')}")
+    if "standalone_failure_count" in payload:
+        lines.append(f"         standalone_failures: {payload.get('standalone_failure_count')}")
+    if "standalone_issue_create_candidate_count" in payload:
+        lines.append(f"         new_issue_candidates: {payload.get('standalone_issue_create_candidate_count')}")
     if "generated" in payload and isinstance(payload.get("generated"), list):
         lines.append(f"         generated_cases: {len(payload.get('generated', []))}")
     if "growth_seed_count" in payload:
@@ -425,6 +461,10 @@ def render_chat_response(payload: dict[str, Any], *, exit_code: int = 0) -> str:
         lines.append(f"         mcp_request: {payload.get('mcp_write_request_path')}")
     if "mcp_write_result_path" in payload:
         lines.append(f"         mcp_result: {payload.get('mcp_write_result_path')}")
+    if "mcp_issue_write_request_path" in payload:
+        lines.append(f"         mcp_issue_request: {payload.get('mcp_issue_write_request_path')}")
+    if "mcp_issue_write_result_path" in payload:
+        lines.append(f"         mcp_issue_result: {payload.get('mcp_issue_write_result_path')}")
     if "blocked_by_gate" in payload:
         lines.append(f"         blocked_by_gate: {payload.get('blocked_by_gate')}")
     if payload.get("setup_required"):
@@ -690,6 +730,11 @@ def _suggest_next_actions_without_recovery(payload: dict[str, Any], engine_argv:
     if error == "command_removed":
         replacement = payload.get("replacement")
         return [_next("改用新的正式指令", str(replacement), confirm=True)] if replacement else [_next("查看正式指令", "/quality-pilot help")]
+    if error == "case_not_failed":
+        return [
+            _next("查看最新 case 結果", "/quality-pilot report status"),
+            _next("重新執行指定 case", "/quality-pilot cases run <case_id>", confirm=True),
+        ]
     if error == "config_not_found":
         return [
             _next("修復缺失 config skeleton 後重跑 doctor", "/quality-pilot doctor --fix", confirm=True),
@@ -718,6 +763,7 @@ def _suggest_next_actions_without_recovery(payload: dict[str, Any], engine_argv:
     if not args or args[0] == "help":
         return [
             _next("初始化產品 repo", "/quality-pilot setup", confirm=True),
+            _next("確認測試環境是否已準備", "/quality-pilot environment status"),
             _next("執行健康檢查", "/quality-pilot doctor"),
             _next("同步 Gitea issues", "/quality-pilot issues sync", confirm=True),
             _next("首次建立 SWQA cases", "/quality-pilot cases generate --init", confirm=True),
@@ -726,9 +772,31 @@ def _suggest_next_actions_without_recovery(payload: dict[str, Any], engine_argv:
         if "gitea_mcp_snapshot_missing" in blockers:
             return [
                 _next("用 Hermes Gitea MCP 讀取 issues，寫入 snapshot 後重跑 sync", "/quality-pilot issues sync", confirm=True),
+                _next("完成 grill-me 後確認測試環境", "/quality-pilot environment status"),
                 _next("執行健康檢查", "/quality-pilot doctor"),
             ]
-        return [_next("執行健康檢查", "/quality-pilot doctor"), _next("同步 Gitea issues", "/quality-pilot issues sync", confirm=True)]
+        return [
+            _next("完成 grill-me 後確認測試環境", "/quality-pilot environment status"),
+            _next("執行健康檢查", "/quality-pilot doctor"),
+            _next("同步 Gitea issues", "/quality-pilot issues sync", confirm=True),
+        ]
+    if current == "environment status":
+        profile = payload.get("environment_profile") if isinstance(payload.get("environment_profile"), dict) else {}
+        if profile.get("ready"):
+            return [
+                _next("執行健康檢查", "/quality-pilot doctor"),
+                _next("首次建立 SWQA cases", "/quality-pilot cases generate --init", confirm=True),
+                _next("執行已確認的 cases", "/quality-pilot cases run", confirm=True),
+            ]
+        return [
+            _next("完成 grill-me 後保存測試環境", "/quality-pilot environment configure --mode <local|remote>", confirm=True),
+            _next("查看環境阻塞原因", "/quality-pilot environment status"),
+        ]
+    if current == "environment configure":
+        return [
+            _next("重新檢查去機密化環境 readiness", "/quality-pilot environment status"),
+            _next("執行健康檢查", "/quality-pilot doctor"),
+        ]
     if current == "doctor":
         if "gitea_mcp_snapshot_missing" in blockers:
             return [
@@ -782,6 +850,43 @@ def _suggest_next_actions_without_recovery(payload: dict[str, Any], engine_argv:
             _next("長出測試 cases", "/quality-pilot cases generate --growing", confirm=True),
             _next("修復指定 issue", "/quality-pilot issues fix --issue <id>", confirm=True),
         ]
+    if current == "issues create-from-failure":
+        remote = payload.get("mode") != "local"
+        create_command = "/quality-pilot issues create-from-failure --remote --all" if remote else "/quality-pilot issues create-from-failure --local --all"
+        if payload.get("case_id"):
+            create_command = f"/quality-pilot issues create-from-failure {'--remote' if remote else '--local'} --case {payload.get('case_id')}"
+        if status == "local_report_ready":
+            return [
+                _next("查看本地完整 SWQA failure report", f"/quality-pilot report status"),
+                _next("若需同步 Gitea，明確選擇 remote 模式", create_command.replace("--local", "--remote"), confirm=True, destructive=True),
+            ]
+        if status == "needs_mcp_apply":
+            return [
+                {
+                    "label": "Hermes 依 gated request 呼叫 Gitea MCP 建立 failed-case issues",
+                    "kind": "mcp_write",
+                    "requires_confirmation": True,
+                    "destructive": True,
+                    "request_path": payload.get("mcp_issue_write_request_path"),
+                    "result_path": payload.get("mcp_issue_write_result_path"),
+                    "local_report_path": payload.get("local_report_path"),
+                    "command": create_command,
+                },
+                _next("建立完成後同步 issue traceability", "/quality-pilot issues sync", confirm=True),
+            ]
+        if status == "blocked":
+            return [_next("查看 write gate / readiness", "/quality-pilot doctor"), _next("查看最新失敗報告", "/quality-pilot issues report")]
+        return [_next("重新查看 latest run", "/quality-pilot report status"), _next("查看 issue report", "/quality-pilot issues report")]
+    if current == "issues report":
+        actions = []
+        if int(payload.get("standalone_issue_create_candidate_count", 0) or 0) > 0:
+            actions.append(_next("先產生本地完整 failure report", "/quality-pilot issues create-from-failure --local --all", confirm=True))
+            actions.append(_next("確認後才準備去機密化的遠端 SWQA issue", "/quality-pilot issues create-from-failure --remote --all", confirm=True, destructive=True))
+        actions.extend([
+            _next("查看整體 case 報告", "/quality-pilot report status"),
+            _next("查看 issue/fix 狀態", "/quality-pilot issues status"),
+        ])
+        return actions
     if current == "issues fix":
         if payload.get("workflow_mode") == "issue_driven_development":
             return [
@@ -1110,11 +1215,17 @@ def build_agent_manifest(*, wrapper_path: str | None = None, runner_command: str
             f"{PRIMARY_PREFIX} setup",
             f"{PRIMARY_PREFIX} doctor",
             f"{PRIMARY_PREFIX} doctor --fix",
+            f"{PRIMARY_PREFIX} environment status",
+            f"{PRIMARY_PREFIX} environment configure --mode <local|remote>",
             f"{PRIMARY_PREFIX} audit state",
             f"{PRIMARY_PREFIX} issues sync",
             f"{PRIMARY_PREFIX} issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]",
             f"{PRIMARY_PREFIX} issues status",
             f"{PRIMARY_PREFIX} issues report",
+            f"{PRIMARY_PREFIX} issues create-from-failure --local --case <case_id>",
+            f"{PRIMARY_PREFIX} issues create-from-failure --remote --case <case_id>",
+            f"{PRIMARY_PREFIX} issues create-from-failure --local --all",
+            f"{PRIMARY_PREFIX} issues create-from-failure --remote --all",
             f"{PRIMARY_PREFIX} issues show <issue_id>",
             f"{PRIMARY_PREFIX} issues fix --all",
             f"{PRIMARY_PREFIX} issues fix --issue <id>",
@@ -1146,6 +1257,8 @@ def build_agent_manifest(*, wrapper_path: str | None = None, runner_command: str
                 "gitea_http_when_apply_or_submit_pr",
                 "gitea_mcp_read_and_gated_wiki_write_when_configured",
                 "gitea_mcp_gated_issue_create_from_redmine_sync",
+                "gitea_mcp_gated_issue_create_from_failed_case",
+                "gitea_mcp_gated_issue_evidence_update",
             ],
             "tracker_write": "write_gate_apply_only",
         },
@@ -1240,8 +1353,25 @@ metadata:
     tags: [qa, testing, deterministic, evidence, write-gate, tracker, dynamic-skill]
     required_companion_skills:
       - grill-me
+    required_companion_commands:
+      grill-me:
+        - setup
+        - doctor --fix
+        - environment configure
+        - issues sync
+        - issues create-from-failure
+        - issues fix
+        - cases generate
+        - cases push-pr
+        - publish wiki plan
+        - publish wiki apply
+        - close-loop
+        - tracker plan-write
+        - subagent configure
     completion:
-      args_hint: "[help|setup|doctor|audit|issues|cases|publish|close-loop|report|tracker|subagent]"
+      args_hint: "[help|setup|doctor|environment|audit|issues|cases|publish|close-loop|report|tracker|subagent]"
+      # legacy args_hint retained for older Hermes frontmatter readers:
+      # args_hint: "[help|setup|doctor|audit|issues|cases|publish|close-loop|report|tracker|subagent]"
       subcommands:
 {_render_completion_tree(HERMES_COMPLETION_TREE)}
 ---
@@ -1263,14 +1393,21 @@ Only these `/quality-pilot` commands are public:
 - `/quality-pilot setup`
 - `/quality-pilot doctor`
 - `/quality-pilot doctor --fix`
+- `/quality-pilot environment status`
+- `/quality-pilot environment configure --mode <local|remote>`
 - `/quality-pilot audit state`
 - `/quality-pilot issues sync`
 - `/quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]`
 - `/quality-pilot issues status`
 - `/quality-pilot issues report`
+- `/quality-pilot issues create-from-failure --local --case <case_id>`
+- `/quality-pilot issues create-from-failure --remote --case <case_id>`
+- `/quality-pilot issues create-from-failure --local --all`
+- `/quality-pilot issues create-from-failure --remote --all`
 - `/quality-pilot issues show <issue_id>`
 - `/quality-pilot issues fix --all`
 - `/quality-pilot issues fix --issue <id>`
+- `/quality-pilot issues fix --case <case_id>`
 - `/quality-pilot issues fix --issue <id> --push-pr`
 - `/quality-pilot cases generate --init`
 - `/quality-pilot cases generate --init --count 5`
@@ -1321,7 +1458,7 @@ turn the bare command into an `empty_quality_pilot_command` error.
 
 Hermes MCP rule: AI Quality Pilot does not store Gitea/Redmine URLs, repo names, or token environment variables in `.quality-pilot.yaml`. It relies on the user's Hermes session to provide MCP servers. At the start of setup/doctor, make the available server list visible to AI Quality Pilot through `QUALITY_PILOT_HERMES_MCP_SERVERS=gitea,redmine` or the configured `.quality-pilot-project/state/hermes-mcp/status.json`. If Gitea or Redmine MCP is missing or unknown, tell the user immediately and do not pretend remote sync/write is ready.
 
-Gitea MCP rule: if the product repo config uses `tracker.provider: hermes_mcp`, you may use Hermes' configured Gitea MCP tooling for three narrow operations only: read issue data before `/quality-pilot issues sync`, create Gitea issues after `/quality-pilot issues sync --redmine-issues ...` returns `status: needs_mcp_apply` with a gated `mcp_issue_write_request`, and update the configured Wiki page after `/quality-pilot publish wiki apply` returns `status: needs_mcp_apply` with a gated `mcp_write_request`. Do not treat the MCP read itself as a completed sync.
+Gitea MCP rule: if the product repo config uses `tracker.provider: hermes_mcp`, you may use Hermes' configured Gitea MCP tooling for four narrow operations only: read issue data before `/quality-pilot issues sync`, create Gitea issues after `/quality-pilot issues sync --redmine-issues ...` or explicit `/quality-pilot issues create-from-failure --remote ...` returns `status: needs_mcp_apply` with a gated `mcp_issue_write_request`, update linked FAIL/BLOCK evidence after `/quality-pilot issues report` returns its gated evidence handoff, and update the configured Wiki page after `/quality-pilot publish wiki apply` returns `status: needs_mcp_apply` with a gated `mcp_write_request`. `--local` never creates a remote request. Do not treat the MCP read itself as a completed sync.
 
 Gitea MCP snapshot workflow (when the user confirms, chooses a suggested sync option, or invokes `/quality-pilot issues sync` after `gitea_mcp_snapshot_missing`):
 1. Use Gitea MCP read-only pagination for the current Hermes product repository context, typically `state=all` and `perPage=50`, until an empty page is returned.
@@ -1345,6 +1482,13 @@ Gitea MCP Redmine issue creation workflow (only after `/quality-pilot issues syn
 5. Write the combined MCP tool results JSON to `payload.mcp_issue_write_result_path`.
 6. Treat this as the same `/quality-pilot issues sync --redmine-issues ...` user flow. Report created issue IDs/URLs, then suggest `/quality-pilot cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]`.
 7. Do not create comments, close issues, reopen issues, edit arbitrary issues, or create PRs in this workflow.
+
+Gitea MCP failed-case issue creation workflow (only after explicit `/quality-pilot issues create-from-failure --remote --case ...` or `--remote --all` returns `status: needs_mcp_apply`):
+1. Read `payload.mcp_issue_write_request` and confirm the schema is `quality-pilot.gitea-mcp-issue-write-request.v1`, operation is `gitea.issue.create_from_failure`, and `safety.allowed_targets` is only `issues`.
+2. For each action, confirm `operation` is exactly `gitea.issue.create`, `action_safety_class` is `new_issue_from_failed_case`, and `write_gate_result.allowed` is true.
+3. Verify each action body is a complete human-readable SWQA report (scope, reproduction, expected/actual result, oracle evidence, risk/follow-up) and contains no credentials, local workstation paths, internal run identifiers, or tool-specific implementation details. The same remote invocation also writes a full local technical report; preserve `payload.local_report_path` for the test owner. Then call the configured Hermes Gitea MCP issue-create tool with the exact action `title`, `body`, and `labels` in the current product repo context. Do not create comments or edit existing issues.
+4. Write the combined MCP tool results JSON to `payload.mcp_issue_write_result_path`.
+5. Report created issue IDs/URLs, then suggest `/quality-pilot issues sync` so the new issue becomes linked traceability input before evidence writeback.
 
 Redmine MCP rule: AI Quality Pilot V1 reads Redmine only through a Hermes Redmine MCP live-read snapshot. For every `/quality-pilot issues sync --redmine-issues ...` or `/quality-pilot cases generate --redmine-issues ...` turn, use Hermes Redmine MCP to read the requested IDs live before running the dispatcher. Do not reuse an existing `.quality-pilot-project/state/redmine-mcp/issues.json` merely because it contains the requested ID. Write a manifest JSON object to the configured snapshot path with:
 
@@ -1386,7 +1530,7 @@ Reference: see `references/gitea-mcp-snapshot.md` for the MCP snapshot pitfall a
 
 Setup rule: `/quality-pilot setup` always writes `tracker.provider: hermes_mcp` plus `tracker.mcp.*` local handoff paths and a blank `runtime` profile skeleton. It may report the detected git remote and runtime repo analysis in JSON for human context, but it must not write Gitea repo URL, repo name, token env, HTTP credentials, product credentials, or guessed lab secrets into `.quality-pilot.yaml`.
 
-Runtime profile rule: AI Quality Pilot is repo-agnostic. Do not assume the product is irctool, Go, CLI-only, Redfish-only, or hardware-only. Before asking for runtime details, run `/quality-pilot setup` or `/quality-pilot doctor` and read `payload.runtime_profile.repo_analysis`. If repo analysis finds an executable candidate and `payload.runtime_profile.status == "ready_inferred"`, do not ask the user to confirm the entrypoint; proceed with the inferred runtime and ask later only for issue-specific secrets/input if needed. If `payload.hermes_needs_input.reason == "runtime_profile_missing"`, render the clarify prompt exactly as bullet-listed by the payload, preserving the "already detected" and "please provide only missing details" structure. Never ask runtime questions before repo analysis exists. Never ask one question per testcase.
+Runtime profile rule: AI Quality Pilot is repo-agnostic. Do not assume the product is irctool, Go, CLI-only, Redfish-only, or hardware-only. For production flows other than the initial setup, run `/quality-pilot setup` or `/quality-pilot doctor` and read `payload.runtime_profile.repo_analysis` before asking repo-derived runtime questions. For the initial `/quality-pilot setup` gate, grill-me may first collect only the user's known environment facts; after setup/doctor analysis, reconcile the entrypoint and any missing runtime details with the user. An inferred executable may resolve the runner path, but it does **not** confirm where testing is allowed. Before any production command that generates, executes prepared-environment cases, or starts close-loop, the mandatory grill-me interview must establish `local` versus `remote`, the entrypoint, fixtures, credential env names, target env name, side-effect boundary, and evidence expectations. Persist the answers with `/quality-pilot environment configure --mode <local|remote>`; never store target, credential, or secret values. If `payload.hermes_needs_input.reason == "runtime_profile_missing"`, render the clarify prompt exactly as bullet-listed by the payload, preserving the "already detected" and "please provide only missing details" structure. Never ask one question per testcase.
 
 Subagent text generation rule: AI Quality Pilot may delegate long human-facing draft text to a configured subagent, but the subagent is candidate-only. Use `/quality-pilot subagent status` to inspect the active profile. Use `/quality-pilot subagent configure` to write the Open WebUI profile skeleton. No private endpoint is a universal default: the deployment owner must provide an endpoint and a model, either by using an endpoint such as `https://open-webui.example.invalid/?model=<model-name>` or by filling the separate `model` field. API credentials must be referenced by `api_key_env` only; never ask for or store a raw API key. Task prompts are optional overrides, not readiness blockers. The subagent may draft Gitea issue bodies, PR bodies, Wiki summaries, Redmine QA summaries, case candidate analysis, and reviewer notes. Redmine sync payloads include a `qa_summary` plus a `redmine_issue_summary` subagent handoff so QA can see problem, environment, reproduction, expected/actual, evidence, and missing testcase details. It must not write files, create issues, edit Wiki pages, open PRs, close issues, or bypass AI Quality Pilot validation/write gates.
 
@@ -1394,31 +1538,46 @@ Subagent text generation rule: AI Quality Pilot may delegate long human-facing d
 
 Do not behave like a passive command relay. After every AI Quality Pilot turn, guide the user toward the next useful step in Traditional Chinese.
 
-## MANDATORY SYSTEM GATE — grill-me
+## MANDATORY SYSTEM GATE — grill-me for production commands
 
-The `grill-me` companion skill is a blocking preflight for every
-`/quality-pilot` workflow that involves requirements, test intent, issue
-analysis, case generation/review/run, close-loop growth, publishing, tracker
-work, or subagent work. This is an execution requirement, not a suggestion:
+The `grill-me` companion skill is a blocking preflight only for production-type
+`/quality-pilot` commands that create, generate, mutate, publish, or start a
+growth loop. This is an execution requirement, not a suggestion:
 
 1. Hermes MUST load and execute the installed `grill-me` skill (the canonical
    Hermes command is `/grill-me`) before calling the AI Quality Pilot
-   dispatcher for those workflows.
+   dispatcher for a command in the production scope below.
 2. Do not ask the user to run `/grill-me`, merely recommend it, or continue
    directly to the dispatcher. Run the grilling interview yourself, wait for
    the user's answers, and carry those answers into the next dispatcher call.
-3. The only bypasses are fully deterministic/read-only commands: `help`,
-   `doctor`, `audit state`, `report status`, `report json`, `cases list`,
-   `cases validate`, and `cases run <case_id>` when every contract input is
-   already explicit.
-4. If the companion skill is missing or cannot be loaded, stop and return
+3. Production scope is: `setup`; `doctor --fix`; `environment configure`;
+   `issues sync`; `issues create-from-failure`; `issues fix`;
+   every `cases generate ...`; `cases push-pr`; `publish wiki plan`;
+   `publish wiki apply`; every `close-loop ...`; `tracker plan-write`; and
+   `subagent configure`.
+4. Read-only/status commands such as `help`, `doctor`, `audit state`, issue
+   status/report/show, `cases review/list/validate`, `report`, Wiki status, and
+   an already explicit `cases run <case_id>` do not trigger this gate.
+5. If the companion skill is missing or cannot be loaded, stop and return
    `grill_me_required`; repair the installation before running the requested
    workflow. Never silently fall back to a normal clarification flow.
 
 The interview itself is not QA evidence and never bypasses validation, safety,
-or write gates. Use the answers to sharpen product surface, expected and
-negative behavior, risk priorities, boundaries, environment, oracle strength,
-and evidence requirements before writing or expanding case contracts.
+or write gates. At the beginning of every production flow, ask and resolve
+these categories in one coherent interview: (a) local checkout, isolated lab,
+or remote target; (b) product entrypoint/build output; (c) README fixtures and
+config paths; (d) credential env names only; (e) target host env name only for
+remote; (f) read-only/sandbox/test-data side-effect boundary; (g) expected,
+negative, boundary and failure-oracle evidence. For a production flow that will
+generate, execute prepared-environment cases, or start close-loop, persist the
+answers with `environment configure`, run `environment status`, and only then
+dispatch the requested production command. Use the answers to sharpen product
+surface, expected and negative behavior, risk priorities, boundaries,
+environment, oracle strength, and evidence requirements before writing or
+expanding case contracts. For the initial setup flow, the sequence is
+`grill-me -> setup -> reconcile repo analysis -> environment configure ->
+environment status`; reuse the same interview answers and do not start a
+second grill-me interview in the same turn.
 
 Hermes clarify / needs-input contract:
 
@@ -1453,11 +1612,11 @@ Preferred menu style:
 
 Recommended interaction by situation:
 
-- After `/quality-pilot setup`: summarize `runtime_profile.repo_analysis` if present, then suggest `/quality-pilot doctor`. Do not ask runtime questions until setup/doctor has analyzed the repo.
+- After `/quality-pilot setup`: summarize `runtime_profile.repo_analysis` if present, reconcile any missing entrypoint/fixture details from the initial grill-me interview, then suggest `/quality-pilot environment status` followed by `/quality-pilot doctor`. Do not generate or run prepared-environment cases while the profile is unresolved.
 - If setup reports `auto_configured_mcp: true`, explain that AI Quality Pilot is configured for Hermes MCP and the remaining step is `doctor` confirming Hermes Gitea/Redmine MCP availability.
 - After `/quality-pilot doctor` warning: explain the warning and suggest the smallest check that resolves it. If `payload.hermes_needs_input.reason == "runtime_profile_missing"`, call `clarify` using its questions; those questions are already based on repo analysis.
 - After `gitea_mcp_snapshot_missing`: offer to use Hermes Gitea MCP read-only fetch, write the snapshot, then rerun `/quality-pilot issues sync`.
-- After `/quality-pilot issues sync`: explain that sync includes dedupe/prune, then suggest `/quality-pilot issues status` and `/quality-pilot cases generate --growing`.
+- After `/quality-pilot issues sync`: explain that sync includes dedupe/prune, then suggest `/quality-pilot issues status` and `/quality-pilot cases generate --growing`. Remote Gitea mirrors are identified by Gitea issue ID; local failure work items are identified by testcase ID and live under `issues/local/`.
 - If the user asks for first-time test ideas or has no cases yet, run `/quality-pilot cases generate --init`; it scans README, code, package metadata, existing runners, existing cases, and project rules, then creates a stratified first slice across functional/positive, negative, boundary, stress/timeout-risk, and sibling-surface dimensions. Every INIT case must have `commands[].run` using the configured or inferred product entrypoint; it must not ask case-by-case confirmation questions. Report exit-only probes as partial. Do not claim deep white-box, mutation, fuzz, UI, API, or production-grade load coverage unless an explicit adapter and semantic oracle exist.
 - `/quality-pilot cases generate --init` is already fast/high-standard autonomous mode.
 - If the user wants a smaller first batch, run `/quality-pilot cases generate --init --count 5`.
@@ -1468,11 +1627,13 @@ Recommended interaction by situation:
 - After `cases generate --init` or `cases generate --growing`, assume the generated cases are runnable safe probes unless AI Quality Pilot explicitly returns `payload.hermes_needs_input`. If needs-input exists, call `clarify` only for category-level blockers. Do not discuss each generated case one by one unless the user explicitly asks.
 - After `/quality-pilot cases list`: suggest running one selected case first, then all cases.
 - After `cases generate --init` or `cases generate --growing`: AI Quality Pilot auto-plans the Wiki draft/missing-input status. Suggest `/quality-pilot publish wiki status`.
-- After a test run: AI Quality Pilot auto-plans or applies the Wiki test-result status. Suggest `/quality-pilot issues report` for per-issue QA/evidence handoff, `/quality-pilot publish wiki status`, and `/quality-pilot report status`.
+- After a test run: AI Quality Pilot auto-plans or applies the Wiki test-result status. Suggest `/quality-pilot issues report` for linked evidence and to reveal standalone FAIL/BLOCK candidates, `/quality-pilot publish wiki status`, and `/quality-pilot report status`.
+- If `/quality-pilot issues report` shows `standalone_issue_create_candidate_count > 0`, explain that these failures are real latest-run evidence without a linked tracker issue. Offer `/quality-pilot issues create-from-failure --local --all` (or `--local --case <case_id>`) first for a complete local report. Only when the user explicitly chooses remote, run the corresponding `--remote` command; its issue body must remain a complete, redacted SWQA report. Do not claim `issue_count: 0` means no test failures.
 - If the user explicitly wants to update only the Wiki, use `/quality-pilot publish wiki plan`, then `/quality-pilot publish wiki apply` after confirmation. AI Quality Pilot returns a gated `mcp_write_request`; Hermes Gitea MCP performs the Wiki update in the same user flow. This path must never create issue comments, new issues, or PRs.
 - If `/quality-pilot publish wiki apply` returns `status: needs_mcp_apply`, read `payload.mcp_write_request`. Call the configured Hermes Gitea MCP wiki update/write-page tool for the request's `page`, `body`, and `message` in the current product repo context; if `repo` is present, enforce it exactly. Write the MCP tool result JSON to `payload.mcp_write_result_path`, then summarize the result and suggest `/quality-pilot publish wiki status`.
 - If `/quality-pilot issues sync --redmine-issues ...` returns `status: needs_mcp_apply`, read `payload.mcp_issue_write_request`. Call the configured Hermes Gitea MCP issue-create tool for each gated action, write the result JSON to `payload.mcp_issue_write_result_path`, then summarize created issue IDs/URLs and suggest `/quality-pilot cases generate --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]`.
 - If `/quality-pilot issues report` returns `status: needs_mcp_apply`, read `payload.mcp_issue_evidence_write_request`. Call the configured Hermes Gitea MCP issue-update tool for each gated FAIL/BLOCK evidence action, write the result JSON to `payload.mcp_issue_evidence_write_result_path`, then summarize updated linked Gitea issue IDs and suggest `/quality-pilot issues fix --issue <id>`.
+- If `/quality-pilot issues create-from-failure --remote ...` returns `status: needs_mcp_apply`, execute the Gitea MCP failed-case issue creation workflow above and then suggest `/quality-pilot issues sync`. A `--local` result is complete without any MCP step.
 - Before `/quality-pilot issues fix --issue <id> --push-pr` or `/quality-pilot cases push-pr <case_id>`: ask for explicit confirmation and summarize what will be written remotely.
 
 Use this command shape:
@@ -1512,7 +1673,7 @@ Examples:
 
 ## Safety Rules
 
-- Do not directly write Gitea comments, close/reopen/edit unrelated issues, or PRs. Gitea issue create/update is allowed only through AI Quality Pilot gated handoff, including Redmine sync and linked FAIL/BLOCK evidence writeback. Wiki remote writes are allowed only by AI Quality Pilot auto-sync, `/quality-pilot publish wiki apply`, or the gated MCP handoff returned by `/quality-pilot publish wiki apply` with `status: needs_mcp_apply`. Product PR creation remains behind `/quality-pilot issues fix --issue <id> --push-pr` or `/quality-pilot cases push-pr <case_id>`, and issue-driven handoff must gain acceptance cases/evidence before PR creation.
+- Do not directly write Gitea comments, close/reopen/edit unrelated issues, or PRs. Gitea issue create/update is allowed only through AI Quality Pilot gated handoff, including Redmine sync, explicit failed-case issue creation, and linked FAIL/BLOCK evidence writeback. Wiki remote writes are allowed only by AI Quality Pilot auto-sync, `/quality-pilot publish wiki apply`, or the gated MCP handoff returned by `/quality-pilot publish wiki apply` with `status: needs_mcp_apply`. Product PR creation remains behind `/quality-pilot issues fix --issue <id> --push-pr` or `/quality-pilot cases push-pr <case_id>`, and issue-driven handoff must gain acceptance cases/evidence before PR creation.
 - Automatic Wiki sync must only update the configured Wiki page. It must not create issue comments, create issues, or open PRs.
 - Do not use Gitea MCP for issue comments, unrelated issue edits, issue close/reopen, PR creation, or arbitrary writes. Hermes MCP may create/update linked Gitea issues only from AI Quality Pilot gated issue write requests, and may update only the configured Wiki page from `/quality-pilot publish wiki apply`.
 - Do not reorder the AI Quality Pilot close-loop pipeline.
@@ -1619,7 +1780,7 @@ Filtering rule:
 - Exclude `html_url` containing `/pulls/` or entries carrying explicit PR markers.
 - Preserve real issue bodies/comments when available; closed issues may be minimal because AI Quality Pilot only needs them to remove stale mirrors.
 
-Remote write rule: never use Gitea MCP for comments, issue edits, issue close/reopen, PRs, or arbitrary writes in AI Quality Pilot. Gitea MCP may create new issues only after `/quality-pilot issues sync --redmine-issues ...` returns a gated `mcp_issue_write_request`, and may update only the configured Wiki page after `/quality-pilot publish wiki apply` returns a gated `mcp_write_request`. Write MCP result JSON to the requested path and report it as the same user flow. Product PR creation is a separate explicit workflow and must not be folded into Wiki apply or Redmine sync.
+Remote write rule: never use Gitea MCP for comments, issue edits, issue close/reopen, PRs, or arbitrary writes in AI Quality Pilot. Gitea MCP may create new issues only after a gated `mcp_issue_write_request` from Redmine sync or explicit failed-case issue creation, and may update linked FAIL/BLOCK evidence or the configured Wiki page only through their corresponding gated handoffs. Write MCP result JSON to the requested path and report it as the same user flow. Product PR creation is a separate explicit workflow and must not be folded into Wiki apply, Redmine sync, or failed-case issue creation.
 """
 
 
@@ -1720,14 +1881,21 @@ def _overview_help_payload() -> dict[str, Any]:
         {"command": "/quality-pilot setup", "purpose": "在目前產品 repo 建立 .quality-pilot.yaml 與 .quality-pilot-project"},
         {"command": "/quality-pilot doctor", "purpose": "檢查設定、Hermes MCP、Gitea/Redmine readiness、runner、secret reference"},
         {"command": "/quality-pilot doctor --fix", "purpose": "修復缺失 config skeleton/overlay 目錄後再執行 doctor 檢查；不填使用者 model/API secret"},
+        {"command": "/quality-pilot environment status", "purpose": "查看 local/remote 測試環境是否已確認；只顯示去機密化 readiness"},
+        {"command": "/quality-pilot environment configure --mode <local|remote>", "purpose": "保存 grill-me 確認的入口、fixture、credential env 與副作用邊界"},
         {"command": "/quality-pilot audit state", "purpose": "只讀語意稽核 overlay state：case、evidence、issues、reports、MCP、subagent 一致性"},
         {"command": "/quality-pilot issues sync", "purpose": "同步 Gitea issues，內建 dedupe、prune 與遠端 duplicate gated action plan"},
         {"command": "/quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]", "purpose": "透過 Hermes Redmine MCP snapshot 同步 Redmine mirror，並經 gate 用 Gitea MCP 建立 issues"},
         {"command": "/quality-pilot issues status", "purpose": "查看 issue sync、duplicates、fix queue、PR/handoff 狀態"},
         {"command": "/quality-pilot issues report", "purpose": "產生 per-issue QA report；FAIL/BLOCK 會建立 gated linked Gitea evidence update handoff"},
+        {"command": "/quality-pilot issues create-from-failure --local --case <case_id>", "purpose": "只在本地產生完整技術型 SWQA failure report，不建立 Gitea request"},
+        {"command": "/quality-pilot issues create-from-failure --remote --case <case_id>", "purpose": "同時保留本地完整技術報告，並產生去機密化、可獨立閱讀的 SWQA 報告交由 gated Gitea MCP 建立 issue"},
+        {"command": "/quality-pilot issues create-from-failure --local --all", "purpose": "只在本地彙整全部 official FAIL/BLOCK failure reports"},
+        {"command": "/quality-pilot issues create-from-failure --remote --all", "purpose": "同時保留本地完整 failure report，並將全部 official FAIL/BLOCK 各自轉成去機密化 SWQA issue 報告；partial probe 預設排除"},
         {"command": "/quality-pilot issues show <issue_id>", "purpose": "查看單一 issue mirror"},
         {"command": "/quality-pilot issues fix --all", "purpose": "依 open issue queue 逐一修復/開發，遇到 gate/block 停下"},
-        {"command": "/quality-pilot issues fix --issue <id>", "purpose": "對指定 synced issue 做 preflight；可在沒有 stale case mapping 時直接進 issue-driven development handoff"},
+        {"command": "/quality-pilot issues fix --issue <id>", "purpose": "對 Gitea issue ID 或可解析的 testcase 做 preflight；沒有 remote mapping 時進 local case fix handoff"},
+        {"command": "/quality-pilot issues fix --case <case_id>", "purpose": "直接處理 issues/local/ 下的 testcase work item"},
         {"command": "/quality-pilot issues fix --issue <id> --push-pr", "purpose": "修復/開發與 verification gate 通過後建立產品 PR"},
         {"command": "/quality-pilot cases generate --init", "purpose": "首次全 repo SWQA 建案，依 README/code/metadata 產生 product-runtime executable safe-probe cases"},
         {"command": "/quality-pilot cases generate --init --count 5", "purpose": "限制初始建案第一批 case 數量"},
@@ -1772,16 +1940,17 @@ def _overview_help_text(commands: list[dict[str, str]]) -> str:
             "`/quality-pilot setup` 會自動讀 git remote origin；若能辨識 Gitea repo，會先設定成 Hermes-friendly MCP backend。",
             "",
             "第一次使用建議流程：",
-            "1. `/quality-pilot setup`：初始化目前產品 repo。",
-            "2. `/quality-pilot doctor`：確認設定和目錄健康。",
-            "3. `/quality-pilot issues sync`：同步 Gitea issues 到本地 mirror。",
-            "4. `/quality-pilot cases generate --init`：首次分析 README、程式碼、metadata 與 rules，建立 product-runtime executable SWQA safe-probe cases。",
-            "5. `/quality-pilot cases validate`：確認 generated contracts 可執行。",
-            "6. `/quality-pilot cases list`：看有哪些 case_id。",
-            "7. `/quality-pilot cases run <case_id>`：先跑一個 case，再決定是否跑全部。",
-            "8. 測試或產生 cases 後，AI Quality Pilot 會自動更新本地 Wiki plan；查看 `/quality-pilot publish wiki status`。",
-            "9. 若需要手動更新遠端 Wiki，跑 `/quality-pilot publish wiki plan` 再確認 `/quality-pilot publish wiki apply`。",
-            "10. 若要讓長文字候選稿走 subagent，先跑 `/quality-pilot subagent status`；需要補設定時跑 `/quality-pilot subagent configure`。",
+            "1. `/quality-pilot setup`：Hermes 先強制執行 grill-me，再初始化目前產品 repo。",
+            "2. 沿用同一輪 grill-me 答案，執行 `/quality-pilot environment configure --mode <local|remote>`。",
+            "3. `/quality-pilot environment status`：確認入口、fixture、credential env、remote target 與副作用邊界都 ready。",
+            "4. `/quality-pilot doctor`：確認設定、目錄與 MCP 健康。",
+            "5. `/quality-pilot issues sync`：同步 Gitea issues 到本地 mirror。",
+            "6. `/quality-pilot cases generate --init`：首次分析 README、程式碼、metadata 與 rules，建立 product-runtime executable SWQA cases。",
+            "7. `/quality-pilot cases validate`：確認 generated contracts 可執行。",
+            "8. `/quality-pilot cases run <case_id>`：先跑一個 case，再決定是否跑全部；環境缺失回 BLOCK，exit-only probe 回 HOLD。",
+            "9. 測試或產生 cases 後，AI Quality Pilot 會自動更新本地 Wiki plan；查看 `/quality-pilot publish wiki status`。",
+            "10. 若需要手動更新遠端 Wiki，跑 `/quality-pilot publish wiki plan` 再確認 `/quality-pilot publish wiki apply`。",
+            "11. 若要讓長文字候選稿走 subagent，先跑 `/quality-pilot subagent status`；需要補設定時跑 `/quality-pilot subagent configure`。",
             "   若 backend 是 MCP，`apply` 會產生 gated MCP write request，由 Hermes 在同一流程呼叫 Gitea MCP。",
             "",
             "常用指令：",
@@ -1811,6 +1980,7 @@ def _overview_help_text(commands: list[dict[str, str]]) -> str:
 def _positional_args(argv: list[str]) -> list[str]:
     value_options = {
         "--agent-dir",
+        "--case",
         "--case-id",
         "--candidate-json",
         "--config",

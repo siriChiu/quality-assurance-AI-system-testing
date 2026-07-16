@@ -35,7 +35,8 @@ from .case_generation import (
     validate_generated_cases,
 )
 from .contracts import ContractError, list_contract_paths, load_contract, load_contracts, select_contracts
-from .fix_issues import FixIssueError, fix_status, plan_fix_issue, run_fix_issue, submit_fix_pr
+from .environment import configure_environment, environment_profile_status
+from .fix_issues import FixIssueError, fix_status, plan_fix_issue, run_fix_case, run_fix_issue, submit_fix_pr
 from .gitea import GiteaError
 from .heartbeat import (
     HEARTBEAT_DEFAULT_EVERY,
@@ -44,11 +45,11 @@ from .heartbeat import (
     run_heartbeat,
 )
 from .hermes_mcp import hermes_mcp_readiness, persist_hermes_mcp_status_from_env
-from .issues import IssueSyncError, dedupe_issues, issue_status, issue_sync_readiness, show_issue, sync_issues
+from .issues import IssueSyncError, dedupe_issues, issue_status, issue_sync_readiness, local_issue_dir, show_issue, sync_issues
 from .pipeline import PIPELINE_ORDER, run_close_loop
 from .publishing import PublishError, apply_publish_plan, plan_publish, publish_status
 from .redmine import RedmineError, redmine_readiness, sync_redmine_issues
-from .reports import load_latest_payload, load_latest_results, render_issues_report, render_status_report
+from .reports import create_issues_from_failures, load_latest_payload, load_latest_results, render_issues_report, render_status_report
 from .runner import RunContext, run_case, utc_now
 from .runtime_profile import runtime_profile_status
 from .state_audit import audit_project_state, audit_summary
@@ -166,6 +167,7 @@ def cmd_init_project(args: argparse.Namespace) -> int:
     wiki_sync = None
     subagents = None
     runtime_profile = None
+    environment_profile = None
     automation_profile = None
     automation_profile_candidate_path = None
     config_error = None
@@ -176,6 +178,7 @@ def cmd_init_project(args: argparse.Namespace) -> int:
             wiki_sync = wiki_readiness(config)
             subagents = subagent_status(config)
             runtime_profile = runtime_profile_status(config)
+            environment_profile = environment_profile_status(config)
             automation_profile = build_automation_profile_candidate(config, runtime_profile)
             automation_profile_candidate_path = write_automation_profile_candidate(config, automation_profile)
         except QAConfigError as exc:
@@ -191,6 +194,7 @@ def cmd_init_project(args: argparse.Namespace) -> int:
         "wiki_sync": wiki_sync,
         "subagents": subagents,
         "runtime_profile": runtime_profile,
+        "environment_profile": environment_profile,
         "automation_profile": automation_profile,
         "automation_profile_candidate_path": automation_profile_candidate_path,
         "config_error": config_error,
@@ -201,6 +205,42 @@ def cmd_init_project(args: argparse.Namespace) -> int:
 
 def cmd_setup(args: argparse.Namespace) -> int:
     return cmd_init_project(args)
+
+
+def cmd_environment_status(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+    except QAConfigError as exc:
+        return _error_payload(exc)
+    profile = environment_profile_status(config)
+    payload = {
+        "status": "ok" if profile.get("ready") else "needs_user_input",
+        "environment_profile": profile,
+        "next": (
+            "/quality-pilot cases run"
+            if profile.get("ready")
+            else "/quality-pilot environment configure --mode <local|remote>"
+        ),
+    }
+    return print_json(payload, exit_code=0 if profile.get("ready") else 2)
+
+
+def cmd_environment_configure(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        payload = configure_environment(
+            config,
+            mode=args.mode,
+            entrypoint=args.entrypoint,
+            target_host_env=args.target_host_env,
+            fixture_paths=args.fixture,
+            credential_envs=args.credential_env,
+            side_effect_boundary=args.side_effect_boundary,
+            confirm=not args.no_confirm,
+        )
+    except QAConfigError as exc:
+        return _error_payload(exc)
+    return print_json(payload)
 
 
 def resolve_setup_tracker(root: Path, args: argparse.Namespace) -> dict[str, Any]:
@@ -306,6 +346,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     wiki_sync = None
     config_error = None
     runtime_profile = None
+    environment_profile = None
     automation_profile = None
     automation_profile_candidate_path = None
     if config_exists:
@@ -315,11 +356,14 @@ def cmd_status(args: argparse.Namespace) -> int:
             wiki_sync = wiki_readiness(config)
             subagents = subagent_status(config)
             runtime_profile = runtime_profile_status(config)
+            environment_profile = environment_profile_status(config)
             automation_profile = build_automation_profile_candidate(config, runtime_profile)
             automation_profile_candidate_path = write_automation_profile_candidate(config, automation_profile)
             if not issue_sync.get("issue_sync_ready"):
                 payload_status = "warn"
             if runtime_profile.get("needs_user_input"):
+                payload_status = "warn"
+            if environment_profile.get("needs_user_input"):
                 payload_status = "warn"
         except QAConfigError as exc:
             payload_status = "error"
@@ -354,6 +398,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         "wiki_sync": wiki_sync,
         "subagents": subagents,
         "runtime_profile": runtime_profile,
+        "environment_profile": environment_profile,
         "automation_profile": automation_profile,
         "automation_profile_candidate_path": automation_profile_candidate_path,
     }
@@ -383,6 +428,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         subagents = subagent_status(config)
         checks.extend(subagents.get("checks", []))
         runtime_profile = runtime_profile_status(config)
+        environment_profile = environment_profile_status(config)
         automation_profile = build_automation_profile_candidate(config, runtime_profile)
         automation_profile_candidate_path = write_automation_profile_candidate(config, automation_profile)
         checks.append({
@@ -395,6 +441,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             ),
             "missing_fields": runtime_profile.get("missing_fields", []),
             "suggested_primary_entrypoint": runtime_profile.get("repo_analysis", {}).get("suggested_primary_entrypoint"),
+        })
+        checks.append({
+            "name": "environment.profile",
+            "status": "WARN" if environment_profile.get("needs_user_input") else "PASS",
+            "message": (
+                "測試環境尚未由使用者確認；準備環境的 case 會被 BLOCK。"
+                if environment_profile.get("needs_user_input")
+                else "測試環境已確認，可進行準備環境的 case。"
+            ),
+            "execution_mode": environment_profile.get("execution_mode"),
+            "blockers": environment_profile.get("blockers", []),
         })
         checks.append({
             "name": "automation.profile",
@@ -441,13 +498,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             "redmine_sync": redmine_ready,
             "subagents": subagents,
             "runtime_profile": runtime_profile,
+            "environment_profile": environment_profile,
             "automation_profile": automation_profile,
             "automation_profile_candidate_path": automation_profile_candidate_path,
             "state_audit": audit_summary(state_audit),
             "wiki_sync": wiki_ready,
             "fix": fix_result,
         }
-        if runtime_profile.get("needs_user_input"):
+        if runtime_profile.get("needs_user_input") or environment_profile.get("needs_user_input"):
             payload["input_required"] = True
             payload["interaction"] = {
                 "type": "needs_input",
@@ -460,14 +518,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 "title": "Runtime profile setup",
                 "language": "zh-Hant",
                 "mode": "questionnaire",
-                "reason": "runtime_profile_missing",
+                "reason": "runtime_profile_missing" if runtime_profile.get("needs_user_input") else "environment_profile_missing",
                 "preferred_mechanism": "clarify",
                 "clarify": {
                     "tool": "clarify",
                     "mode": "one_question_at_a_time",
                     "question_field": "prompt",
                 },
-                "questions": runtime_profile.get("questions", []),
+                "questions": runtime_profile.get("questions", []) + environment_profile.get("questions", []),
                 "automation_profile": automation_profile,
                 "automation_profile_questions": automation_profile.get("questions", []),
                 "answer_format": (
@@ -738,6 +796,52 @@ def cmd_issues_report(args: argparse.Namespace) -> int:
     return print_json(payload, exit_code=0 if payload.get("status") != "blocked" else 4)
 
 
+def _active_local_failure_case_ids(config: ProjectConfig) -> list[str]:
+    local_dir = local_issue_dir(config)
+    if not local_dir.exists():
+        return []
+    latest_path = config.paths.state / "latest-run.json"
+    latest_results: list[dict[str, Any]] | None = None
+    try:
+        latest = json.loads(latest_path.read_text(encoding="utf-8")) if latest_path.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        latest = {}
+    if isinstance(latest, dict) and isinstance(latest.get("results"), list):
+        latest_results = [item for item in latest["results"] if isinstance(item, dict)]
+    failed = {
+        str(item.get("case_id"))
+        for item in latest_results or []
+        if isinstance(item, dict)
+        and str(item.get("status") or "").upper() in {"FAIL", "BLOCK"}
+        and item.get("case_id")
+    }
+    # A completed latest run with no FAIL/BLOCK results has no active local
+    # fix queue. Only fall back to all local work items when there is no
+    # usable latest-run evidence yet.
+    active_filter = failed if latest_results else None
+    return sorted(
+        path.stem for path in local_dir.glob("*.md")
+        if path.stem != "failure-report" and (active_filter is None or path.stem in active_filter)
+    )
+
+
+def cmd_issues_create_from_failure(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        payload = create_issues_from_failures(
+            config,
+            case_id=args.case,
+            all_failures=args.all,
+            include_partial=args.include_partial,
+            dry_run=args.dry_run,
+            mode="local" if args.local else "remote",
+        )
+    except (QAConfigError, IssueSyncError) as exc:
+        return _error_payload(exc)
+    exit_code = 0 if payload.get("status") not in {"error", "blocked"} else (2 if payload.get("status") == "error" else 4)
+    return print_json(payload, exit_code=exit_code)
+
+
 def cmd_issues_show(args: argparse.Namespace) -> int:
     try:
         config = load_project_config(Path(args.root), args.config)
@@ -768,23 +872,50 @@ def cmd_issues_fix(args: argparse.Namespace) -> int:
                 results.append(result)
                 if result.get("status") == "blocked":
                     return print_json({"status": "blocked", "mode": "all", "processed": results, "blocked_issue_id": issue_id}, exit_code=4)
-            return print_json({"status": "ok", "mode": "all", "processed_count": len(results), "processed": results})
-        if args.issue is None:
+            local_case_ids = _active_local_failure_case_ids(config)
+            local_results = []
+            for case_id in local_case_ids:
+                local_result = run_fix_case(config, case_id=case_id)
+                local_results.append(local_result)
+                if local_result.get("status") == "blocked":
+                    return print_json({"status": "blocked", "mode": "all", "processed": results + local_results, "blocked_case_id": case_id}, exit_code=4)
+            return print_json({
+                "status": "ok",
+                "mode": "all",
+                "processed_count": len(results) + len(local_results),
+                "remote_processed_count": len(results),
+                "local_processed_count": len(local_results),
+                "processed": results + local_results,
+            })
+        requested_identifier = args.issue or args.case
+        if requested_identifier is None:
             return print_json(
                 {
                     "status": "error",
                     "error": "issue_required",
-                    "message": "Use /quality-pilot issues fix --issue <id> or /quality-pilot issues fix --all.",
+                    "message": "Use /quality-pilot issues fix --issue <gitea_issue_id>, --case <case_id>, or --all.",
                 },
                 exit_code=2,
             )
-        id_resolution = resolve_identifier(config, args.issue)
+        id_resolution = resolve_identifier(config, requested_identifier)
         issue_id = canonical_issue_id(id_resolution)
+        case_id = canonical_case_id(id_resolution)
         if issue_id is None:
+            if case_id:
+                if args.push_pr:
+                    return print_json({
+                        "status": "blocked",
+                        "error": "remote_issue_id_required_before_pr",
+                        "message": "A local testcase can be fixed locally, but a remote Gitea issue is required before creating a product PR.",
+                        "id_resolution": id_resolution,
+                    }, exit_code=4)
+                payload = run_fix_case(config, case_id=case_id)
+                payload["id_resolution"] = id_resolution
+                return print_json(payload, exit_code=0 if payload.get("status") != "blocked" else 4)
             payload = {
                 "status": "error",
                 "error": "id_domain_mismatch",
-                "message": f"Cannot map `{args.issue}` to a synced Gitea issue id.",
+                "message": f"Cannot map `{requested_identifier}` to a synced Gitea issue or local testcase.",
                 "id_resolution": id_resolution,
             }
             return print_json(payload, exit_code=2)
@@ -1050,7 +1181,12 @@ def _run_cases(args: argparse.Namespace, *, dry_run: bool, one: bool) -> int:
             if resolved_case_id:
                 requested_case_id = resolved_case_id
         contracts = select_contracts(config.paths.cases, requested_case_id)
-        context = RunContext(root=config.root, evidence_dir=config.paths.evidence)
+        environment_profile = environment_profile_status(config)
+        context = RunContext(
+            root=config.root,
+            evidence_dir=config.paths.evidence,
+            environment_profile=environment_profile,
+        )
         results = [run_case(contract, context, dry_run=dry_run) for contract in contracts]
     except QAConfigError as exc:
         return _error_payload(exc)
@@ -1067,17 +1203,41 @@ def _run_cases(args: argparse.Namespace, *, dry_run: bool, one: bool) -> int:
     status = "PASS"
     if dry_run:
         status = "NOT_RUN"
+    elif not results:
+        status = "HOLD"
     elif any(result["status"] == "FAIL" for result in results):
         status = "FAIL"
     elif any(result["status"] == "BLOCK" for result in results):
         status = "BLOCK"
+    elif not any(not result.get("partial_probe") for result in results):
+        # Exit-only/partial probes are useful diagnostics but cannot establish
+        # official QA truth.  Keep the process successful for compatibility,
+        # while making the non-PASS truth explicit to every caller.
+        status = "HOLD"
     exit_code = 1 if status == "FAIL" else (2 if status == "BLOCK" else 0)
-    payload = {"status": status, "results": results}
+    payload = {
+        "status": status,
+        "results": results,
+        "environment_profile": environment_profile,
+        "official_case_count": sum(1 for result in results if not result.get("partial_probe")),
+        "partial_probe_count": sum(1 for result in results if result.get("partial_probe")),
+    }
     if id_resolution:
         payload["id_resolution"] = id_resolution
     if not dry_run:
-        run_payload = _persist_qa_test_run(config, status=status, results=results)
-        payload = {**run_payload, "results": results}
+        run_payload = _persist_qa_test_run(
+            config,
+            status=status,
+            results=results,
+            environment_profile=environment_profile,
+        )
+        payload = {
+            **run_payload,
+            "results": results,
+            "environment_profile": environment_profile,
+            "official_case_count": sum(1 for result in results if not result.get("partial_probe")),
+            "partial_probe_count": sum(1 for result in results if result.get("partial_probe")),
+        }
         if id_resolution:
             payload["id_resolution"] = id_resolution
         payload = _with_auto_wiki(config, payload, event="test_result", latest_run=run_payload)
@@ -1217,7 +1377,13 @@ def cmd_subagent_configure(args: argparse.Namespace) -> int:
     return print_json(payload)
 
 
-def _persist_qa_test_run(config: Any, *, status: str, results: list[dict[str, Any]]) -> dict[str, Any]:
+def _persist_qa_test_run(
+    config: Any,
+    *,
+    status: str,
+    results: list[dict[str, Any]],
+    environment_profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     run_id = utc_now().replace(":", "").replace(".", "")
     config.paths.state.mkdir(parents=True, exist_ok=True)
     counts = {"PASS": 0, "FAIL": 0, "BLOCK": 0, "ABORT": 0, "NOT_RUN": 0}
@@ -1233,6 +1399,7 @@ def _persist_qa_test_run(config: Any, *, status: str, results: list[dict[str, An
         "case_counts": counts,
         "partial_probe_counts": partial_counts,
         "results": results,
+        "environment_profile": environment_profile,
         "latest_run_json": _relative_or_str(latest_run_json, config.root),
         "tracker_writes": {"created": 0, "updated": 0, "blocked_by_gate": 0},
         "source": "cases",
@@ -1305,6 +1472,8 @@ PUBLIC_COMMANDS = [
     "/quality-pilot setup",
     "/quality-pilot doctor",
     "/quality-pilot doctor --fix",
+    "/quality-pilot environment status",
+    "/quality-pilot environment configure --mode <local|remote>",
     "/quality-pilot audit state",
     "/quality-pilot issues sync",
     "/quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]",
@@ -1313,6 +1482,7 @@ PUBLIC_COMMANDS = [
     "/quality-pilot issues show <issue_id>",
     "/quality-pilot issues fix --all",
     "/quality-pilot issues fix --issue <id>",
+    "/quality-pilot issues fix --case <case_id>",
     "/quality-pilot issues fix --issue <id> --push-pr",
     "/quality-pilot cases generate --init",
     "/quality-pilot cases generate --init --count 5",
@@ -1353,13 +1523,15 @@ def cmd_help(args: argparse.Namespace) -> int:
                     "AI Quality Pilot 指令總覽",
                     "",
                     "第一次使用建議流程：",
-                    "1. /quality-pilot setup",
-                    "2. /quality-pilot doctor",
-                    "3. /quality-pilot issues sync",
-                    "4. /quality-pilot cases generate --init",
-                    "5. /quality-pilot cases validate",
-                    "6. /quality-pilot cases run",
-                    "7. /quality-pilot publish wiki apply",
+                    "1. /quality-pilot setup（Hermes 會先強制執行內建 grill-me）",
+                    "2. 沿用同一輪 grill-me 答案，保存 local/remote、入口、fixture、credential env 與副作用邊界",
+                    "3. /quality-pilot environment configure --mode <local|remote>",
+                    "4. /quality-pilot doctor",
+                    "5. /quality-pilot issues sync",
+                    "6. /quality-pilot cases generate --init",
+                    "7. /quality-pilot cases validate",
+                    "8. /quality-pilot cases run",
+                    "9. /quality-pilot publish wiki apply",
                     "",
                     "正式指令：",
                     *[f"- {command}" for command in PUBLIC_COMMANDS],
@@ -1387,6 +1559,22 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--fix", action="store_true", help="Repair missing safe config skeleton and overlay directories before checking")
     doctor.set_defaults(func=cmd_doctor)
 
+    environment = sub.add_parser("environment", help="Confirm and inspect the local or remote test environment")
+    environment_sub = environment.add_subparsers(dest="environment_command", required=True, parser_class=QualityPilotArgumentParser)
+    environment_status_cmd = environment_sub.add_parser("status", help="Show redacted environment readiness and blockers")
+    _add_root_config(environment_status_cmd)
+    environment_status_cmd.set_defaults(func=cmd_environment_status)
+    environment_configure_cmd = environment_sub.add_parser("configure", help="Persist the grill-me-confirmed execution environment")
+    _add_root_config(environment_configure_cmd)
+    environment_configure_cmd.add_argument("--mode", required=True, choices=["local", "remote"], help="Execution target: local checkout or remote test target")
+    environment_configure_cmd.add_argument("--entrypoint", default=None, help="Product runner/binary/API command; never put secrets here")
+    environment_configure_cmd.add_argument("--target-host-env", default=None, help="Environment variable name containing a remote target; value is never stored")
+    environment_configure_cmd.add_argument("--fixture", action="append", default=None, help="Required fixture/config path; repeat for multiple paths")
+    environment_configure_cmd.add_argument("--credential-env", action="append", default=None, help="Credential env var name; repeat for multiple names")
+    environment_configure_cmd.add_argument("--side-effect-boundary", default=None, help="Explicit safe side-effect boundary")
+    environment_configure_cmd.add_argument("--no-confirm", action="store_true", help="Keep the profile unconfirmed until the user finishes preparation")
+    environment_configure_cmd.set_defaults(func=cmd_environment_configure)
+
     audit = sub.add_parser("audit", help="Audit local overlay state consistency")
     audit_sub = audit.add_subparsers(dest="audit_command", required=True, parser_class=QualityPilotArgumentParser)
     audit_state = audit_sub.add_parser("state", help="Show semantic blockers across cases, issues, evidence, reports, MCP, and subagents")
@@ -1407,6 +1595,17 @@ def build_parser() -> argparse.ArgumentParser:
     issues_report = issues_sub.add_parser("report", help="Render per-issue QA report and gated Gitea evidence update request")
     _add_root_config(issues_report)
     issues_report.set_defaults(func=cmd_issues_report)
+    issues_create = issues_sub.add_parser("create-from-failure", help="Write a local SWQA failure report or prepare a complete redacted Gitea issue handoff")
+    _add_root_config(issues_create)
+    failure_mode = issues_create.add_mutually_exclusive_group(required=True)
+    failure_mode.add_argument("--local", action="store_true", help="Write a detailed local report only; never create a Gitea request")
+    failure_mode.add_argument("--remote", action="store_true", help="Prepare a complete redacted SWQA report for gated Gitea MCP creation")
+    failure_scope = issues_create.add_mutually_exclusive_group(required=True)
+    failure_scope.add_argument("--case", help="Create one issue candidate from this failed case id")
+    failure_scope.add_argument("--all", action="store_true", help="Create candidates for all latest official FAIL/BLOCK cases")
+    issues_create.add_argument("--include-partial", action="store_true", help="Include partial probe failures; excluded by default because they may be environment gaps")
+    issues_create.add_argument("--dry-run", action="store_true", help="Preview candidates and write-gate decisions without writing a MCP request")
+    issues_create.set_defaults(func=cmd_issues_create_from_failure)
     issues_show = issues_sub.add_parser("show", help="Show one local issue mirror")
     _add_root_config(issues_show)
     issues_show.add_argument("issue_id", type=int)
@@ -1415,7 +1614,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_root_config(issues_fix)
     scope = issues_fix.add_mutually_exclusive_group(required=True)
     scope.add_argument("--all", action="store_true", help="Fix all synced open issues until blocked")
-    scope.add_argument("--issue", help="Fix one synced open issue; accepts Gitea issue id, ISSUE-<id>, or redmine-<id> when it can be mapped")
+    scope.add_argument("--issue", help="Fix one work item by Gitea issue id, ISSUE-<id>, or testcase id/name")
+    scope.add_argument("--case", help="Fix one local testcase work item by testcase id/name")
     issues_fix.add_argument("--push-pr", action="store_true", help="Push branch and create a PR after issue fix checks pass")
     issues_fix.set_defaults(func=cmd_issues_fix)
 
@@ -1628,6 +1828,12 @@ def _positional_args(argv: list[str]) -> list[str]:
         "--candidate-json",
         "--issue",
         "--result-json",
+        "--mode",
+        "--entrypoint",
+        "--target-host-env",
+        "--fixture",
+        "--credential-env",
+        "--side-effect-boundary",
     }
     for arg in argv:
         if skip_next:
