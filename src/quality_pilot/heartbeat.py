@@ -7,7 +7,7 @@ from typing import Any
 from .case_generation import generate_cases_growing
 from .config import ProjectConfig, json_dumps
 from .issues import issue_status
-from .pipeline import run_close_loop
+from .pipeline import run_close_loop, run_close_loop_task_graph
 from .runner import utc_now
 from .wiki import auto_sync_wiki
 
@@ -43,6 +43,7 @@ def run_heartbeat(
     dry_run: bool = False,
     run_existing_if_no_growth: bool = False,
     fail_on_test_failure: bool = False,
+    legacy: bool = False,
 ) -> dict[str, Any]:
     if every_seconds < 0:
         raise ValueError("heartbeat interval must be >= 0")
@@ -57,8 +58,10 @@ def run_heartbeat(
         case_id=case_id,
         dry_run=dry_run,
         run_existing_if_no_growth=run_existing_if_no_growth,
+        legacy=legacy,
     )
     payload = _heartbeat_payload(
+        config,
         heartbeat_id,
         tick,
         every_seconds=every_seconds,
@@ -78,6 +81,7 @@ def run_heartbeat_once(
     case_id: str | None,
     dry_run: bool,
     run_existing_if_no_growth: bool,
+    legacy: bool = False,
 ) -> dict[str, Any]:
     if dry_run:
         planned_scope: dict[str, Any] = {
@@ -191,7 +195,8 @@ def run_heartbeat_once(
             "next_action": "/quality-pilot cases generate --growing",
         }
 
-    result = run_close_loop(
+    run_function = run_close_loop if legacy else run_close_loop_task_graph
+    result = run_function(
         config,
         case_id=case_id if case_id else None,
         case_ids=None if case_id or run_existing_if_no_growth else selected_case_ids,
@@ -219,9 +224,14 @@ def run_heartbeat_once(
         "growth": growth,
         "run": run_payload,
         "run_status": result.status,
+        "execution_mode": run_payload.get("execution_mode", "legacy" if legacy else "task_graph"),
         "executed_case_ids": selected_case_ids if selected_case_ids else "all",
         "wiki": wiki,
-        "next_action": "/quality-pilot issues report",
+        "next_action": (
+            "/quality-pilot close-loop run-once --resume-task-graph --confirm-publish"
+            if result.status == "HOLD" and not legacy
+            else "/quality-pilot issues report"
+        ),
     }
 
 
@@ -237,7 +247,14 @@ def _growth_has_no_actionable_input(growth: dict[str, Any], issue_sensor: dict[s
 def _issue_sensor_blocked(issue_sensor: dict[str, Any]) -> bool:
     status = str(issue_sensor.get("status") or "").strip().lower()
     blocked_statuses = {"abort", "blocked", "error", "fail", "failed", "unhealthy"}
-    return bool(issue_sensor.get("error")) or status in blocked_statuses
+    readiness = issue_sensor.get("issue_sync") if isinstance(issue_sensor.get("issue_sync"), dict) else {}
+    readiness_status = str(readiness.get("status") or "").strip().lower()
+    return (
+        bool(issue_sensor.get("error"))
+        or status in blocked_statuses
+        or (readiness_status in blocked_statuses and issue_sensor.get("snapshot_exists") is not True)
+        or (issue_sensor.get("snapshot_exists") is False and readiness.get("mcp_snapshot_exists") is not True)
+    )
 
 
 def _safe_int(value: Any) -> int:
@@ -252,15 +269,19 @@ def _issue_sensor(config: ProjectConfig) -> dict[str, Any]:
         payload = issue_status(config)
     except Exception as exc:  # Keep issue sensor failures from hiding growth signals.
         return {"name": "issues_status", "status": "blocked", "error": type(exc).__name__, "message": str(exc)}
+    readiness = payload.get("issue_sync") if isinstance(payload.get("issue_sync"), dict) else {}
     return {
         "name": "issues_status",
         "status": str(payload.get("status") or "unknown"),
         "open_count": payload.get("open_count"),
+        "snapshot_exists": payload.get("snapshot_exists"),
         "traceability_path": payload.get("traceability_map_path"),
+        "issue_sync": readiness,
     }
 
 
 def _heartbeat_payload(
+    config: ProjectConfig,
     heartbeat_id: str,
     tick: dict[str, Any],
     *,
@@ -284,8 +305,8 @@ def _heartbeat_payload(
         "dry_run": dry_run,
         "state_persisted": not dry_run,
         "latest_tick": tick,
-        "state_path": ".quality-pilot-project/state/close-loop/heartbeat-latest.json",
-        "history_path": ".quality-pilot-project/state/close-loop/heartbeat-history.jsonl",
+        "state_path": _relative_or_str(config.paths.state / "close-loop" / "heartbeat-latest.json", config.root),
+        "history_path": _relative_or_str(config.paths.state / "close-loop" / "heartbeat-history.jsonl", config.root),
     }
 
 
@@ -296,6 +317,13 @@ def _persist_heartbeat(config: ProjectConfig, payload: dict[str, Any]) -> None:
     history = directory / "heartbeat-history.jsonl"
     latest.write_text(json_dumps(payload) + "\n", encoding="utf-8")
     history.write_text(history.read_text(encoding="utf-8") + json_dumps(payload) + "\n" if history.exists() else json_dumps(payload) + "\n", encoding="utf-8")
+
+
+def _relative_or_str(path: Path, root: Path) -> str:
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
 
 
 def _heartbeat_id() -> str:

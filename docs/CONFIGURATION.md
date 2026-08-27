@@ -40,6 +40,8 @@ tracker:
     redmine_issues_json: .quality-pilot-project/state/redmine-mcp/issues.json
     wiki_write_request_json: .quality-pilot-project/state/gitea-mcp/wiki-write-request.json
     wiki_write_result_json: .quality-pilot-project/state/gitea-mcp/wiki-write-result.json
+    review_write_request_json: .quality-pilot-project/state/gitea-mcp/review-write-request.json
+    review_write_result_json: .quality-pilot-project/state/gitea-mcp/review-write-result.json
 
 runtime:
   primary_entrypoint: ""
@@ -96,7 +98,8 @@ health is unavailable. See [`CAPABILITY_MATRIX.md`](CAPABILITY_MATRIX.md).
 
 Before any prepared-environment case runs, Hermes must use the mandatory
 `grill-me` interview to establish whether execution is `local` or `remote`, then
-persist the non-secret profile:
+persist the non-secret profile. Users do not need to hand-write the complete
+product/browser contract; setup and review perform deterministic discovery first:
 
 ```text
 /quality-pilot environment status
@@ -104,7 +107,8 @@ persist the non-secret profile:
 ```
 
 For a remote target, configure only an environment variable name and keep the
-value outside the project:
+value outside the project. Existing config, SSH aliases, and repository metadata
+are used as discovery hints; only unresolved external facts are requested.
 
 ```text
 /quality-pilot environment configure --mode remote --entrypoint './bin/product' --target-host-env QUALITY_PILOT_TARGET_HOST --side-effect-boundary 'isolated lab target; no production writes'
@@ -117,6 +121,41 @@ raw target, credential and secret values are never stored. `cases run` and
 `close-loop` BLOCK a contract marked `requires_prepared_environment` until this
 profile is ready.
 
+For a terminal product, `/quality-pilot environment tui-probe` is a bounded
+PTY boundary adapter. It requires the confirmed environment profile and an
+explicit `--expect` screen marker before it can report PASS. `--dry-run` only
+shows the allowlisted argv/terminal plan; missing markers return HOLD, known
+hardware/runtime preconditions return BLOCK, and the transcript is redacted
+into evidence. Process exit alone cannot produce a product FAIL. The
+initial remote form uses argv-only SSH and is not a replacement for a full
+project-owned TUI state/key oracle.
+
+### Product/browser discovery UX
+
+`/quality-pilot setup` and comprehensive `review pr` inspect README commands,
+`--help`/CLI parser evidence, runtime surfaces, and existing
+`tests/browser_ui`/Playwright tests. The result is a candidate summary containing
+runner, execution target, URL discovery policy, Browser smoke steps, and source
+references. One explicit confirmation persists:
+
+```bash
+/quality-pilot setup --confirm-discovery
+```
+
+or, during review:
+
+```bash
+/quality-pilot review pr --repo <owner/repo> --pr-number <number> --confirm-discovery
+```
+
+Before confirmation, candidates are not runnable QA oracles. After confirmation,
+`state/effective-execution-contract.json` is the single normalized authority;
+runtime consumers must not independently merge `runtime.web_ui` and
+`runtime.product_testing.web_ui`. Existing explicit product/browser settings are
+kept, while a detected mismatch (for example a documented `main.py --browser`
+runner versus a generic server module) requires confirmation instead of silent
+override.
+
 Use these fields to prepare automation once:
 
 - `primary_entrypoint`: the user-facing product runner, binary, or API command.
@@ -125,6 +164,56 @@ Use these fields to prepare automation once:
 - `fixture_paths`: non-secret fixture/config paths required for tests.
 - `credential_envs`: names of env vars that hold credentials; never store raw secret values.
 - `side_effect_boundary`: what the runner may and may not touch during unattended execution.
+
+For comprehensive PR product testing, add a user-owned `runtime.product_testing` contract:
+
+```yaml
+runtime:
+  product_testing:
+    enabled: true
+    build_recipe:
+      - "make build"
+    artifact_path: "bin/product"
+    run_operations:
+      - id: documented_smoke
+        command: "./bin/product inspect fixture.json"
+        assertion_type: SEMANTIC
+        assertions:
+          - type: stdout_contains
+            expected: "expected product result"
+    allow_readme_commands: false
+    readme_command_allowlist: []
+    web_ui:
+      enabled: false
+      start_command: "./bin/product serve --port 3000"
+      url: "http://127.0.0.1:3000/"
+      steps:
+        - action: expect_visible
+          selector: "body"
+        - action: click
+          selector: "[data-testid='run']"
+        - action: expect_text
+          selector: "[data-testid='status']"
+          expected: "Complete"
+```
+
+`build_recipe`, `artifact_path`, and `run_operations` are preferred over parsing
+repository text. README commands are candidate input only; setting
+`allow_readme_commands: true` requires a non-empty user-owned regex
+`readme_command_allowlist`. Commands remain subject to the deterministic safety
+validator and are executed with `shell=False` in a disposable writable copy of
+the pinned review worktree. The original worktree is not the build directory.
+A build artifact hash and contract identity hash are recorded in evidence.
+Exit-only/help/version probes are `HOLD`, not product `PASS`.
+
+When `web_ui.enabled` is true, Playwright is required. Install the optional
+Quality Pilot dependency and browser explicitly in the test environment, for
+example `pip install -e '.[browser]'` followed by `python -m playwright install
+chromium`; review never installs browsers automatically. The adapter launches
+the actual product process, opens a real browser, performs the declared
+interactions, and requires at least one positive interaction and semantic UI
+assertion. It records redacted server logs, interaction JSON, screenshot/hash,
+and trace. It never falls back to curl/API/mock DOM.
 
 `doctor` exposes `runtime_profile.repo_analysis` before asking anything. Clarify prompts are bullet-listed and ask only for details the repo analysis could not infer, such as missing runner path, credential env names, target resources, fixture/config paths, or side-effect boundaries for non-parser tests.
 
@@ -184,6 +273,46 @@ Legacy/raw/trimmed Redmine snapshots are rejected for `--redmine-issues`; this p
 This file is generated from repo/config analysis. It records the inferred product entrypoint, user-visible command candidates, generic fixture env names such as `QUALITY_PILOT_FIXTURE_PROFILE`, credential env placeholders such as `QUALITY_PILOT_TEST_USER`, target env names such as `QUALITY_PILOT_TARGET_HOST`, safety classes, and missing external facts.
 
 It must not contain raw secrets and must not be treated as verified test coverage. Case generation should use it as candidate context, then write runnable YAML only after command/oracle/fixture/side-effect review.
+
+## Graph Engineering
+
+Graph Engineering has two boundaries:
+
+- Task Graph configuration is internal to the deterministic engine. It does not require a
+graph-database endpoint, database credentials, or Browser UI. Each compiled node carries scoped
+context keys, input/output contract, validator, owner, side-effect boundary, and checkpoint
+metadata. The default `close-loop run-once` persists its contract-pinned checkpoint at
+`state/close-loop/task-graph-latest.json`.
+- Knowledge Graph local state is created under the host overlay, not in `.quality-pilot.yaml`:
+  - `state/graph/knowledge.sqlite3` — canonical local SQLite store
+  - `state/graph/knowledge-graph.json` — portable redacted export
+  - `state/graph/scope.json` and `state/graph/representation.json`
+  - `state/graph/stages/` — stage reports and fusion/evaluation artifacts
+  - `rules/graph-ontology.yaml` — project-owned ontology starter/source
+  - `state/graph/inputs/qa-candidates-<hash>.json` — redacted projection generated by
+    `graph run --from-qa` from existing contracts, runs, evidence, and optional review report
+  - supplied PR review reports are checked for schema, report hash, pinned head/base, PR identity,
+    open/merged state, optional freshness, and evidence paths;
+    strict failures return `BLOCK`
+
+Every entity, relation, and event requires provenance (`source_ref`, `extracted_at`,
+`confidence`, and evidence). SQLite/JSON are projections; source systems remain authoritative.
+There is no Neo4j setup, credential, network, or Browser dependency. See
+`docs/BDD_GHERKIN_SPEC.md`, `src/quality_pilot/graph_engineering/`, and
+`src/quality_pilot/task_graph.py`.
+
+## PR Review
+
+`review pr --repo <owner/repo> --pr-number <number>` consumes a full Hermes
+Gitea PR snapshot, pins the head SHA in a detached worktree, runs available
+local regression tests, and writes a redacted local report. The report includes
+remediation recommendations for BLOCK/HOLD dimensions. `--confirm` creates a
+local gated advisory review-write request with `state: COMMENT`; incomplete QA
+is allowed in that comment but can never become APPROVED or merge permission.
+After Hermes writes the configured MCP result JSON, `/quality-pilot review apply`
+validates the exact repo/PR/head/report hash, advisory COMMENT state, and records
+a deduplicated local ledger. A stale, failed, or duplicate result never becomes
+review-success truth; the final Gitea decision remains user-owned.
 
 ## Wiki Status
 

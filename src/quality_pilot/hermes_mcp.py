@@ -22,6 +22,8 @@ def tracker_mcp_config(config_data: dict[str, Any]) -> dict[str, Any]:
         "redmine_issues_json": str(mcp.get("redmine_issues_json") or ".quality-pilot-project/state/redmine-mcp/issues.json"),
         "wiki_write_request_json": str(mcp.get("wiki_write_request_json") or ".quality-pilot-project/state/gitea-mcp/wiki-write-request.json"),
         "wiki_write_result_json": str(mcp.get("wiki_write_result_json") or ".quality-pilot-project/state/gitea-mcp/wiki-write-result.json"),
+        "review_write_request_json": str(mcp.get("review_write_request_json") or ".quality-pilot-project/state/gitea-mcp/review-write-request.json"),
+        "review_write_result_json": str(mcp.get("review_write_result_json") or ".quality-pilot-project/state/gitea-mcp/review-write-result.json"),
     }
 
 
@@ -171,6 +173,8 @@ def hermes_mcp_readiness(config: ProjectConfig) -> dict[str, Any]:
             "redmine_issues_json": _relative_or_str(configured_mcp_json_path(config, "redmine_issues_json"), config.root),
             "wiki_write_request_json": _relative_or_str(configured_mcp_json_path(config, "wiki_write_request_json"), config.root),
             "wiki_write_result_json": _relative_or_str(configured_mcp_json_path(config, "wiki_write_result_json"), config.root),
+            "review_write_request_json": _relative_or_str(configured_mcp_json_path(config, "review_write_request_json"), config.root),
+            "review_write_result_json": _relative_or_str(configured_mcp_json_path(config, "review_write_result_json"), config.root),
         },
     }
 

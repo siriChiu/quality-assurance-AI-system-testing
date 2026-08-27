@@ -12,6 +12,21 @@ Hermes 掃到這份 `SKILL.md` 後，agent 會依 skill 指示呼叫 AI Quality 
 
 ## Install From Source Checkout
 
+Nested `/quality-pilot` completion is an optional Hermes source patch, not a
+native Hermes command or authorization layer. The repository carries the exact
+patch and a fail-closed installer so a Hermes package upgrade does not require
+manual edits:
+
+```bash
+cd "/root/repo/AI Quality Pilot"
+python3 tools/install_hermes_nested_completion_patch.py --check
+python3 tools/install_hermes_nested_completion_patch.py
+```
+
+Use `HERMES_AGENT_ROOT=/path/to/hermes-agent` for another source checkout. The
+installer reports `already_applied`, `applicable`, `applied`, or `blocked`; it
+never applies when the Hermes source context has drifted.
+
 假設 AI Quality Pilot source checkout 在 `/root/repo/AI Quality Pilot`：
 
 ```bash
@@ -68,12 +83,17 @@ process，讓 Python completer 載入新程式。背景 gateway 若由 systemd �
 
 `install-skill` 也會在 Hermes skills directory 缺少 `grill-me` 時植入最小
 companion `SKILL.md`；若使用者已經有自己的 `grill-me`，安裝器不會覆寫它。
+同時會把 MIT-licensed `graph-engineering` 的 tutor、WORKFLOWS 與 references 安裝到
+`~/.hermes/skills/quality-pilot/references/graph-engineering/`，但實際 graph artifact
+仍必須透過 `/quality-pilot graph ...` dispatcher 驗證。
 
-重掃並重啟後，在輸入框鍵入 `/quality-pilot` 尚未按 Enter 時，Hermes 會顯示輸入期下拉補全。第一列是裸指令總覽，後面可沿著 nested tree 繼續選擇 `cases generate`、`publish wiki status`、`close-loop heartbeat`，leaf command 也會提示 `--init`、`--growing` 等安全選項。這個選單來自 `SKILL.md` 的 `metadata.hermes.completion`，不是 dispatcher 回傳後的 `next_actions`。若舊版 Hermes 只顯示 `/quality-pilot` 名稱而沒有子功能，需更新 Hermes 的 slash completer；本環境目前已在 `/usr/local/lib/hermes-agent` 套用這項 completion integration，日後更新 Hermes 時需保留同等支援。
+重掃並重啟後，在輸入框鍵入 `/quality-pilot` 尚未按 Enter 時，Hermes 會顯示輸入期下拉補全。第一列是裸指令總覽；輸入空格後，skill-owned completion tree 會繼續列出 `cases generate`、`publish wiki status`、`close-loop heartbeat`，leaf command 也會提示 `--init`、`--growing` 等安全選項。這些 nested entries 只是 `SKILL.md` 的 UI metadata，不是 Hermes native command，也不是執行授權；真正執行仍由 `/quality-pilot` dispatcher 驗證。若舊版 Hermes 只顯示 `/quality-pilot` 名稱而沒有子功能，需更新 Hermes 的 skill completer；本環境已補上 nested skill completion integration，更新後需重啟 Hermes process。
 
 只有生產型 `/quality-pilot` workflow 會強制執行已安裝的 `grill-me` companion：
 `setup`、`doctor --fix`、`environment configure`、`issues sync/create-from-failure/fix`、所有 `cases generate ...`、`cases push-pr`、
-`publish wiki plan/apply`、所有 `close-loop ...`、`tracker plan-write` 與
+`publish wiki plan/apply`、所有 `close-loop ...`、會寫入的 `graph scope`、
+`graph representation`、`graph ontology`、`graph extract`、`graph quality-gate`、
+`graph fuse`、`graph evaluate`、`graph run`、`tracker plan-write` 與
 `subagent configure`。使用者不需要另外輸入 `/grill-me`；Hermes 會自行完成訪談、等待回答
 後才呼叫 dispatcher。status/list/report/validate、Wiki status、issue show 與已明確的
 `cases run <case_id>` 不會觸發 gate。若 production scope 缺少 companion，流程會停止並
@@ -105,6 +125,8 @@ companion `SKILL.md`；若使用者已經有自己的 `grill-me`，安裝器不�
 /quality-pilot environment status
 /quality-pilot environment configure --mode <local|remote>
 /quality-pilot audit state
+/quality-pilot review pr --repo <owner/repo> --pr-number <number>
+/quality-pilot review apply
 
 /quality-pilot issues sync
 /quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]
@@ -176,6 +198,8 @@ tracker:
     redmine_issues_json: .quality-pilot-project/state/redmine-mcp/issues.json
     wiki_write_request_json: .quality-pilot-project/state/gitea-mcp/wiki-write-request.json
     wiki_write_result_json: .quality-pilot-project/state/gitea-mcp/wiki-write-result.json
+    review_write_request_json: .quality-pilot-project/state/gitea-mcp/review-write-request.json
+    review_write_result_json: .quality-pilot-project/state/gitea-mcp/review-write-result.json
 ```
 
 這只是設定 AI Quality Pilot 與 Hermes MCP 的本地交接路徑；它不會修改 Hermes 的 MCP server 註冊。
@@ -195,6 +219,84 @@ QUALITY_PILOT_HERMES_MCP_SERVERS=gitea,redmine
 ```
 
 預設位置是 `.quality-pilot-project/state/hermes-mcp/status.json`。如果缺 Gitea 或 Redmine MCP，`/quality-pilot doctor` 會一開始就顯示。
+
+## Graph Engineering Workflow
+
+Hermes now exposes both halves of Graph Engineering:
+
+```text
+Knowledge Graph: scope -> representation -> ontology -> extraction
+                -> quality-gate -> fusion -> evaluation -> serving
+Task Graph:     Context -> Contract -> DAG -> parallel workers
+                -> separate verifier -> owned merge -> human gate
+                -> checkpoint -> targeted repair
+```
+
+The Knowledge Graph local runtime is a provenance-backed read model using SQLite canonical
+state and JSON export under `.quality-pilot-project/state/graph/`. Prefer the integration
+path `graph run --from-qa`, which projects existing case contracts, canonical run/evidence
+records, and an optional pinned PR review report. Supplied review reports are checked for
+schema, report hash, pinned head/base, PR identity, open/merged state, optional freshness,
+and evidence paths. External candidate JSON/YAML remains
+an explicit adapter. It validates ontology domain/range, keeps LLM extraction candidate-only,
+and requires a human confirmation before fusion. It does not require Neo4j or a remote database.
+
+Use the modular commands:
+
+```text
+/quality-pilot graph tutor
+/quality-pilot graph scope --question "..."
+/quality-pilot graph representation
+/quality-pilot graph ontology
+/quality-pilot graph run --from-qa --question "Which test run produced evidence for this case?"
+/quality-pilot graph extract --input candidate.json  # external adapter only
+/quality-pilot graph quality-gate --gold labels.json
+/quality-pilot graph fuse
+/quality-pilot graph evaluate --gold labels.json
+/quality-pilot graph serve --entity <id-or-name>
+/quality-pilot graph run
+```
+
+The core validates real data dependencies, scoped context, single-writer ownership,
+verifier separation, stop rules, checkpoints, and irreversible-action approvals.
+Current executable BDD contracts are under `docs/bdd/`; implementation is
+`src/quality_pilot/graph_engineering/` plus `src/quality_pilot/task_graph.py`.
+The MIT-licensed reference material is installed under
+`~/.hermes/skills/quality-pilot/references/graph-engineering/`.
+
+Hermes uses the QA Task Graph path by default; the fixed sequence is available only as an explicit fallback:
+
+```text
+/quality-pilot close-loop run-once
+/quality-pilot close-loop run-once --resume-task-graph --confirm-publish
+/quality-pilot close-loop run-once --repair-node execute:<case_id> --resume-task-graph
+/quality-pilot close-loop run-once --legacy
+```
+
+Without explicit confirmation the human gate returns `HOLD`; confirmation only
+runs the local publication checkpoint and never authorizes a remote write.
+
+For setup specifically, `readiness.mode: SETUP_READY` means the local config and
+overlay were created successfully. Remote MCP readiness remains a separate issue.
+
+## Gitea PR Review MCP Workflow
+
+`/quality-pilot review pr` is local-first and comprehensive by default. It pins the
+branch/PR head, reconstructs an empty snapshot diff when possible, runs the repository
+regression suite, and invokes PR-scoped case generation/run for the QA matrix. Use
+`--diff-only` only for an explicitly reduced review. After the conclusion,
+remediation recommendations, and advisory COMMENT preview are explicitly confirmed,
+it writes a redacted `review-write-request.json`; it does not call Gitea itself.
+A BLOCK/HOLD result may still be commented for code-review feedback, but the
+request is always `state: COMMENT` and never an approval. Hermes must call
+the configured Gitea MCP review tool only for that exact request. Write the
+MCP response to `state/gitea-mcp/review-write-result.json`, then run
+`/quality-pilot review apply`. The apply step validates schema, advisory COMMENT
+state, allowed target, repository, PR number, pinned head SHA, report hash, and
+deduplication key. It records failed responses as retryable local state and
+returns `duplicate` for a previously reconciled request. Neither a request, a
+successful MCP response, nor self-review is approval or merge permission; the
+user owns the final COMMENT/REQUEST_CHANGES/APPROVED decision.
 
 ## Gitea MCP Workflow
 
@@ -308,7 +410,8 @@ Hermes agent 收到 `/quality-pilot ...` 時必須：
 4. 把 `payload.next_actions` 呈現成繁中選單。
 5. 若 `payload.hermes_needs_input.status == "required"`，呼叫 `clarify`，只問大分類阻擋問題，不逐一審每個 testcase。
 6. 使用者明確輸入 `/quality-pilot ...` 後，可自動讀 MCP、寫本地 overlay state、執行已驗證 side-effect-safe 的 case；遠端寫入、Wiki apply、push branch、建立 PR、或可能碰觸外部資源的測試仍必須經 AI Quality Pilot gate 與必要確認。
-7. 長文字候選稿可透過 `/quality-pilot subagent status` 所設定的 subagent 產生；Open WebUI endpoint 與 model 都由 deployment owner 提供，core 不預設 private network 位址。API key 僅能以 `api_key_env` 指向環境變數。Subagent 只能回 candidate text/JSON，不可直接寫檔、建立 issue、更新 Wiki 或開 PR。
+7. 長文字候選稿可透過 `/quality-pilot subagent status` 所設定的 Open WebUI subagent 產生；endpoint 與 model 都由 deployment owner 提供，core 不預設 private network 位址。API key 僅能以 `api_key_env` 指向環境變數。Subagent 只能回 candidate text/JSON，不可直接寫檔、建立 issue、更新 Wiki 或開 PR。
+8. 本機 `subagents` MCP server 是另一個 DeepSeek/Kimi/Qwen/Xiaomi Mimo council，不是 Open WebUI profile。需要多方意見時使用 `quality-pilot-subagents` adapter，逐一詢問四個 provider 並保留 unavailable/error。Z.ai 暫時明確排除，直到 capacity/security record gate 恢復。MCP 回傳文字、暫存 output、`logged_in` 或印出的 URL 都不等於 provider chat record；必須重新載入同一 authenticated URL/ID 並核對 prompt/answer，否則標為 `UNVERIFIED`。這個 council 僅供 lead agent 開發時客觀分析，不是 Quality Pilot runtime 功能，也不得直接寫入 contracts、runs、evidence、graph 或 remote request。
 
 Dispatcher command shape:
 

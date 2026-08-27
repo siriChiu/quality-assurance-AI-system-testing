@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .contracts import CaseContract, CommandAssertion, CommandContract
+from .security import redact_text as _redact_text
 
 DEFAULT_TIMEOUT_SEC = 120
 TIMEOUT_ENV = "QUALITY_PILOT_RUN_TIMEOUT_SEC"
@@ -49,6 +50,10 @@ class RunContext:
     # CLI supplies the redacted environment profile.  Direct library callers
     # may omit it to preserve the existing low-level runner behaviour.
     environment_profile: dict[str, Any] | None = None
+    adapter_config: Any | None = None
+    adapter_snapshot: dict[str, Any] | None = None
+    adapter_review_id: str | None = None
+    product_python: Path | None = None
 
 
 def utc_now() -> str:
@@ -57,6 +62,12 @@ def utc_now() -> str:
 
 def run_case(contract: CaseContract, context: RunContext, *, dry_run: bool = False) -> dict[str, Any]:
     started_at = utc_now()
+    case_type = str(contract.raw.get("case_type") or "command")
+    if case_type in {"product", "product_build", "product_operation", "playwright_ui"}:
+        if context.adapter_config is None or context.adapter_snapshot is None or not context.adapter_review_id:
+            return _blocked_case(contract, context.root, context.evidence_dir / contract.case_id, started_at, blocked_reason="product_case_adapter_context_missing")
+        from .product_case_adapter import execute_product_case
+        return execute_product_case(contract, context, config=context.adapter_config, snapshot=context.adapter_snapshot, review_id=context.adapter_review_id, dry_run=dry_run)
     case_evidence_dir = context.evidence_dir / contract.case_id
     case_evidence_dir.mkdir(parents=True, exist_ok=True)
     if not dry_run and _review_required_before_run(contract):
@@ -96,6 +107,7 @@ def run_case(contract: CaseContract, context: RunContext, *, dry_run: bool = Fal
         status = "BLOCK"
         exit_code = 2
     oracle_profile = _case_oracle_profile(contract)
+    quality_pilot = contract.raw.get("quality_pilot") if isinstance(contract.raw.get("quality_pilot"), dict) else {}
     payload = {
         "case_id": contract.case_id,
         "title": contract.title,
@@ -110,6 +122,9 @@ def run_case(contract: CaseContract, context: RunContext, *, dry_run: bool = Fal
         "commands": command_results,
         "evidence": sorted(_relative_or_str(path, context.root) for path in case_evidence_dir.glob("*")),
         "contract_hash": contract.contract_hash,
+        "run_id": None,
+        "confirmed_bug": bool(contract.raw.get("confirmed_bug") or quality_pilot.get("confirmed_bug")),
+        "evidence_profile": quality_pilot.get("evidence_profile") or contract.raw.get("evidence_profile"),
         "started_at": started_at,
         "ended_at": ended_at,
         "exit_code": 0 if dry_run else exit_code,
@@ -121,6 +136,26 @@ def run_case(contract: CaseContract, context: RunContext, *, dry_run: bool = Fal
     result_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     payload["result_path"] = _relative_or_str(result_path, context.root)
     return payload
+
+
+def stamp_result_run_id(result: dict[str, Any], root: Path, run_id: str) -> dict[str, Any]:
+    """Bind a case result and its persisted result.json to the enclosing run."""
+    result["run_id"] = run_id
+    raw_path = result.get("result_path")
+    if not raw_path:
+        return result
+    path = Path(str(raw_path))
+    if not path.is_absolute():
+        path = root / path
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return result
+    if not isinstance(payload, dict):
+        return result
+    payload["run_id"] = run_id
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    return result
 
 
 def _review_required_before_run(contract: CaseContract) -> bool:
@@ -172,6 +207,7 @@ def _safe_environment_profile(profile: dict[str, Any] | None) -> dict[str, Any] 
         "target": profile.get("target", {}),
         "fixtures": profile.get("fixtures", []),
         "credentials": profile.get("credentials", []),
+        "remote_preflight": profile.get("remote_preflight"),
     }
 
 
@@ -217,6 +253,7 @@ def _blocked_case(
 ) -> dict[str, Any]:
     ended_at = utc_now()
     oracle_profile = _case_oracle_profile(contract)
+    quality_pilot = contract.raw.get("quality_pilot") if isinstance(contract.raw.get("quality_pilot"), dict) else {}
     command_results = [
         {
             "id": command.id,
@@ -247,6 +284,9 @@ def _blocked_case(
         "commands": command_results,
         "evidence": [],
         "contract_hash": contract.contract_hash,
+        "run_id": None,
+        "confirmed_bug": bool(contract.raw.get("confirmed_bug") or quality_pilot.get("confirmed_bug")),
+        "evidence_profile": quality_pilot.get("evidence_profile") or contract.raw.get("evidence_profile"),
         "started_at": started_at,
         "ended_at": ended_at,
         "exit_code": 2,
@@ -549,24 +589,9 @@ def classify_command_risk(command: str) -> dict[str, Any]:
 
 
 def redact_secrets(text: str) -> str:
-    redacted = str(text or "")
-    patterns = [
-        r"sk-[A-Za-z0-9_-]{12,}",
-        r"ghp_[A-Za-z0-9_]{12,}",
-        r"(?i)(password|passwd|api[_-]?key|token|secret)\s*[:=]\s*[^ \n\r\t]+",
-        r"-----BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY-----[\s\S]+?-----END (?:RSA |OPENSSH |EC )?PRIVATE KEY-----",
-    ]
-    for pattern in patterns:
-        redacted = re.sub(pattern, lambda match: _redacted_secret(match.group(0)), redacted)
-    return redacted
-
-
-def _redacted_secret(value: str) -> str:
-    if "=" in value or ":" in value:
-        separator = "=" if "=" in value else ":"
-        key = value.split(separator, 1)[0]
-        return f"{key}{separator}[REDACTED]"
-    return "[REDACTED]"
+    """Redact known secret formats while preserving the runner API."""
+    redacted, _findings = _redact_text(str(text or ""))
+    return re.sub(r"\[REDACTED:[^\]]+\]", "[REDACTED]", redacted)
 
 
 def _runner_env(environment_profile: dict[str, Any] | None = None) -> dict[str, str]:

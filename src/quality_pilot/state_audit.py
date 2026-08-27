@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .bdd_contract import audit_bdd_contract
 from .command_policy import validate_generated_command
 from .config import ProjectConfig
 from .contracts import CaseContract, list_contract_paths, load_contract
@@ -31,11 +32,25 @@ def audit_project_state(config: ProjectConfig) -> dict[str, Any]:
     _audit_evidence_contract_consistency(config, contracts, latest_run, findings)
     _audit_redmine_handoffs(config, findings)
     _audit_gitea_handoffs(config, findings)
+    _audit_review_handoffs(config, findings)
     _audit_wiki_handoffs(config, findings)
     _audit_fix_plan(config, contracts, traceability, findings)
     _audit_reports(config, latest_run, findings)
     _audit_mcp_status(config, findings)
     _audit_subagents(config, findings)
+    bdd_contract = audit_bdd_contract()
+    if bdd_contract.get("unbound_current_scenario_count", 0):
+        _add_finding(
+            findings,
+            id="bdd_current_binding_gap",
+            severity="warning",
+            category="bdd",
+            message="Current BDD scenarios exist without executable pytest-bdd bindings.",
+            evidence=[Path(str(bdd_contract.get("feature_path")))],
+            recommendation="Bind current scenarios or explicitly mark them partial/planned; unittest count is not BDD coverage.",
+            unbound_current_scenario_count=bdd_contract.get("unbound_current_scenario_count"),
+            coverage_percent=bdd_contract.get("coverage_percent"),
+        )
 
     finding_counts = _count_by_severity(findings)
     status = "blocked" if finding_counts.get("blocker", 0) else ("warn" if finding_counts.get("warning", 0) else "ok")
@@ -53,6 +68,7 @@ def audit_project_state(config: ProjectConfig) -> dict[str, Any]:
         "blockers": [item["id"] for item in findings if item.get("severity") == "blocker"],
         "warnings": [item["id"] for item in findings if item.get("severity") == "warning"],
         "findings": findings,
+        "bdd_contract": bdd_contract,
         "next_actions": _next_actions(findings),
     }
 
@@ -389,6 +405,64 @@ def _audit_gitea_handoffs(config: ProjectConfig, findings: list[dict[str, Any]])
             )
 
 
+def _audit_review_handoffs(config: ProjectConfig, findings: list[dict[str, Any]]) -> None:
+    request_path = configured_mcp_json_path(config, "review_write_request_json")
+    result_path = configured_mcp_json_path(config, "review_write_result_json")
+    request = _load_json(request_path, findings, required=False)
+    result = _load_json(result_path, findings, required=False)
+    if not isinstance(request, dict):
+        return
+    if request.get("schema") != "quality-pilot.gitea-mcp-review-write-request.v1":
+        _add_finding(
+            findings,
+            id="review_mcp_request_schema_invalid",
+            severity="blocker",
+            category="review_handoff",
+            message="The persisted review MCP request does not use the approved request schema.",
+            evidence=[request_path],
+            recommendation="Discard the request and regenerate it through the deterministic review command.",
+        )
+        return
+    if not isinstance(result, dict):
+        if str(request.get("status") or "") == "needs_mcp_apply":
+            _add_finding(
+                findings,
+                id="review_mcp_apply_pending",
+                severity="warning",
+                category="review_handoff",
+                message="A confirmed review request is waiting for the Hermes Gitea MCP result.",
+                evidence=[request_path],
+                recommendation="Use the exact request with Hermes Gitea MCP, save the result, then run `/quality-pilot review apply`.",
+                repo=request.get("repo"),
+                pr_number=request.get("pr_number"),
+                head_sha=request.get("head_sha"),
+            )
+        return
+    success = result.get("ok") is True or str(result.get("status") or "").lower() in {"ok", "success", "applied"}
+    for field in ("repo", "pr_number", "head_sha", "report_hash"):
+        if result.get(field) not in (None, "") and str(result.get(field)) != str(request.get(field)):
+            _add_finding(
+                findings,
+                id=f"review_mcp_result_stale_{field}",
+                severity="blocker",
+                category="review_handoff",
+                message="The review MCP result does not match the pinned local review request.",
+                evidence=[request_path, result_path],
+                recommendation="Do not reconcile this result; fetch/apply the result for the current request head and report hash.",
+                field=field,
+            )
+    if not success:
+        _add_finding(
+            findings,
+            id="review_mcp_write_failed",
+            severity="warning",
+            category="review_handoff",
+            message="The Hermes Gitea MCP review write did not report success.",
+            evidence=[request_path, result_path],
+            recommendation="Keep the local review report and retry the same gated request after fixing the remote failure.",
+        )
+
+
 def _audit_wiki_handoffs(config: ProjectConfig, findings: list[dict[str, Any]]) -> None:
     request_path = configured_mcp_json_path(config, "wiki_write_request_json")
     result_path = configured_mcp_json_path(config, "wiki_write_result_json")
@@ -686,6 +760,12 @@ def _state_artifacts(config: ProjectConfig) -> list[dict[str, Any]]:
         hermes_mcp_status_path(config),
         config.paths.reports / "status.md",
         config.paths.reports / "wiki-status.md",
+        config.paths.state / "graph" / "knowledge.sqlite3",
+        config.paths.state / "graph" / "knowledge-graph.json",
+        config.paths.state / "graph" / "scope.json",
+        config.paths.state / "graph" / "fusion-plan.json",
+        config.paths.state / "graph" / "evaluation.json",
+        config.paths.state / "graph" / "task-graph-latest.json",
     ]
     artifacts: list[dict[str, Any]] = []
     for path in candidates:

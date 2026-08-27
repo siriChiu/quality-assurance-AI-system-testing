@@ -110,6 +110,10 @@ def build_automation_profile_candidate(
         targets=targets,
     )
     questions = _questions_from_missing(missing_external_facts)
+    executable_commands = [item for item in command_candidates if set(item.get("safety_classes", [])) & {"readiness", "read_only", "credentialed", "target_required"} and "unknown" not in item.get("safety_classes", [])]
+    documentation_snippets = [item for item in command_candidates if item not in executable_commands and item.get("source") == "README"]
+    operational_notes = [item for item in command_candidates if item not in executable_commands and item not in documentation_snippets and "mutating" in item.get("safety_classes", [])]
+    unknown_candidates = [item for item in command_candidates if item not in executable_commands and item not in documentation_snippets and item not in operational_notes]
     return {
         "schema": AUTOMATION_PROFILE_SCHEMA,
         "status": "needs_external_facts" if missing_external_facts else "ready_for_candidate_generation",
@@ -134,6 +138,10 @@ def build_automation_profile_candidate(
         "credentials": credentials,
         "targets": targets,
         "command_candidates": command_candidates,
+        "executable_commands": executable_commands,
+        "documentation_snippets": documentation_snippets,
+        "operational_notes": operational_notes,
+        "unknown_candidates": unknown_candidates,
         "missing_external_fact_count": len(missing_external_facts),
         "missing_external_facts": missing_external_facts,
         "questions": questions,

@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from .config import find_raw_secret_paths
+from .evidence import confirmed_bug_evidence_required, evaluate_confirmed_bug_evidence
+from .security import find_secret_text, find_sensitive_paths
 
 
 @dataclass(frozen=True)
@@ -18,6 +20,7 @@ class WriteGateResult:
     sync_current: bool = True
     post_authored_by_actor: bool = True
     contains_internal_text: bool = False
+    confirmed_bug_evidence: dict[str, Any] | None = None
     reason_codes: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
@@ -32,6 +35,7 @@ class WriteGateResult:
             "sync_current": self.sync_current,
             "post_authored_by_actor": self.post_authored_by_actor,
             "contains_internal_text": self.contains_internal_text,
+            "confirmed_bug_evidence": self.confirmed_bug_evidence,
             "reason_codes": list(self.reason_codes or ((self.reason,) if self.reason != "allowed" else ())),
         }
 
@@ -50,11 +54,20 @@ def evaluate_write_gate(
 ) -> WriteGateResult:
     result = result or {}
     contains_raw_secret = bool(find_raw_secret_paths({"config": config_data, "result": result}))
+    contains_raw_secret = contains_raw_secret or bool(find_sensitive_paths({"config": config_data, "result": result}))
+    contains_raw_secret = contains_raw_secret or bool(find_secret_text(write_text))
     contract_hash = result.get("contract_hash")
     contract_match = expected_contract_hash in {None, "", contract_hash}
     evidence_current = bool(result.get("evidence")) and result.get("status") in {"PASS", "FAIL", "BLOCK"}
     post_authored_by_actor = _post_authored_by_actor(actor_login, post_author_login)
     contains_internal_text = _contains_internal_text(write_text)
+    confirmed_bug_evidence = None
+    if confirmed_bug_evidence_required(result):
+        confirmed_bug_evidence = evaluate_confirmed_bug_evidence(
+            result,
+            contract_hash=expected_contract_hash,
+            pr_head=result.get("pr_head") or result.get("head_sha"),
+        )
     tracker = config_data.get("tracker") if isinstance(config_data.get("tracker"), dict) else {}
     provider = str(tracker.get("provider", "none")).lower()
     reasons: list[str] = []
@@ -74,6 +87,8 @@ def evaluate_write_gate(
         reasons.append("post_not_authored_by_actor")
     if contains_internal_text:
         reasons.append("internal_text_leak")
+    if confirmed_bug_evidence and not confirmed_bug_evidence.get("allowed"):
+        reasons.append(str(confirmed_bug_evidence.get("reason") or "confirmed_bug_evidence_incomplete"))
     if provider in {"", "none", "disabled"}:
         reasons.append("tracker_disabled")
     reason = reasons[0] if reasons else "allowed"
@@ -88,6 +103,7 @@ def evaluate_write_gate(
         sync_current=sync_current,
         post_authored_by_actor=post_authored_by_actor,
         contains_internal_text=contains_internal_text,
+        confirmed_bug_evidence=confirmed_bug_evidence,
         reason_codes=tuple(reasons),
     )
 

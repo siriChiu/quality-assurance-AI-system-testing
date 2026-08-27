@@ -22,13 +22,37 @@ tracker:
     redmine_issues_json: .quality-pilot-project/state/redmine-mcp/issues.json
     wiki_write_request_json: .quality-pilot-project/state/gitea-mcp/wiki-write-request.json
     wiki_write_result_json: .quality-pilot-project/state/gitea-mcp/wiki-write-result.json
+    review_write_request_json: .quality-pilot-project/state/gitea-mcp/review-write-request.json
+    review_write_result_json: .quality-pilot-project/state/gitea-mcp/review-write-result.json
 runtime:
   primary_entrypoint: ""
+  execution_mode: ""
+  environment_confirmed: false
   binary_env: QUALITY_PILOT_BINARY
   target_host_env: QUALITY_PILOT_TARGET_HOST
   fixture_paths: []
   credential_envs: []
   side_effect_boundary: ""
+  execution:
+    local_review_worktree: true
+    local_pytest: true
+    product_target: ""
+    playwright_target: ""
+    contract_confirmed: false
+  remote:
+    ssh_host: ""
+    remote_repo: ""
+    remote_python: ""
+    expected_head_sha: ""
+  product_testing:
+    enabled: true
+    allow_readme_commands: false
+    readme_command_allowlist: []
+    build_recipe: []
+    artifact_path: ""
+    run_operations: []
+    web_ui:
+      enabled: false
 subagents:
   enabled: true
   default_profile: open-webui

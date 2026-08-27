@@ -226,6 +226,19 @@ expected: Sensor inventory should be populated after cold boot.
             encoding="utf-8",
         )
 
+    def test_setup_prefers_product_tui_entrypoint_over_install_script(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "main.py").write_text("parser.add_argument('--tui')\n", encoding="utf-8")
+            (root / "install.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (root / "install.sh").chmod(0o755)
+            code, setup = self.run_cli(["setup", "--root", tmp, "--json"])
+            self.assertEqual(code, 0)
+            runtime = setup["runtime_profile"]
+            self.assertEqual(runtime["effective"]["primary_entrypoint"], "python3 main.py --tui")
+            self.assertEqual(runtime["repo_analysis"]["suggested_primary_entrypoint"], "python3 main.py --tui")
+            self.assertEqual(setup["automation_profile"]["runtime"]["primary_entrypoint"], "python3 main.py --tui")
+
     def test_setup_and_doctor_analyze_repo_before_runtime_questions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -858,7 +871,7 @@ expected: The product command should fail with the documented error.
             self.assertEqual(second_payload["issue_create_count"], 0)
             self.assertEqual(second_payload["skipped"][0]["reason"], "issue_create_already_requested")
 
-    def test_cases_generate_redmine_issues_uses_user_confirmed_safe_probe_command(self) -> None:
+    def test_cases_generate_redmine_issues_treats_external_safe_probe_as_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self.init_gitea_project(tmp)
             snapshot_path = self.write_redmine_issues(root)
@@ -897,13 +910,14 @@ expected: The product command should fail with the documented error.
             self.assertIn("expected", case_yaml["source"]["qa_summary"])
             self.assertIn("evidence", case_yaml["source"]["qa_summary"])
             self.assertIn("missing_for_executable_case", case_yaml["source"]["qa_summary"])
-            self.assertEqual(case_yaml["source"]["safe_runner"]["command"], "irctool --version")
-            self.assertEqual(case_yaml["source"]["safe_runner"]["command_source"], "Safe Probe Command")
+            self.assertNotEqual(case_yaml["source"]["safe_runner"]["command"], "irctool --version")
+            self.assertIn("AI-derived product binary", case_yaml["source"]["safe_runner"]["command_source"])
+            self.assertIn("rejected_safe_command", case_yaml["source"]["safe_runner"])
             self.assertEqual(case_yaml["source"]["safe_runner"]["expected_exit_code"], 0)
             confirmed = case_yaml["source"]["safe_runner"]["user_confirmed_inputs"]
             self.assertTrue(any("No lab fixture required" in item["value"] for item in confirmed["fixtures_environment"]))
-            self.assertTrue(any("prints Python version" in item["value"] for item in confirmed["oracle"]))
-            self.assertTrue(any("Read-only local version check" in item["value"] for item in confirmed["side_effect_boundaries"]))
+            self.assertTrue(confirmed["oracle"])
+            self.assertTrue(confirmed["side_effect_boundaries"])
             self.assertIn("Steps to reproduce:", case_yaml["source"]["redmine_message"])
             self.assertIn("Expected: populated sensor inventory should be returned after cold boot.", case_yaml["source"]["redmine_message"])
             self.assertIn("Full journal note: cold boot reproduces after AC cycle; do not shorten this text.", case_yaml["source"]["redmine_message"])
@@ -911,11 +925,12 @@ expected: The product command should fail with the documented error.
             self.assertIn("cold-boot-sensors.log", case_yaml["source"]["redmine_message"])
             self.assertIn("### Raw Redmine JSON", case_yaml["source"]["redmine_message"])
             self.assertNotIn("gitea_sync_plan", case_yaml["source"])
-            self.assertEqual(case_yaml["quality_pilot"]["executable_scope"], "redmine_user_confirmed_safe_probe")
-            self.assertEqual(case_yaml["quality_pilot"]["safe_command_source"], "Safe Probe Command")
-            self.assertEqual(case_yaml["quality_pilot"]["safe_runner"]["command"], "irctool --version")
+            self.assertEqual(case_yaml["quality_pilot"]["executable_scope"], "redmine_ai_derived_safe_probe")
+            self.assertIn("AI-derived product binary", case_yaml["quality_pilot"]["safe_command_source"])
+            self.assertNotEqual(case_yaml["quality_pilot"]["safe_runner"]["command"], "irctool --version")
+            self.assertTrue(case_yaml["quality_pilot"]["review_required_before_run"])
             self.assertEqual(case_yaml["commands"][0]["id"], "safe_probe")
-            self.assertEqual(case_yaml["commands"][0]["run"], "irctool --version")
+            self.assertNotEqual(case_yaml["commands"][0]["run"], "irctool --version")
             self.assertNotIn("__quality_pilot_invalid_command__", case_yaml["commands"][0]["run"])
 
     def test_cases_generate_redmine_issues_keeps_incomplete_safe_runner_as_follow_up(self) -> None:
@@ -944,8 +959,9 @@ expected: The product command should fail with the documented error.
             case_path = root / ".quality-pilot-project" / "cases" / "REDMINE-144780.yaml"
             self.assertTrue(case_path.exists())
             case_yaml = load_yaml(case_path)
-            self.assertEqual(case_yaml["quality_pilot"]["safe_command_source_type"], "user_confirmed")
-            self.assertEqual(case_yaml["commands"][0]["run"], "irctool --version")
+            self.assertEqual(case_yaml["quality_pilot"]["safe_command_source_type"], "ai_derived")
+            self.assertNotEqual(case_yaml["commands"][0]["run"], "irctool --version")
+            self.assertTrue(case_yaml["quality_pilot"]["review_required_before_run"])
             follow_up = case_yaml["quality_pilot"]["follow_up_needed"]
             self.assertIn("fixtures, environment, credentials, or explicit none-required note", follow_up)
             self.assertIn("pass/fail oracle or expected result", follow_up)
@@ -2142,7 +2158,9 @@ democtl = "demo.cli:main"
 
             self.assertEqual(code, 0)
             self.assertEqual(payload["wiki"]["auto_sync"]["event"], "case_generation")
-            self.assertEqual(payload["wiki"]["auto_sync"]["status"], "blocked")
+            self.assertEqual(payload["wiki"]["auto_sync"]["status"], "local_only")
+            self.assertFalse(payload["wiki"]["auto_sync"]["remote_apply"])
+            self.assertFalse(payload["wiki"]["auto_sync"]["remote_request_created"])
             self.assertTrue((root / ".quality-pilot-project" / "state" / "wiki-plan.json").exists())
             report = (root / ".quality-pilot-project" / "reports" / "wiki-status.md").read_text(encoding="utf-8")
             self.assertIn("NOT_RUN", report)

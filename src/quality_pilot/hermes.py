@@ -22,6 +22,8 @@ ROOT_COMMANDS = {
     "doctor",
     "environment",
     "audit",
+    "graph",
+    "review",
     "issues",
     "cases",
     "publish",
@@ -55,6 +57,18 @@ HERMES_COMPLETION_TREE = {
         "description": "確認 local/remote 測試環境與執行前阻塞條件",
         "subcommands": {
             "status": {"description": "查看去機密化環境 readiness"},
+            "tui-probe": {
+                "description": "用 PTY 取得 TUI transcript；不把互動探針冒充 PASS",
+                "args_hint": "[--dry-run] [--expect <marker>] [--key <key>]",
+                "options": {
+                    "--entrypoint": "產品 TUI 入口命令",
+                    "--mode": "local 或 remote",
+                    "--duration": "PTY capture 秒數",
+                    "--expect": "畫面 marker；可重複",
+                    "--key": "送入按鍵；可重複",
+                    "--dry-run": "只預覽，不啟動 TUI",
+                },
+            },
             "configure": {
                 "description": "保存 grill-me 確認的測試環境",
                 "args_hint": "--mode <local|remote>",
@@ -73,6 +87,47 @@ HERMES_COMPLETION_TREE = {
         "description": "查看目前 QA 狀態與證據",
         "subcommands": {
             "state": {"description": "稽核 cases、issues、evidence 與 reports"},
+        },
+    },
+    "graph": {
+        "description": "模組化 Graph Engineering：Knowledge Graph + Task Graph",
+        "subcommands": {
+            "tutor": {"description": "逐階段學習九階段 Graph Engineering"},
+            "status": {"description": "查看 ontology、SQLite/JSON、provenance 與 stage 狀態"},
+            "scope": {"description": "記錄 competency questions 與 source authority", "options": {"--question": "問題，可重複", "--source": "source reference，可重複"}},
+            "representation": {"description": "選擇 SQLite canonical 與 JSON export"},
+            "ontology": {"description": "驗證 entity/relation/event ontology", "options": {"--ontology": "ontology YAML/JSON 路徑"}},
+            "extract": {"description": "從既有 QA artifacts 或候選 JSON/YAML 驗證 provenance-backed facts", "options": {"--input": "外部候選 JSON/YAML，可重複", "--kind": "all/entities/relations/events"}},
+            "quality-gate": {"description": "執行 structural 與 adjudicated precision/recall gate", "options": {"--gold": "標註 gold JSON"}},
+            "fuse": {"description": "預覽或套用可逆 entity fusion", "options": {"--confirm": "確認 merge plan"}},
+            "evaluate": {"description": "以 gold set 評估 graph claims", "options": {"--gold": "標註 gold JSON"}},
+            "serve": {"description": "唯讀 provenance-preserving subgraph serving", "options": {"--entity": "entity id 或 canonical name", "--hops": "最多 3 hops"}},
+            "run": {"description": "用 Task Graph checkpoint 執行九階段 workflow；可投影既有 QA artifacts", "options": {"--from-qa": "使用既有 cases/runs/evidence", "--case-id": "限制 QA case，可重複", "--review": "指定 pinned PR review report", "--confirm-fusion": "確認 fusion gate", "--resume": "恢復 checkpoint", "--repair-node": "修復指定 node"}},
+        },
+    },
+    "review": {
+        "description": "在 local review 任意可讀取的 Gitea PR",
+        "subcommands": {
+            "pr": {
+                "description": "分析 pinned branch/PR、依 changed files 選擇 targeted product-test oracle、執行 regression 與 comprehensive QA cases 並準備 gated reply",
+                "args_hint": "--repo <owner/repo> --pr-number <number>",
+                "options": {
+                    "--repo": "Gitea owner/repository",
+                    "--pr-number": "Pull Request number",
+                    "--pr-json": "Hermes Gitea PR snapshot JSON",
+                    "--checkout": "用於 fetch 的 local git checkout",
+                    "--confirm": "確認 payload preview 並建立 gated reply request",
+                    "--dry-run": "只預覽，不執行測試或寫入 request",
+                    "--diff-only": "跳過 case generate/run 與 targeted oracle，只做 diff review 與 regression tests",
+                },
+            },
+            "apply": {
+                "description": "驗證 Hermes Gitea MCP review result 並完成 local reconciliation",
+                "options": {
+                    "--request-json": "review request JSON 路徑",
+                    "--result-json": "Hermes MCP result JSON 路徑",
+                },
+            },
         },
     },
     "issues": {
@@ -162,11 +217,17 @@ HERMES_COMPLETION_TREE = {
         "subcommands": {
             "status": {"description": "查看 close-loop pipeline 與 latest run"},
             "run-once": {
-                "description": "執行固定 pipeline 一次",
+                "description": "預設用 Task Graph 執行 deterministic pipeline；可明確退回 legacy",
                 "options": {
                     "--case-id": "只執行指定 case",
                     "--dry-run": "預覽而不執行寫入",
                     "--fail-on-test-failure": "測試失敗時回傳非零",
+                    "--task-graph": "相容旗標；Task Graph 已是預設",
+                    "--legacy": "明確使用 fixed-sequence fallback",
+                    "--resume-task-graph": "從最新 Task Graph checkpoint 繼續",
+                    "--repair-node": "只失效指定 node 與 descendants",
+                    "--confirm-publish": "確認 local publication node；不執行 remote write",
+                    "--max-workers": "限制平行 Task Graph worker 數量",
                 },
             },
             "heartbeat": {
@@ -178,6 +239,7 @@ HERMES_COMPLETION_TREE = {
                     "--dry-run": "預覽而不執行寫入",
                     "--run-existing-if-no-growth": "沒有新 growth 時跑既有 cases",
                     "--fail-on-test-failure": "測試失敗時回傳非零",
+                    "--legacy": "使用 legacy fixed-sequence runner",
                 },
             },
         },
@@ -293,6 +355,7 @@ def dispatch_chat_command(message: str, *, root: str | Path = ".") -> dict[str, 
             "chat_response": render_chat_response(payload, exit_code=2),
         }
 
+    command_path = _command_path(command.engine_argv)
     help_payload = _help_payload(command.engine_argv)
     if help_payload:
         help_payload = _with_next_actions(help_payload, command.engine_argv, 0)
@@ -358,6 +421,9 @@ def render_chat_response(payload: dict[str, Any], *, exit_code: int = 0) -> str:
         blockers = readiness.get("blockers")
         if isinstance(blockers, list) and blockers:
             lines.append(f"         readiness.blockers: {', '.join(map(str, blockers[:5]))}")
+        remote_blockers = readiness.get("remote_sync_blockers")
+        if isinstance(remote_blockers, list) and remote_blockers:
+            lines.append(f"         remote_sync.blockers: {', '.join(map(str, remote_blockers[:5]))}")
     if isinstance(payload.get("ux_recovery"), dict):
         recovery = payload["ux_recovery"]
         lines.append(f"         recovery: {recovery.get('problem_class')}")
@@ -373,6 +439,19 @@ def render_chat_response(payload: dict[str, Any], *, exit_code: int = 0) -> str:
         lines.append(f"         path: {payload.get('path')}")
     if payload.get("workspace"):
         lines.append(f"         workspace: {payload.get('workspace')}")
+    if isinstance(payload.get("runtime_profile"), dict):
+        runtime = payload["runtime_profile"]
+        effective = runtime.get("effective") if isinstance(runtime.get("effective"), dict) else {}
+        if effective.get("primary_entrypoint"):
+            lines.append(f"         entrypoint: {effective.get('primary_entrypoint')}")
+        if runtime.get("needs_user_input"):
+            lines.append("         entrypoint: needs_user_confirmation")
+    if isinstance(payload.get("environment_profile"), dict):
+        environment = payload["environment_profile"]
+        lines.append(f"         environment: {environment.get('execution_mode') or 'unconfigured'}")
+        blockers = environment.get("blockers")
+        if isinstance(blockers, list) and blockers:
+            lines.append(f"         environment.blockers: {', '.join(map(str, blockers[:5]))}")
     if isinstance(payload.get("tracker_setup"), dict):
         tracker_setup = payload["tracker_setup"]
         lines.append(f"         tracker_setup: {tracker_setup.get('provider', '-')}/{tracker_setup.get('gitea_backend', '-')}")
@@ -388,6 +467,8 @@ def render_chat_response(payload: dict[str, Any], *, exit_code: int = 0) -> str:
         lines.append(f"         latest_run_json: {payload.get('latest_run_json')}")
     if payload.get("report_path"):
         lines.append(f"         report: {payload.get('report_path')}")
+    if payload.get("schema") == "quality-pilot.code-review.v1":
+        lines.extend(_review_preview_lines(payload))
     if isinstance(payload.get("wiki"), dict):
         wiki = payload["wiki"]
         auto = wiki.get("auto_sync") if isinstance(wiki.get("auto_sync"), dict) else {}
@@ -500,6 +581,126 @@ def render_chat_response(payload: dict[str, Any], *, exit_code: int = 0) -> str:
     if isinstance(next_actions, list) and next_actions:
         lines.extend(["", *_next_actions_lines(next_actions)])
     return "\n".join(lines)
+
+
+def _review_preview_lines(payload: dict[str, Any]) -> list[str]:
+    lines = ["", "PR review preview:"]
+    lines.append(f"- target: {payload.get('repo', '-')}#{payload.get('pr_number', '-')}")
+    lines.append(f"- base: {payload.get('base_ref') or payload.get('base_sha', '-')}")
+    lines.append(f"- branch: {payload.get('head_ref') or '-'}")
+    lines.append(f"- head: {payload.get('head_sha', '-')}")
+    lines.append(f"- test_outcome: {payload.get('test_outcome', '-')}")
+    lines.append(f"- product_test_outcome: {payload.get('product_test_outcome', '-')}")
+    lines.append(f"- qa_outcome: {payload.get('qa_outcome', '-')}")
+    lines.append(f"- approval decision: {payload.get('review_decision', 'USER_DECISION_REQUIRED')}")
+    lines.append(f"- conclusion: {payload.get('conclusion', '-')}")
+    test_results = payload.get("test_results") if isinstance(payload.get("test_results"), list) else []
+    if test_results:
+        lines.append("- tests:")
+        for result in test_results[:8]:
+            if not isinstance(result, dict):
+                continue
+            lines.append(
+                f"  - {result.get('status', '-')} {result.get('id', '-')}: "
+                f"{result.get('command', '')}"
+            )
+    else:
+        lines.append("- tests: none selected")
+
+    qa_review = payload.get("qa_review") if isinstance(payload.get("qa_review"), dict) else {}
+    if qa_review:
+        lines.append(f"- comprehensive QA: {qa_review.get('outcome', '-')} ({qa_review.get('mode', '-')})")
+        generation = qa_review.get("generation") if isinstance(qa_review.get("generation"), dict) else {}
+        generated = generation.get("generated_count")
+        if generated is None:
+            generated = len(generation.get("generated", [])) if isinstance(generation.get("generated"), list) else 0
+        case_count = len(qa_review.get("cases", [])) if isinstance(qa_review.get("cases"), list) else 0
+        lines.append(f"- case generation: {generation.get('status', '-')} (new {generated}, executed {case_count})")
+        matrix = qa_review.get("matrix") if isinstance(qa_review.get("matrix"), dict) else {}
+        if matrix:
+            lines.append("- QA matrix:")
+            for dimension in ("black_box", "white_box", "functional", "boundary", "stress", "documentation"):
+                item = matrix.get(dimension)
+                if not isinstance(item, dict):
+                    continue
+                reason = f" — {item.get('reason')}" if item.get("reason") else ""
+                lines.append(f"  - {dimension}: {item.get('status', '-')}" + reason)
+        cases = qa_review.get("cases") if isinstance(qa_review.get("cases"), list) else []
+        if cases:
+            lines.append("- generated case runs:")
+            for case in cases[:12]:
+                if not isinstance(case, dict):
+                    continue
+                dimensions = ",".join(str(item) for item in case.get("dimensions", [])[:3])
+                lines.append(f"  - {case.get('status', '-')} {case.get('case_id', '-')} [{dimensions}]: {case.get('result_path', '')}")
+        if qa_review.get("workspace"):
+            lines.append(f"- QA workspace: {qa_review.get('workspace')}")
+
+    findings = payload.get("findings") if isinstance(payload.get("findings"), list) else []
+    if findings:
+        lines.append(f"- findings: {len(findings)}")
+        for finding in findings[:12]:
+            if not isinstance(finding, dict):
+                continue
+            location = f"{finding.get('path', '-')}:{finding.get('line', '-')}"
+            lines.append(
+                f"  - [{finding.get('severity', '-')}] {location}: "
+                f"{finding.get('message', '')}"
+            )
+    else:
+        lines.append("- findings: none")
+
+    developer = payload.get("developer_review") if isinstance(payload.get("developer_review"), dict) else {}
+    developer_summary = developer.get("summary") if isinstance(developer.get("summary"), dict) else {}
+    if developer:
+        lines.append("- developer code review summary:")
+        lines.append("  - decision: COMMENT (advisory; user-owned, not approval)")
+        lines.append(
+            "  - issues: "
+            f"{developer_summary.get('total_issues', 0)} total; "
+            f"must-fix {developer_summary.get('must_fix', 0)}, "
+            f"should-fix {developer_summary.get('should_fix', 0)}, "
+            f"nice-to-have {developer_summary.get('nice_to_have', 0)}"
+        )
+
+    recommendations = payload.get("recommendations") if isinstance(payload.get("recommendations"), list) else []
+    next_actions = payload.get("next_actions") if isinstance(payload.get("next_actions"), list) else []
+    if next_actions:
+        lines.append("- next actions:")
+        for action in next_actions[:8]:
+            lines.append(f"  - {action}")
+    if recommendations:
+        lines.append("- recommendations:")
+        for item in recommendations[:10]:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                f"  - [{item.get('severity', '-')}] {item.get('recommendation', '')} "
+                f"(verify: {item.get('verification', '')})"
+            )
+
+    remote = payload.get("remote_reply") if isinstance(payload.get("remote_reply"), dict) else {}
+    preview = remote.get("preview") if isinstance(remote.get("preview"), dict) else {}
+    if preview:
+        lines.append("- remote reply preview:")
+        lines.append(f"  - state: {preview.get('state', 'COMMENT')}")
+        lines.append(f"  - summary: {preview.get('summary', '-')}")
+        inline = preview.get("inline_comments") if isinstance(preview.get("inline_comments"), list) else []
+        if inline:
+            lines.append("  - inline comments:")
+            for comment in inline[:12]:
+                if not isinstance(comment, dict):
+                    continue
+                location = f"{comment.get('path', '-')}:{comment.get('line', '-')}"
+                lines.append(f"    - {location}: {comment.get('body', '')}")
+        else:
+            lines.append("  - inline comments: none")
+    if remote:
+        lines.append(f"- remote request: {remote.get('status', '-')}")
+        lines.append(f"- remote apply: {remote.get('remote_apply', False)}")
+    # Local report paths are intentionally omitted from the Gitea-facing
+    # response. The full Chinese Markdown body is the review content.
+    return lines
 
 
 def _issue_sync_lines(issue_sync: dict[str, Any]) -> list[str]:
@@ -769,17 +970,23 @@ def _suggest_next_actions_without_recovery(payload: dict[str, Any], engine_argv:
             _next("首次建立 SWQA cases", "/quality-pilot cases generate --init", confirm=True),
         ]
     if current == "setup":
-        if "gitea_mcp_snapshot_missing" in blockers:
-            return [
-                _next("用 Hermes Gitea MCP 讀取 issues，寫入 snapshot 後重跑 sync", "/quality-pilot issues sync", confirm=True),
-                _next("完成 grill-me 後確認測試環境", "/quality-pilot environment status"),
-                _next("執行健康檢查", "/quality-pilot doctor"),
-            ]
-        return [
-            _next("完成 grill-me 後確認測試環境", "/quality-pilot environment status"),
-            _next("執行健康檢查", "/quality-pilot doctor"),
-            _next("同步 Gitea issues", "/quality-pilot issues sync", confirm=True),
-        ]
+        actions = []
+        runtime = payload.get("runtime_profile") if isinstance(payload.get("runtime_profile"), dict) else {}
+        if runtime.get("needs_user_input"):
+            actions.append(_next("確認產品實際入口與 runtime profile", "/quality-pilot environment configure --mode <local|remote>", confirm=True))
+        else:
+            actions.append(_next("確認測試環境與副作用邊界", "/quality-pilot environment status"))
+        actions.append(_next("執行健康檢查", "/quality-pilot doctor"))
+        remote = payload.get("remote_sync_readiness") if isinstance(payload.get("remote_sync_readiness"), dict) else {}
+        if remote.get("issue_sync_ready"):
+            actions.append(_next("同步 Gitea issues", "/quality-pilot issues sync", confirm=True))
+        else:
+            actions.append({
+                "label": "遠端 issue sync 尚未 ready；先由 Hermes Gitea MCP 讀取 issues 並寫入 snapshot",
+                "kind": "ask_user",
+                "blocked_by": remote.get("blockers", []),
+            })
+        return actions
     if current == "environment status":
         profile = payload.get("environment_profile") if isinstance(payload.get("environment_profile"), dict) else {}
         if profile.get("ready"):
@@ -791,6 +998,13 @@ def _suggest_next_actions_without_recovery(payload: dict[str, Any], engine_argv:
         return [
             _next("完成 grill-me 後保存測試環境", "/quality-pilot environment configure --mode <local|remote>", confirm=True),
             _next("查看環境阻塞原因", "/quality-pilot environment status"),
+        ]
+    if current == "environment tui-probe":
+        if status in {"pass", "ok"}:
+            return [_next("查看 TUI transcript evidence", "/quality-pilot report status"), _next("執行健康檢查", "/quality-pilot doctor")]
+        return [
+            _next("先確認 environment profile 與 TUI oracle marker", "/quality-pilot environment status"),
+            _next("以 dry-run 檢查 PTY/entrypoint 計畫", "/quality-pilot environment tui-probe --dry-run"),
         ]
     if current == "environment configure":
         return [
@@ -942,6 +1156,18 @@ def _suggest_next_actions_without_recovery(payload: dict[str, Any], engine_argv:
     if current == "cases push-pr":
         return [_next("查看 issue/fix 狀態", "/quality-pilot issues status"), _next("查看 Wiki 狀態", "/quality-pilot publish wiki status")]
     if current == "close-loop run-once":
+        if payload.get("execution_mode") == "task_graph":
+            task_graph = payload.get("task_graph") if isinstance(payload.get("task_graph"), dict) else {}
+            actions = [_next("查看 Task Graph checkpoint/report", "/quality-pilot report json")]
+            if task_graph.get("human_gate_status") == "HOLD":
+                actions.append(
+                    _next(
+                        "確認 local publication gate",
+                        "/quality-pilot close-loop run-once --resume-task-graph --confirm-publish",
+                        confirm=True,
+                    )
+                )
+            return actions
         return [
             _next("查看 Wiki 自動同步狀態", "/quality-pilot publish wiki status"),
             _next("產生 issue QA report/evidence handoff", "/quality-pilot issues report"),
@@ -1190,7 +1416,7 @@ def build_agent_manifest(*, wrapper_path: str | None = None, runner_command: str
         "name": "quality-pilot",
         "display_name": "AI Quality Pilot",
         "version": __version__,
-        "description": "Hermes-first deterministic QA lifecycle agent/plugin for Gitea issue sync, tests, publishing, and PR flow.",
+        "description": "Hermes-first deterministic QA and Graph Engineering agent/plugin for provenance-backed Knowledge Graph workflows, Task Graph orchestration, Gitea issue sync, tests, publishing, and PR flow.",
         "command_prefix": PRIMARY_PREFIX,
         "aliases": [ALIAS_PREFIX],
         "entrypoint": {
@@ -1216,8 +1442,23 @@ def build_agent_manifest(*, wrapper_path: str | None = None, runner_command: str
             f"{PRIMARY_PREFIX} doctor",
             f"{PRIMARY_PREFIX} doctor --fix",
             f"{PRIMARY_PREFIX} environment status",
+            f"{PRIMARY_PREFIX} environment tui-probe",
             f"{PRIMARY_PREFIX} environment configure --mode <local|remote>",
             f"{PRIMARY_PREFIX} audit state",
+            f"{PRIMARY_PREFIX} graph tutor",
+            f"{PRIMARY_PREFIX} graph status",
+            f"{PRIMARY_PREFIX} graph scope --question <question>",
+            f"{PRIMARY_PREFIX} graph representation",
+            f"{PRIMARY_PREFIX} graph ontology",
+            f"{PRIMARY_PREFIX} graph extract --input <candidate.json>",
+            f"{PRIMARY_PREFIX} graph quality-gate --gold <labels.json>",
+            f"{PRIMARY_PREFIX} graph fuse",
+            f"{PRIMARY_PREFIX} graph evaluate --gold <labels.json>",
+            f"{PRIMARY_PREFIX} graph serve --entity <id-or-name>",
+            f"{PRIMARY_PREFIX} graph run",
+            f"{PRIMARY_PREFIX} graph run --from-qa --question <question>",
+            f"{PRIMARY_PREFIX} review pr --repo <owner/repo> --pr-number <number>",
+            f"{PRIMARY_PREFIX} review apply",
             f"{PRIMARY_PREFIX} issues sync",
             f"{PRIMARY_PREFIX} issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]",
             f"{PRIMARY_PREFIX} issues status",
@@ -1246,7 +1487,10 @@ def build_agent_manifest(*, wrapper_path: str | None = None, runner_command: str
             f"{PRIMARY_PREFIX} publish wiki apply",
             f"{PRIMARY_PREFIX} close-loop status",
             f"{PRIMARY_PREFIX} close-loop run-once",
+            f"{PRIMARY_PREFIX} close-loop run-once --resume-task-graph --confirm-publish",
+            f"{PRIMARY_PREFIX} close-loop run-once --legacy",
             f"{PRIMARY_PREFIX} close-loop heartbeat",
+            f"{PRIMARY_PREFIX} close-loop heartbeat --legacy",
             f"{PRIMARY_PREFIX} report status",
             f"{PRIMARY_PREFIX} report json",
             f"{PRIMARY_PREFIX} tracker plan-write",
@@ -1346,11 +1590,11 @@ def default_skills_dir() -> Path:
 def build_skill_markdown(*, runner_command: str = "quality-pilot-hermes") -> str:
     return f"""---
 name: quality-pilot
-description: "AI Quality Pilot dynamic skill: call the deterministic QA lifecycle engine for issues, cases, Wiki status, close-loop health, reports, and gated PR flow."
+description: "AI Quality Pilot dynamic skill: deterministic QA lifecycle, modular Graph Engineering (Knowledge Graph + Task Graph), provenance, evidence, and gated PR flow."
 license: MIT
 metadata:
   hermes:
-    tags: [qa, testing, deterministic, evidence, write-gate, tracker, dynamic-skill]
+    tags: [qa, testing, deterministic, evidence, provenance, graph-engineering, write-gate, tracker, dynamic-skill]
     required_companion_skills:
       - grill-me
     required_companion_commands:
@@ -1358,6 +1602,7 @@ metadata:
         - setup
         - doctor --fix
         - environment configure
+        - environment tui-probe
         - issues sync
         - issues create-from-failure
         - issues fix
@@ -1366,10 +1611,15 @@ metadata:
         - publish wiki plan
         - publish wiki apply
         - close-loop
+        - graph scope
+        - graph ontology
+        - graph extract
+        - graph fuse
+        - graph run
         - tracker plan-write
         - subagent configure
     completion:
-      args_hint: "[help|setup|doctor|environment|audit|issues|cases|publish|close-loop|report|tracker|subagent]"
+      args_hint: "[help|setup|doctor|environment|audit|graph|review|issues|cases|publish|close-loop|report|tracker|subagent]"
       # legacy args_hint retained for older Hermes frontmatter readers:
       # args_hint: "[help|setup|doctor|audit|issues|cases|publish|close-loop|report|tracker|subagent]"
       subcommands:
@@ -1384,6 +1634,23 @@ It makes `/quality-pilot ...` visible to Hermes as a dynamic skill slash command
 
 AI Quality Pilot is responsible for issue sync, case contracts, test execution, evidence, write gate, automatic Gitea Wiki status sync, gated issue publishing, and Gitea PR creation. Hermes may answer questions and make code changes, but it must not bypass AI Quality Pilot for tracker/wiki/PR decisions.
 
+Graph Engineering has two halves. Knowledge Graphs model what the agent remembers: ontology-first entities, typed relations/events, provenance, quality gates, reversible fusion, evaluation, and read-only serving. Task Graphs model how the agent works: real data dependencies, parallel fan-out, separate verifiers, one owned merge, human gates, checkpoints, and targeted repair. Quality Pilot combines them without requiring Neo4j: SQLite is the canonical local KG store and JSON is the portable export; source systems remain authoritative.
+
+## Integrated Graph Engineering Reference
+
+This skill incorporates the MIT-licensed `codejunkie99/graph-engineering` teaching material under
+`references/graph-engineering/`. Its modular workflows (`WORKFLOWS.md`) are translated into the
+`/quality-pilot graph ...` dispatcher. The reference has two halves: Knowledge Graph stages
+(scope, representation, ontology, extraction, quality gate, fusion, serving) and Task Graph
+orchestration. Use the reference for teaching depth, but use the dispatcher for validated,
+provenance-backed artifacts and write gates. The integration-first path is
+`graph run --from-qa --question <question>`: it projects existing case contracts, canonical
+run/evidence records, and an optional pinned PR review report into graph candidates. A
+supplied review report is validated for schema, report hash, pinned head/base, PR identity,
+open/merged state, optional `updated_at`, and evidence paths.
+External candidate JSON/YAML remains an adapter path, not a replacement for those source authorities.
+An LLM/subagent never writes graph state directly.
+
 ## Public Command Surface
 
 Only these `/quality-pilot` commands are public:
@@ -1394,8 +1661,23 @@ Only these `/quality-pilot` commands are public:
 - `/quality-pilot doctor`
 - `/quality-pilot doctor --fix`
 - `/quality-pilot environment status`
+- `/quality-pilot environment tui-probe`
 - `/quality-pilot environment configure --mode <local|remote>`
 - `/quality-pilot audit state`
+- `/quality-pilot graph tutor`
+- `/quality-pilot graph status`
+- `/quality-pilot graph scope --question <question>`
+- `/quality-pilot graph representation`
+- `/quality-pilot graph ontology`
+- `/quality-pilot graph extract --input <candidate.json>`
+- `/quality-pilot graph quality-gate --gold <labels.json>`
+- `/quality-pilot graph fuse`
+- `/quality-pilot graph evaluate --gold <labels.json>`
+- `/quality-pilot graph serve --entity <id-or-name>`
+- `/quality-pilot graph run`
+- `/quality-pilot graph run --from-qa --question <question>`
+- `/quality-pilot review pr --repo <owner/repo> --pr-number <number>`
+- `/quality-pilot review apply`
 - `/quality-pilot issues sync`
 - `/quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]`
 - `/quality-pilot issues status`
@@ -1425,10 +1707,13 @@ Only these `/quality-pilot` commands are public:
 - `/quality-pilot publish wiki apply`
 - `/quality-pilot close-loop status`
 - `/quality-pilot close-loop run-once`
+- `/quality-pilot close-loop run-once --resume-task-graph --confirm-publish`
+- `/quality-pilot close-loop run-once --legacy`
 - `/quality-pilot close-loop run-once --fail-on-test-failure`
 - `/quality-pilot close-loop heartbeat`
 - `/quality-pilot close-loop heartbeat --case-id <case_id>`
 - `/quality-pilot close-loop heartbeat --fail-on-test-failure`
+- `/quality-pilot close-loop heartbeat --legacy`
 - `/quality-pilot report status`
 - `/quality-pilot report json`
 - `/quality-pilot tracker plan-write`
@@ -1448,7 +1733,7 @@ When the user invokes `/quality-pilot <arguments>`, you must:
 5. Reply primarily with the JSON `chat_response` field.
 6. If `payload.hermes_needs_input.status == "required"` or `payload.input_required == true`, call Hermes `clarify` for the category-level blocking inputs in `payload.hermes_needs_input.questions[]`; do not downgrade it to a normal next-action menu.
 7. If `payload.ux_recovery.recommended_command` exists, present it before any normal menu item and ask for confirmation when `recommended_command_requires_confirmation` is true.
-8. Treat `payload.readiness.mode` as the single readiness summary. Do not suggest remote writes when it is `WRITE_BLOCKED_MCP` or `SYNC_BLOCKED`.
+8. Treat `payload.readiness.mode` as the single summary for the current command scope. `SETUP_READY` means local overlay creation succeeded; inspect `remote_sync_mode`/`remote_sync_blockers` before remote issue or Wiki actions. Do not suggest remote writes when the current remote-sync mode is `WRITE_BLOCKED_MCP` or `SYNC_BLOCKED`.
 9. If `chat_response` is missing, summarize `status`, `payload.status`, `payload.error`, `payload.message`, `latest_run_json`, `report_path`, and evidence paths.
 10. Preserve failures. If the dispatcher exits non-zero or emits invalid JSON, tell the user the exit code and useful stderr/stdout details.
 
@@ -1458,7 +1743,7 @@ turn the bare command into an `empty_quality_pilot_command` error.
 
 Hermes MCP rule: AI Quality Pilot does not store Gitea/Redmine URLs, repo names, or token environment variables in `.quality-pilot.yaml`. It relies on the user's Hermes session to provide MCP servers. At the start of setup/doctor, make the available server list visible to AI Quality Pilot through `QUALITY_PILOT_HERMES_MCP_SERVERS=gitea,redmine` or the configured `.quality-pilot-project/state/hermes-mcp/status.json`. If Gitea or Redmine MCP is missing or unknown, tell the user immediately and do not pretend remote sync/write is ready.
 
-Gitea MCP rule: if the product repo config uses `tracker.provider: hermes_mcp`, you may use Hermes' configured Gitea MCP tooling for four narrow operations only: read issue data before `/quality-pilot issues sync`, create Gitea issues after `/quality-pilot issues sync --redmine-issues ...` or explicit `/quality-pilot issues create-from-failure --remote ...` returns `status: needs_mcp_apply` with a gated `mcp_issue_write_request`, update linked FAIL/BLOCK evidence after `/quality-pilot issues report` returns its gated evidence handoff, and update the configured Wiki page after `/quality-pilot publish wiki apply` returns `status: needs_mcp_apply` with a gated `mcp_write_request`. `--local` never creates a remote request. Do not treat the MCP read itself as a completed sync.
+Gitea MCP rule: if the product repo config uses `tracker.provider: hermes_mcp`, you may use Hermes' configured Gitea MCP tooling for five narrow operations only: read issue data before `/quality-pilot issues sync`, create Gitea issues after `/quality-pilot issues sync --redmine-issues ...` or explicit `/quality-pilot issues create-from-failure --remote ...` returns `status: needs_mcp_apply` with a gated `mcp_issue_write_request`, update linked FAIL/BLOCK evidence after `/quality-pilot issues report` returns its gated evidence handoff, update the configured Wiki page after `/quality-pilot publish wiki apply` returns `status: needs_mcp_apply` with a gated `mcp_write_request`, and post an explicitly confirmed advisory review comment after `/quality-pilot review pr` returns a confirmed `review-write-request.json`. A BLOCK/HOLD QA result may still produce a COMMENT handoff with remediation advice; it must never be transformed into APPROVED or merge permission. For the review path, write the exact MCP result to the configured result path and run `/quality-pilot review apply`; do not call arbitrary PR/comment tools. `--local` never creates a remote request. Do not treat the MCP read itself as a completed sync.
 
 Gitea MCP snapshot workflow (when the user confirms, chooses a suggested sync option, or invokes `/quality-pilot issues sync` after `gitea_mcp_snapshot_missing`):
 1. Use Gitea MCP read-only pagination for the current Hermes product repository context, typically `state=all` and `perPage=50`, until an empty page is returned.
@@ -1466,6 +1751,13 @@ Gitea MCP snapshot workflow (when the user confirms, chooses a suggested sync op
 3. If the MCP list response includes pull requests mixed with issues, keep only real Gitea issues before writing the AI Quality Pilot `issues` list. A reliable guard is `html_url` containing `/issues/` and excluding `/pulls/`.
 4. Immediately run `/quality-pilot issues sync` via the dispatcher command.
 5. In this snapshot workflow, never use Gitea MCP for issue comments, issue creation, PRs, or arbitrary remote writes.
+
+Gitea PR review write workflow (only after `/quality-pilot review pr --repo <owner/repo> --pr-number <number>` returns a confirmed local request):
+1. Read `payload.remote_reply.preview`, `payload.recommendations`, and the exact `state/gitea-mcp/review-write-request.json`.
+2. Confirm the request schema is `quality-pilot.gitea-mcp-review-write-request.v1`, operation is `gitea.pull_request.review`, `state` is exactly `COMMENT`, `advisory_only` is true, `safety.allowed_targets` is only `pull_request_review`, and the head SHA/report hash match the displayed report. BLOCK/HOLD evidence is allowed in an advisory comment; it is not a reason to claim approval.
+3. Call the configured Hermes Gitea MCP review tool for that exact repository, PR number, current head, `state=COMMENT`, `body`, and inline comments. Every inline comment must preserve `finding_id`, `head_sha`, `report_hash`, path/line, and idempotency key.
+4. Write the MCP response JSON to `state/gitea-mcp/review-write-result.json`, then run `/quality-pilot review apply`.
+5. Treat stale, failed, duplicate, or missing result identity as local retry/block state. Never describe a request, self-review, or MCP response as merge approval; the final approval/request-changes decision remains with the user and source/write-gate truth remains authoritative.
 
 Gitea MCP Wiki write workflow (only after `/quality-pilot publish wiki apply` returns `status: needs_mcp_apply`):
 1. Read `payload.mcp_write_request`.
@@ -1489,6 +1781,8 @@ Gitea MCP failed-case issue creation workflow (only after explicit `/quality-pil
 3. Verify each action body is a complete human-readable SWQA report (scope, reproduction, expected/actual result, oracle evidence, risk/follow-up) and contains no credentials, local workstation paths, internal run identifiers, or tool-specific implementation details. The same remote invocation also writes a full local technical report; preserve `payload.local_report_path` for the test owner. Then call the configured Hermes Gitea MCP issue-create tool with the exact action `title`, `body`, and `labels` in the current product repo context. Do not create comments or edit existing issues.
 4. Write the combined MCP tool results JSON to `payload.mcp_issue_write_result_path`.
 5. Report created issue IDs/URLs, then suggest `/quality-pilot issues sync` so the new issue becomes linked traceability input before evidence writeback.
+
+Knowledge Graph is an optional provenance-backed read model inside Quality Pilot, not a second QA source of truth. Prefer `graph run --from-qa --question <question>` after the existing case/run/review workflow; it projects canonical contracts, run records, evidence references, and pinned PR review reports. Use external candidate JSON only for a separately owned adapter. Run `graph quality-gate`/`graph evaluate` with adjudicated gold data, review `graph fuse` before `--confirm`, and use `graph serve` only as a read-only projection. The SQLite database is local state, JSON is portable evidence, and no graph count can become QA PASS, READY, APPROVED, or MERGE_ALLOWED.
 
 Redmine MCP rule: AI Quality Pilot V1 reads Redmine only through a Hermes Redmine MCP live-read snapshot. For every `/quality-pilot issues sync --redmine-issues ...` or `/quality-pilot cases generate --redmine-issues ...` turn, use Hermes Redmine MCP to read the requested IDs live before running the dispatcher. Do not reuse an existing `.quality-pilot-project/state/redmine-mcp/issues.json` merely because it contains the requested ID. Write a manifest JSON object to the configured snapshot path with:
 
@@ -1532,7 +1826,9 @@ Setup rule: `/quality-pilot setup` always writes `tracker.provider: hermes_mcp` 
 
 Runtime profile rule: AI Quality Pilot is repo-agnostic. Do not assume the product is irctool, Go, CLI-only, Redfish-only, or hardware-only. For production flows other than the initial setup, run `/quality-pilot setup` or `/quality-pilot doctor` and read `payload.runtime_profile.repo_analysis` before asking repo-derived runtime questions. For the initial `/quality-pilot setup` gate, grill-me may first collect only the user's known environment facts; after setup/doctor analysis, reconcile the entrypoint and any missing runtime details with the user. An inferred executable may resolve the runner path, but it does **not** confirm where testing is allowed. Before any production command that generates, executes prepared-environment cases, or starts close-loop, the mandatory grill-me interview must establish `local` versus `remote`, the entrypoint, fixtures, credential env names, target env name, side-effect boundary, and evidence expectations. Persist the answers with `/quality-pilot environment configure --mode <local|remote>`; never store target, credential, or secret values. If `payload.hermes_needs_input.reason == "runtime_profile_missing"`, render the clarify prompt exactly as bullet-listed by the payload, preserving the "already detected" and "please provide only missing details" structure. Never ask one question per testcase.
 
-Subagent text generation rule: AI Quality Pilot may delegate long human-facing draft text to a configured subagent, but the subagent is candidate-only. Use `/quality-pilot subagent status` to inspect the active profile. Use `/quality-pilot subagent configure` to write the Open WebUI profile skeleton. No private endpoint is a universal default: the deployment owner must provide an endpoint and a model, either by using an endpoint such as `https://open-webui.example.invalid/?model=<model-name>` or by filling the separate `model` field. API credentials must be referenced by `api_key_env` only; never ask for or store a raw API key. Task prompts are optional overrides, not readiness blockers. The subagent may draft Gitea issue bodies, PR bodies, Wiki summaries, Redmine QA summaries, case candidate analysis, and reviewer notes. Redmine sync payloads include a `qa_summary` plus a `redmine_issue_summary` subagent handoff so QA can see problem, environment, reproduction, expected/actual, evidence, and missing testcase details. It must not write files, create issues, edit Wiki pages, open PRs, close issues, or bypass AI Quality Pilot validation/write gates.
+Subagent text generation rule: AI Quality Pilot may delegate long human-facing draft text to a configured subagent, but the subagent is candidate-only. Use `/quality-pilot subagent status` to inspect the active Open WebUI profile. Use `/quality-pilot subagent configure` to write the Open WebUI profile skeleton. No private endpoint is a universal default: the deployment owner must provide an endpoint and a model, either by using an endpoint such as `https://open-webui.example.invalid/?model=<model-name>` or by filling the separate `model` field. API credentials must be referenced by `api_key_env` only; never ask for or store a raw API key. Task prompts are optional overrides, not readiness blockers. The subagent may draft Gitea issue bodies, PR bodies, Wiki summaries, Redmine QA summaries, case candidate analysis, and reviewer notes. Redmine sync payloads include a `qa_summary` plus a `redmine_issue_summary` subagent handoff so QA can see problem, environment, reproduction, expected/actual, evidence, and missing testcase details. It must not write files, create issues, edit Wiki pages, open PRs, close issues, or bypass AI Quality Pilot validation/write gates.
+
+The local `subagents` MCP server is a separate provider council, not the Open WebUI profile. When the lead requests independent DeepSeek/Kimi/Qwen/Xiaomi Mimo opinions, load the `quality-pilot-subagents` adapter skill and call the configured `subagents` MCP tools. Z.ai is explicitly excluded until its capacity/security record gate is restored. Ask each provider separately with the same neutral brief, preserve unavailable states, and compare agreement/disagreement. A returned answer, temporary output file, `logged_in` status, or printed URL is not proof of provider-side chat persistence; require the adapter's chat-record evidence gate before calling a consultation confirmed. The council remains candidate-only and is an out-of-band development assistant; it cannot become a runtime QA node, decide QA status, write artifacts, or bypass write gates.
 
 ## Interactive Guidance Model
 
@@ -1550,10 +1846,12 @@ growth loop. This is an execution requirement, not a suggestion:
 2. Do not ask the user to run `/grill-me`, merely recommend it, or continue
    directly to the dispatcher. Run the grilling interview yourself, wait for
    the user's answers, and carry those answers into the next dispatcher call.
-3. Production scope is: `setup`; `doctor --fix`; `environment configure`;
+3. Production scope is: `setup`; `doctor --fix`; `environment configure`; `environment tui-probe`;
    `issues sync`; `issues create-from-failure`; `issues fix`;
    every `cases generate ...`; `cases push-pr`; `publish wiki plan`;
-   `publish wiki apply`; every `close-loop ...`; `tracker plan-write`; and
+   `publish wiki apply`; every `close-loop ...`; mutating `graph scope`,
+   `graph representation`, `graph ontology`, `graph extract`, `graph quality-gate`,
+   `graph fuse`, `graph evaluate`, and `graph run`; `tracker plan-write`; and
    `subagent configure`.
 4. Read-only/status commands such as `help`, `doctor`, `audit state`, issue
    status/report/show, `cases review/list/validate`, `report`, Wiki status, and
@@ -1618,6 +1916,7 @@ Recommended interaction by situation:
 - After `gitea_mcp_snapshot_missing`: offer to use Hermes Gitea MCP read-only fetch, write the snapshot, then rerun `/quality-pilot issues sync`.
 - After `/quality-pilot issues sync`: explain that sync includes dedupe/prune, then suggest `/quality-pilot issues status` and `/quality-pilot cases generate --growing`. Remote Gitea mirrors are identified by Gitea issue ID; local failure work items are identified by testcase ID and live under `issues/local/`.
 - If the user asks for first-time test ideas or has no cases yet, run `/quality-pilot cases generate --init`; it scans README, code, package metadata, existing runners, existing cases, and project rules, then creates a stratified first slice across functional/positive, negative, boundary, stress/timeout-risk, and sibling-surface dimensions. Every INIT case must have `commands[].run` using the configured or inferred product entrypoint; it must not ask case-by-case confirmation questions. Report exit-only probes as partial. Do not claim deep white-box, mutation, fuzz, UI, API, or production-grade load coverage unless an explicit adapter and semantic oracle exist.
+- For Graph Engineering requests, run `/quality-pilot graph tutor` when teaching is requested; otherwise prefer the integration path `graph scope → representation → ontology → graph run --from-qa` after canonical QA artifacts exist. Use external `graph extract --input` only for an explicitly owned adapter. Never extract before an ontology, never accept a fact without provenance/evidence, and never apply fusion without the explicit human gate. `/quality-pilot graph run` uses the Task Graph compiler to checkpoint the same stages and parallelize only independent extraction work.
 - `/quality-pilot cases generate --init` is already fast/high-standard autonomous mode.
 - If the user wants a smaller first batch, run `/quality-pilot cases generate --init --count 5`.
 - If the user asks for follow-up ideas after issues/PRs/runs/commits changed, run `/quality-pilot cases generate --growing`; it aggressively creates executable growth cases from repo signals, code inventory, Gitea issues, PR references, recent git commits, latest run, reports, existing cases, runners, and bounded monkey CLI help sweeps.
@@ -1673,7 +1972,7 @@ Examples:
 
 ## Safety Rules
 
-- Do not directly write Gitea comments, close/reopen/edit unrelated issues, or PRs. Gitea issue create/update is allowed only through AI Quality Pilot gated handoff, including Redmine sync, explicit failed-case issue creation, and linked FAIL/BLOCK evidence writeback. Wiki remote writes are allowed only by AI Quality Pilot auto-sync, `/quality-pilot publish wiki apply`, or the gated MCP handoff returned by `/quality-pilot publish wiki apply` with `status: needs_mcp_apply`. Product PR creation remains behind `/quality-pilot issues fix --issue <id> --push-pr` or `/quality-pilot cases push-pr <case_id>`, and issue-driven handoff must gain acceptance cases/evidence before PR creation.
+- Do not directly write arbitrary Gitea comments, close/reopen/edit unrelated issues, or PRs. A PR review COMMENT is allowed only through the confirmed, pinned `review-write-request.json` advisory handoff; it must never be APPROVED automatically. Gitea issue create/update is allowed only through AI Quality Pilot gated handoff, including Redmine sync, explicit failed-case issue creation, and linked FAIL/BLOCK evidence writeback. Wiki remote writes are allowed only through explicit `/quality-pilot publish wiki apply` and its gated MCP handoff; automatic Wiki sync is local-plan-only. Product PR creation remains behind `/quality-pilot issues fix --issue <id> --push-pr` or `/quality-pilot cases push-pr <case_id>`, and issue-driven handoff must gain acceptance cases/evidence before PR creation.
 - Automatic Wiki sync must only update the configured Wiki page. It must not create issue comments, create issues, or open PRs.
 - Do not use Gitea MCP for issue comments, unrelated issue edits, issue close/reopen, PR creation, or arbitrary writes. Hermes MCP may create/update linked Gitea issues only from AI Quality Pilot gated issue write requests, and may update only the configured Wiki page from `/quality-pilot publish wiki apply`.
 - Do not reorder the AI Quality Pilot close-loop pipeline.
@@ -1685,6 +1984,7 @@ Examples:
 - If you open a separate growth session/agent, it may only produce candidate analysis for AI Quality Pilot to validate; it must not directly edit case YAML, tracker, wiki, PRs, or reports.
 - If you open a text-generation subagent, use the configured `/quality-pilot subagent status` profile. The subagent may only return candidate text/JSON for the requested task; AI Quality Pilot remains the writer and validator.
 - If the user types a removed command, report `command_removed` and its replacement.
+- Graph safety: `graph tutor/status/serve` are read-only guidance/query surfaces; graph artifact stages require the same grill-me environment/scope interview before writing. A fusion preview is not a merge; only `graph fuse --confirm` or an approved `graph run --confirm-fusion` may apply the reversible ledger.
 
 ## Expected Human Reply
 
@@ -1829,12 +2129,37 @@ def install_skill(
     reference_path = skill_dir / "references" / "gitea-mcp-snapshot.md"
     reference_path.parent.mkdir(parents=True, exist_ok=True)
     reference_path.write_text(build_gitea_mcp_snapshot_reference(runner_command=runner_command), encoding="utf-8")
+    graph_reference_paths: list[str] = []
+    bundled_graph_references = Path(__file__).resolve().parent / "skill_references" / "graph-engineering"
+    if bundled_graph_references.exists():
+        graph_target = skill_dir / "references" / "graph-engineering"
+        for source in sorted(bundled_graph_references.rglob("*")):
+            if not source.is_file():
+                continue
+            target = graph_target / source.relative_to(bundled_graph_references)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(source.read_bytes())
+            graph_reference_paths.append(str(target))
+    subagent_skill_paths: list[str] = []
+    bundled_subagent_skill = Path(__file__).resolve().parent / "skill_references" / "subagents"
+    subagent_skill_dir = base / "quality-pilot-subagents"
+    if bundled_subagent_skill.exists():
+        for source in sorted(bundled_subagent_skill.rglob("*")):
+            if not source.is_file():
+                continue
+            target = subagent_skill_dir / source.relative_to(bundled_subagent_skill)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(source.read_bytes())
+            subagent_skill_paths.append(str(target))
     return {
         "status": "ok",
         "skills_dir": str(base),
         "skill_dir": str(skill_dir),
         "skill_path": str(skill_path),
         "reference_path": str(reference_path),
+        "graph_reference_paths": graph_reference_paths,
+        "subagent_skill_paths": subagent_skill_paths,
+        "subagent_skill_dir": str(subagent_skill_dir),
         "command_prefix": PRIMARY_PREFIX,
         "reload_command": "/reload-skills",
         "runner_command": runner_command,
@@ -1882,8 +2207,14 @@ def _overview_help_payload() -> dict[str, Any]:
         {"command": "/quality-pilot doctor", "purpose": "檢查設定、Hermes MCP、Gitea/Redmine readiness、runner、secret reference"},
         {"command": "/quality-pilot doctor --fix", "purpose": "修復缺失 config skeleton/overlay 目錄後再執行 doctor 檢查；不填使用者 model/API secret"},
         {"command": "/quality-pilot environment status", "purpose": "查看 local/remote 測試環境是否已確認；只顯示去機密化 readiness"},
+        {"command": "/quality-pilot environment tui-probe", "purpose": "以 PTY 擷取 TUI transcript；互動探針不直接宣稱 PASS"},
         {"command": "/quality-pilot environment configure --mode <local|remote>", "purpose": "保存 grill-me 確認的入口、fixture、credential env 與副作用邊界"},
         {"command": "/quality-pilot audit state", "purpose": "只讀語意稽核 overlay state：case、evidence、issues、reports、MCP、subagent 一致性"},
+        {"command": "/quality-pilot graph tutor", "purpose": "以使用者自己的 QA domain 逐階段教學 Graph Engineering"},
+        {"command": "/quality-pilot graph scope|representation|ontology|extract|quality-gate|fuse|evaluate|serve", "purpose": "執行 Knowledge Graph 九階段 modular workflow；SQLite canonical、JSON export、每個 fact 要有 provenance"},
+        {"command": "/quality-pilot graph run", "purpose": "由 Task Graph 編排九階段，平行 extraction、獨立 verifier、fusion human gate、checkpoint 與 repair"},
+        {"command": "/quality-pilot review pr --repo <owner/repo> --pr-number <number>", "purpose": "分析任意可讀 Gitea PR 並產生 gated review reply preview"},
+        {"command": "/quality-pilot review apply", "purpose": "驗證 Hermes Gitea MCP review result、拒絕 stale/duplicate head 並完成 local ledger reconciliation"},
         {"command": "/quality-pilot issues sync", "purpose": "同步 Gitea issues，內建 dedupe、prune 與遠端 duplicate gated action plan"},
         {"command": "/quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]", "purpose": "透過 Hermes Redmine MCP snapshot 同步 Redmine mirror，並經 gate 用 Gitea MCP 建立 issues"},
         {"command": "/quality-pilot issues status", "purpose": "查看 issue sync、duplicates、fix queue、PR/handoff 狀態"},
@@ -1911,7 +2242,8 @@ def _overview_help_payload() -> dict[str, Any]:
         {"command": "/quality-pilot publish wiki plan", "purpose": "手動產生 Wiki-only gated plan"},
         {"command": "/quality-pilot publish wiki apply", "purpose": "gate 通過後只更新 Gitea Wiki；MCP backend 會產生 Hermes MCP write request"},
         {"command": "/quality-pilot close-loop status", "purpose": "查看 Observe/Normalize/Execute/Triage/Publish/Evolve/Prune health dashboard"},
-        {"command": "/quality-pilot close-loop run-once", "purpose": "跑完整 pipeline：檢查、測試、write gate、報告、保存 state"},
+        {"command": "/quality-pilot close-loop run-once", "purpose": "預設用 Task Graph 跑 deterministic QA：平行 workers、獨立 verifier、checkpoint、human gate、write gate 與報告"},
+        {"command": "/quality-pilot close-loop run-once --legacy", "purpose": "明確退回 fixed-sequence pipeline；只作相容 fallback，不是預設 orchestration"},
         {"command": "/quality-pilot close-loop heartbeat", "purpose": "跑 sensor-driven heartbeat：預設 12 小時節奏、每次最多 20 個 growth cases"},
         {"command": "/quality-pilot report status", "purpose": "產生 Markdown report"},
         {"command": "/quality-pilot report json", "purpose": "輸出 latest run JSON"},
@@ -2089,7 +2421,20 @@ def _parse_error_message(error: str) -> str:
 
 
 def _wrapper_script(runner_command: str) -> str:
-    runner_argv = " ".join(shlex.quote(part) for part in shlex.split(runner_command))
+    parts = shlex.split(runner_command)
+    if not parts:
+        raise ValueError("runner_command must not be empty")
+    # Callers sometimes pass an absolute interpreter path containing spaces
+    # without shell-quoting it (for example, a checkout under ``AI Quality
+    # Pilot``). Recover the longest existing executable prefix before quoting
+    # the final argv so the generated wrapper remains safe and executable.
+    for end in range(len(parts), 0, -1):
+        candidate = " ".join(parts[:end])
+        if Path(candidate).is_file() and os.access(candidate, os.X_OK):
+            parts = [candidate, *parts[end:]]
+            executable_end = end
+            break
+    runner_argv = shlex.join(parts)
     return f"""#!/usr/bin/env bash
 set -euo pipefail
 root="${{HERMES_PROJECT_ROOT:-${{PWD}}}}"

@@ -195,7 +195,7 @@ commands:
             "gate_status": "ALLOWED",
         })
 
-        payload = run_heartbeat(self.config, case_id="EXAMPLE-001")
+        payload = run_heartbeat(self.config, case_id="EXAMPLE-001", legacy=True)
 
         generate.assert_not_called()
         close_loop.assert_called_once_with(self.config, case_id="EXAMPLE-001", case_ids=None, dry_run=False)
@@ -226,7 +226,7 @@ commands:
             "gate_status": "BLOCKED",
         })
 
-        payload = run_heartbeat(self.config)
+        payload = run_heartbeat(self.config, legacy=True)
 
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(payload["qa_outcome"], "FAIL")
@@ -250,7 +250,7 @@ commands:
         self.assertTrue(heartbeat.call_args.kwargs["fail_on_test_failure"])
 
     @patch("quality_pilot.cli._with_auto_wiki", side_effect=lambda _config, payload, **_kwargs: payload)
-    @patch("quality_pilot.cli.run_close_loop")
+    @patch("quality_pilot.cli.run_close_loop_task_graph")
     def test_fail_on_test_failure_controls_run_once_exit_code(self, close_loop: Mock, _wiki: Mock) -> None:
         close_loop.return_value = PipelineResult({
             "status": "FAIL",

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from copy import deepcopy
 import shlex
 import subprocess
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Any
 
 from .command_policy import generated_contract_policy_violation_message, validate_generated_contract_commands
 from .config import ProjectConfig, find_raw_secret_paths, json_dumps
+from .security import find_sensitive_paths
 from .contracts import ContractError, load_contracts
 from .issues import case_id_for_issue, load_issue_snapshot
 from .policy_pack import common_questions, dimension_specs, policy_pack
@@ -204,6 +206,7 @@ def generate_cases_init(
     count: int | None = None,
     fast: bool = False,
     force: bool = False,
+    review_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if profile not in SUPPORTED_PROFILES:
         raise CaseGenerationError(f"unsupported profile: {profile}")
@@ -212,7 +215,7 @@ def generate_cases_init(
 
     config.paths.cases.mkdir(parents=True, exist_ok=True)
     config.paths.state.mkdir(parents=True, exist_ok=True)
-    context = build_init_context(config, feature=feature, profile=profile)
+    context = build_init_context(config, feature=feature, profile=profile, review_context=review_context)
     context["fast"] = bool(fast)
     context["generated_count_limit"] = count
     context["interaction_scope"] = "autonomous" if fast else "category"
@@ -703,6 +706,14 @@ def _enforce_generated_contract_commands(config: ProjectConfig, contract: dict[s
     violations = validate_generated_contract_commands(config, contract)
     if violations:
         raise CaseGenerationError(generated_contract_policy_violation_message(str(contract.get("case_id") or ""), violations))
+    _enforce_contract_secrets(contract)
+
+
+def _enforce_contract_secrets(contract: dict[str, Any]) -> None:
+    findings = find_sensitive_paths(contract)
+    if findings:
+        first = findings[0]
+        raise CaseGenerationError(f"generated contract contains raw secret-like value at {first.path} ({first.kind})")
 
 
 def build_growth_context(
@@ -759,6 +770,7 @@ def build_init_context(
     *,
     feature: str | None = None,
     profile: str = "auto",
+    review_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     signals = inspect_repo_signals(config)
     resolved_profile = _resolve_profile(profile, signals)
@@ -777,6 +789,8 @@ def build_init_context(
         "existing_runners": file_summaries(config.paths.runners),
         "project_rules": file_summaries(config.paths.rules),
     }
+    if isinstance(review_context, dict):
+        context["review_context"] = deepcopy(review_context)
     context["init_seeds"] = build_init_seeds(context)
     return context
 
@@ -955,6 +969,7 @@ def draft_contract_from_init(
             "context_schema": context["schema"],
             "context_path": _relative_or_str(init_context_path(config), config.root),
             "candidate_fingerprint": fingerprint,
+            "review_context": deepcopy(context.get("review_context")) if isinstance(context.get("review_context"), dict) else None,
         },
         "profile": candidate.get("profile") or context["resolved_profile"],
         "feature": candidate.get("feature") or context["feature"],
@@ -1401,10 +1416,20 @@ def validate_generated_cases(config: ProjectConfig) -> dict[str, Any]:
     try:
         contracts = load_contracts(config.paths.cases)
     except ContractError as exc:
-        return {"status": "error", "error": exc.error, "message": exc.message, "path": exc.path}
+        return {
+            "status": "error",
+            "schema_valid": False,
+            "semantic_review": "not_evaluated",
+            "error": exc.error,
+            "message": exc.message,
+            "path": exc.path,
+        }
     review = review_generated_cases(config)
+    semantic_status = "needs_review" if review.get("semantic_findings") else "ok"
     return {
         "status": "needs_review" if review.get("semantic_findings") else "ok",
+        "schema_valid": True,
+        "semantic_review": semantic_status,
         "case_count": len(contracts),
         "draft_count": review["draft_count"],
         "semantic_finding_count": review["semantic_finding_count"],
@@ -1622,7 +1647,7 @@ def draft_contract_for_redmine_issue(config: ProjectConfig, issue: dict[str, Any
     safe_runner = {
         "command": str(safe_command["run"]),
         "command_source": safe_command.get("source"),
-        "source_type": safe_command.get("source_type", "user_confirmed"),
+        "source_type": safe_command.get("source_type", "ai_derived"),
         "expected_exit_code": int(safe_command.get("expected_exit_code", 0)),
         "expected_exit_code_source": safe_command.get("expected_exit_code_source"),
         "user_confirmed_inputs": safe_command.get("user_confirmed_inputs", {}),
@@ -1632,7 +1657,7 @@ def draft_contract_for_redmine_issue(config: ProjectConfig, issue: dict[str, Any
         "environment_requirements": safe_command.get("environment_requirements", []),
         "rejected_safe_command": safe_command.get("rejected_safe_command"),
     }
-    source_type = str(safe_command.get("source_type") or "user_confirmed")
+    source_type = str(safe_command.get("source_type") or "ai_derived")
     executable_scope = "redmine_user_confirmed_safe_probe" if source_type == "user_confirmed" else "redmine_ai_derived_safe_probe"
     environment_requirements = safe_runner["environment_requirements"]
     requires_prepared_environment = bool(safe_command.get("requires_prepared_environment", environment_requirements))
@@ -1655,7 +1680,7 @@ def draft_contract_for_redmine_issue(config: ProjectConfig, issue: dict[str, Any
         "quality_pilot": {
             "draft": False,
             "generation_mode": "redmine_issues",
-            "review_required_before_run": False,
+            "review_required_before_run": source_type != "user_confirmed",
             "executable": True,
             "executable_scope": executable_scope,
             "safe_command_source": safe_command.get("source"),
@@ -1696,36 +1721,31 @@ def draft_contract_for_redmine_issue(config: ProjectConfig, issue: dict[str, Any
 def _redmine_safe_probe_or_ai_default(config: ProjectConfig, issue: dict[str, Any]) -> dict[str, Any]:
     confirmed = redmine_safe_probe_command(issue)
     if confirmed is not None:
-        if _is_developer_test_command(str(confirmed.get("run") or "")):
-            derived = _ai_derived_redmine_safe_probe(config, issue)
-            derived["rejected_safe_command"] = {
-                "run": confirmed.get("run"),
-                "source": confirmed.get("source"),
-                "reason": "Developer-level unit/build command is not accepted as a Redmine QA binary contract.",
-            }
-            derived.setdefault("follow_up_needed", []).append(
-                "Redmine safe command was a developer test command; provide a product binary runner only if the derived binary command is not the intended QA entrypoint."
-            )
-            derived["follow_up_needed"] = _unique_text(derived["follow_up_needed"])
-            derived.setdefault("ai_analysis", {})["rejected_safe_command"] = derived["rejected_safe_command"]
-            return derived
-        out = dict(confirmed)
-        out["source_type"] = "user_confirmed"
-        out["automation_confidence"] = "high"
-        out["environment_requirements"] = _redmine_environment_requirements(config, issue, command=str(out.get("run") or ""))
-        out["requires_prepared_environment"] = bool(out["environment_requirements"])
-        out["ai_analysis"] = {
-            "strategy": "use_redmine_user_confirmed_safe_probe",
-            "reason": "Redmine payload includes a safe probe command field.",
+        derived = _ai_derived_redmine_safe_probe(config, issue)
+        derived["rejected_safe_command"] = {
+            "run": confirmed.get("run"),
+            "source": confirmed.get("source"),
+            "reason": (
+                "External Redmine/Gitea text is a candidate hint, not execution authorization. "
+                "Use the repo/configured runner or obtain current-user confirmation through the environment profile."
+            ),
         }
-        out["follow_up_needed"] = _redmine_follow_up_needed(issue, confirmed=True)
-        return out
+        if _is_developer_test_command(str(confirmed.get("run") or "")):
+            derived["rejected_safe_command"]["reason"] = "Developer-level unit/build command is not accepted as a Redmine QA binary contract."
+        derived.setdefault("follow_up_needed", []).append(
+            "Redmine safe command was external candidate text; it was not authorized for execution."
+        )
+        derived["follow_up_needed"] = _unique_text(derived["follow_up_needed"])
+        derived.setdefault("ai_analysis", {})["rejected_safe_command"] = derived["rejected_safe_command"]
+        return derived
     return _ai_derived_redmine_safe_probe(config, issue)
 
 
 def _has_user_confirmed_redmine_runner(issue: dict[str, Any]) -> bool:
-    confirmed = redmine_safe_probe_command(issue)
-    return bool(confirmed and not _is_developer_test_command(str(confirmed.get("run") or "")))
+    # Tracker text is never proof of current-user authorization.  The explicit
+    # environment profile (or a configured product runner) is checked by the
+    # caller instead; this helper remains false for external snapshots.
+    return False
 
 
 def _ai_derived_redmine_safe_probe(config: ProjectConfig, issue: dict[str, Any]) -> dict[str, Any]:

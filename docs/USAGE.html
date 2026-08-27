@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Quality Pilot｜使用方法</title>
+  <style>
+    :root {
+      --bg: #f5f7fb;
+      --panel: #ffffff;
+      --ink: #172033;
+      --muted: #5b667a;
+      --line: #dce2ec;
+      --brand: #3157d5;
+      --brand-soft: #e9eeff;
+      --good: #087443;
+      --good-soft: #e6f7ef;
+      --warn: #9a5b00;
+      --warn-soft: #fff4db;
+      --bad: #a72d2d;
+      --bad-soft: #ffebeb;
+      --code: #101827;
+      --code-ink: #e8edf7;
+      --shadow: 0 8px 24px rgba(23, 32, 51, .07);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font: 16px/1.7 system-ui, -apple-system, BlinkMacSystemFont, "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+    }
+    a { color: var(--brand); }
+    .hero {
+      background: linear-gradient(135deg, #172b68, #3157d5 58%, #5779e8);
+      color: white;
+      padding: 52px max(22px, calc((100% - 1180px) / 2));
+    }
+    .hero h1 { margin: 0 0 10px; font-size: clamp(30px, 5vw, 52px); line-height: 1.15; }
+    .hero p { margin: 0; max-width: 780px; color: #e8edff; font-size: 18px; }
+    .layout {
+      display: grid;
+      grid-template-columns: 230px minmax(0, 1fr);
+      gap: 28px;
+      max-width: 1180px;
+      margin: 28px auto;
+      padding: 0 22px;
+    }
+    nav {
+      position: sticky;
+      top: 20px;
+      align-self: start;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 16px;
+      box-shadow: var(--shadow);
+    }
+    nav strong { display: block; margin-bottom: 8px; }
+    nav a { display: block; padding: 5px 0; text-decoration: none; font-size: 14px; }
+    main { min-width: 0; }
+    section, .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 26px;
+      margin-bottom: 22px;
+      box-shadow: var(--shadow);
+    }
+    h2 { margin: 0 0 16px; font-size: 26px; }
+    h3 { margin: 22px 0 8px; font-size: 20px; }
+    h4 { margin: 16px 0 6px; }
+    p { margin: 8px 0 14px; }
+    ul, ol { padding-left: 25px; }
+    .lead { color: var(--muted); font-size: 17px; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .mini {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 15px;
+      background: #fbfcff;
+    }
+    .mini h3 { margin-top: 0; font-size: 18px; }
+    .tag {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 2px 10px;
+      font-size: 13px;
+      font-weight: 700;
+      margin-right: 5px;
+      white-space: nowrap;
+    }
+    .tag.good { background: var(--good-soft); color: var(--good); }
+    .tag.warn { background: var(--warn-soft); color: var(--warn); }
+    .tag.bad { background: var(--bad-soft); color: var(--bad); }
+    .tag.blue { background: var(--brand-soft); color: var(--brand); }
+    pre {
+      position: relative;
+      overflow-x: auto;
+      background: var(--code);
+      color: var(--code-ink);
+      border-radius: 10px;
+      padding: 16px 18px;
+      margin: 12px 0 18px;
+      font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    code {
+      background: #eef1f7;
+      border-radius: 4px;
+      padding: 1px 5px;
+      font: .9em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    pre code { background: transparent; padding: 0; font-size: inherit; }
+    .callout { border-left: 4px solid var(--brand); background: var(--brand-soft); padding: 13px 16px; margin: 14px 0; border-radius: 6px; }
+    .callout.good { border-left-color: var(--good); background: var(--good-soft); }
+    .callout.warn { border-left-color: var(--warn); background: var(--warn-soft); }
+    .callout.bad { border-left-color: var(--bad); background: var(--bad-soft); }
+    .status-table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+    .status-table th, .status-table td { text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); padding: 10px 8px; }
+    .status-table th { color: var(--muted); font-size: 14px; }
+    details { border: 1px solid var(--line); border-radius: 9px; margin: 10px 0; padding: 0 13px; }
+    details[open] { background: #fbfcff; }
+    summary { cursor: pointer; font-weight: 700; padding: 10px 0; }
+    footer { max-width: 1180px; margin: 0 auto; padding: 0 22px 36px; color: var(--muted); font-size: 14px; }
+    @media (max-width: 820px) {
+      .layout { display: block; margin-top: 16px; }
+      nav { position: static; margin-bottom: 16px; }
+      .grid, .grid.three { grid-template-columns: 1fr; }
+      section, .card { padding: 20px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <h1>AI Quality Pilot 使用方法</h1>
+    <p>以 deterministic engine 為核心，從環境確認、case 生成、測試執行，到 evidence、Knowledge Graph provenance、Task Graph 與 Gitea close-loop。這份頁面同時適用 Hermes 入口與直接 CLI。</p>
+  </header>
+
+  <div class="layout">
+    <nav aria-label="頁面導覽">
+      <strong>快速導覽</strong>
+      <a href="#quick-start">1. 快速開始</a>
+      <a href="#environment">2. 環境設定</a>
+      <a href="#cases">3. Cases</a>
+      <a href="#issues">4. Issues</a>
+      <a href="#review">5. Gitea PR Review</a>
+      <a href="#graph">6. Graph Engineering</a>
+      <a href="#loop">7. Close-loop</a>
+      <a href="#publish">8. Wiki / Report</a>
+      <a href="#truth">9. 狀態語意</a>
+      <a href="#files">10. 輸出位置</a>
+    </nav>
+
+    <main>
+      <section id="quick-start">
+        <h2>1. 快速開始</h2>
+        <p class="lead">先選一種入口。Hermes 適合互動操作；CLI 適合 CI、scheduler 與本機除錯。兩者最後都呼叫同一套 deterministic core。</p>
+        <div class="grid">
+          <div class="mini">
+            <h3>Hermes 入口</h3>
+            <pre><code>/quality-pilot
+/quality-pilot setup
+/quality-pilot doctor
+/quality-pilot environment status</code></pre>
+            <p>生產型命令會自動經過 <code>grill-me</code> 訪談與 write gate，不需要手動輸入 <code>/grill-me</code>。</p>
+          </div>
+          <div class="mini">
+            <h3>直接 CLI</h3>
+            <pre><code>cd /root/repo/AI\ Quality\ Pilot
+export PYTHONPATH=src
+python3 -m quality_pilot.cli doctor \
+  --root /path/to/product</code></pre>
+            <p>若已安裝 package，也可以把前綴換成 <code>quality-pilot</code>。</p>
+          </div>
+        </div>
+
+        <h3>auto_PID_tool 最短路徑</h3>
+        <pre><code>export PYTHONPATH=/root/repo/AI\ Quality\ Pilot/src
+P=/root/repo/auto_PID_tool
+
+python3 -m quality_pilot.cli setup --root "$P"
+python3 -m quality_pilot.cli environment status --root "$P"
+python3 -m quality_pilot.cli doctor --root "$P"
+python3 -m quality_pilot.cli cases generate --root "$P" --init --count 5
+python3 -m quality_pilot.cli cases review --root "$P"
+python3 -m quality_pilot.cli cases validate --root "$P"
+python3 -m quality_pilot.cli cases list --root "$P"
+# 確認環境、fixture 與 marker 後，再執行單一 case
+python3 -m quality_pilot.cli cases run --root "$P" &lt;CASE_ID&gt;
+python3 -m quality_pilot.cli report status --root "$P"</code></pre>
+        <div class="callout warn"><strong>不要直接執行裸的 <code>cases generate</code>。</strong> 必須明確指定 <code>--init</code>、<code>--growing</code> 或 <code>--redmine-issues</code>。</div>
+      </section>
+
+      <section id="environment">
+        <h2>2. 環境設定與 TUI 探針</h2>
+        <p>產品資料放在 host overlay；Quality Pilot 只保存環境設定與 redacted evidence，不保存 credential value。</p>
+        <h3>確認環境</h3>
+        <pre><code>quality-pilot environment status --root /path/to/product
+quality-pilot doctor --root /path/to/product</code></pre>
+        <h3>首次設定 local / remote profile</h3>
+        <pre><code>quality-pilot environment configure \
+  --root /path/to/product \
+  --mode local \
+  --entrypoint 'python3 main.py --tui' \
+  --fixture configs/config.yaml \
+  --side-effect-boundary 'read-only sandbox; no production writes'</code></pre>
+        <p>Remote profile 可另外指定 <code>--target-host-env QUALITY_PILOT_TARGET_HOST</code>；只保存環境變數名稱，不保存值。</p>
+        <h3>執行 bounded PTY/TUI probe</h3>
+        <pre><code>quality-pilot environment tui-probe \
+  --root /path/to/product \
+  --duration 5 \
+  --width 120 \
+  --height 32 \
+  --expect 'FAN ZONE STATUS' \
+  --key enter \
+  --confirm</code></pre>
+        <ul>
+          <li>必須使用已確認的 environment profile。</li>
+          <li><code>--expect</code> 是畫面 oracle；只看 process exit code 不算 PASS。</li>
+          <li>缺 profile 或硬體前置條件：<span class="tag bad">BLOCK</span></li>
+          <li>未出現 expected marker：<span class="tag warn">HOLD</span></li>
+          <li>實際產品 workflow 與 BMC/IPMI 仍需產品專屬 adapter 驗證。</li>
+        </ul>
+      </section>
+
+      <section id="cases">
+        <h2>3. Cases：產生、檢查、執行</h2>
+        <div class="grid three">
+          <div class="mini"><h3>初始化</h3><code>cases generate --init</code><p>第一次掃描 repo，產生 product-runtime contracts。</p></div>
+          <div class="mini"><h3>增長</h3><code>cases generate --growing</code><p>依新 code、issue、PR、run 產生候選 cases。</p></div>
+          <div class="mini"><h3>Redmine</h3><code>cases generate --redmine-issues 144780</code><p>從 Redmine MCP snapshot 產生 linked cases。</p></div>
+        </div>
+        <pre><code>quality-pilot cases generate --root /path/to/product --init --count 5
+quality-pilot cases review --root /path/to/product
+quality-pilot cases validate --root /path/to/product
+quality-pilot cases list --root /path/to/product
+quality-pilot cases run --root /path/to/product CASE-001
+quality-pilot cases run --root /path/to/product
+quality-pilot cases push-pr --root /path/to/product CASE-001</code></pre>
+        <div class="callout"><strong>執行規則：</strong> environment 未確認、fixture 不存在、remote target/credential 缺少或 entrypoint 不可用時，case 會回報 <code>BLOCK</code>，不會把錯誤包裝成 PASS。</div>
+      </section>
+
+      <section id="issues">
+        <h2>4. Issues 與 Redmine/Gitea 同步</h2>
+        <p>Issue sync 會處理 snapshot、dedupe、prune 與 local/remote mirror。Remote write 必須經 Hermes MCP 與 write gate。</p>
+        <pre><code># 讀取目前 MCP snapshot 並同步
+quality-pilot issues sync --root /path/to/product
+
+# 從指定 Redmine tickets 建立 linked handoff
+quality-pilot issues sync --root /path/to/product \
+  --redmine-issues 144780 144693
+
+quality-pilot issues status --root /path/to/product
+quality-pilot issues report --root /path/to/product
+quality-pilot issues show --root /path/to/product 123
+
+# 只產生本地 failure work item
+quality-pilot issues create-from-failure \
+  --root /path/to/product --local --case FAIL-001
+
+# 準備遠端 Gitea issue handoff；不會繞過 gate
+quality-pilot issues create-from-failure \
+  --root /path/to/product --remote --case FAIL-001</code></pre>
+        <p><code>--local</code> 只寫本地報告；<code>--remote</code> 會產生 redacted MCP request，等待 Hermes 確認與套用。</p>
+        <pre><code>quality-pilot issues fix --root /path/to/product --issue 123
+quality-pilot issues fix --root /path/to/product --case FAIL-001
+quality-pilot issues fix --root /path/to/product --issue 123 --push-pr</code></pre>
+      </section>
+
+      <section id="review">
+        <h2>5. 任意 Gitea PR Review</h2>
+        <p>Review 目標固定為 <code>&lt;owner/repo&gt; + PR number</code>，並釘住 detached branch head SHA。預設會先做 diff review、regression tests，以及透過 case generate/run 的 comprehensive QA matrix（black-box、white-box、functional、boundary、stress、documentation）；<code>--dry-run</code> 才只做計畫預覽，<code>--diff-only</code> 才跳過 comprehensive QA。</p>
+        <pre><code># 執行完整 local review + comprehensive QA，不產生遠端 write request
+quality-pilot review pr \
+  --root /path/to/product \
+  --repo SmartFan/auto_PID_tool \
+  --pr-number 27
+
+# 只預覽計畫，不執行 case/tests
+quality-pilot review pr \
+  --root /path/to/product \
+  --repo SmartFan/auto_PID_tool \
+  --pr-number 27 \
+  --dry-run
+
+# comprehensive matrix PASS 後，才可明確確認並產生 gated request
+quality-pilot review pr \
+  --root /path/to/product \
+  --repo SmartFan/auto_PID_tool \
+  --pr-number 27 \
+  --confirm
+
+# Hermes MCP 套用後，reconcile result；不會重複發送第二次 write
+quality-pilot review apply --root /path/to/product</code></pre>
+        <div class="callout warn"><strong>沒有指定 PR 不會自動挑選。</strong> 目前 <code>SmartFan/auto_PID_tool</code> 有開放中的 PR，但請明確提供 PR number；此流程不會自行 merge。</div>
+        <h3>Review gate</h3>
+        <ul>
+          <li>必須有 deterministic test outcome 與 coverage。</li>
+          <li>stale head、failed report、duplicate result 會被拒絕或 HOLD。</li>
+          <li>Review 結果不能自行宣稱 <code>APPROVED</code> 或 <code>MERGE_ALLOWED</code>。</li>
+          <li>Gitea inline comments 只透過 gated MCP request 寫入。</li>
+        </ul>
+      </section>
+
+      <section id="graph">
+        <h2>6. Graph Engineering</h2>
+        <p>Graph Engineering 有兩半：Knowledge Graph 描述 agent 記住什麼，Task Graph 描述 agent 如何工作。不需要 Neo4j 或遠端 database。</p>
+        <pre><code>Knowledge Graph: scope → representation → ontology → extraction
+                → quality-gate → fusion → evaluation → serving
+Task Graph:     Context → Contract → parallel workers → verifier
+                → merge → human gate → checkpoint → repair</code></pre>
+        <div class="grid">
+          <div class="mini"><h3>Knowledge Graph</h3><p>SQLite canonical、JSON export；優先從既有 case/run/evidence/review artifacts 建立 read model，entity/relation/event 都必須保留 source、confidence、時間與 evidence。</p></div>
+          <div class="mini"><h3>Ontology</h3><p>先定義 competency questions、entity types、typed relations domain/range 與 event arguments，再接受 extraction candidates。</p></div>
+          <div class="mini"><h3>Task Graph</h3><p>只有真實資料依賴才建立 edge；獨立 extraction 可平行，verifier 使用不同 owner/context。</p></div>
+          <div class="mini"><h3>Gate / Recovery</h3><p>fusion 前需要 human gate；保存 checkpoint，失敗只修復 failed node 與 descendants。</p></div>
+        </div>
+        <pre><code>quality-pilot graph tutor --root /path/to/product
+quality-pilot graph scope --question "Which test run produced evidence?" --root /path/to/product
+quality-pilot graph representation --root /path/to/product
+quality-pilot graph ontology --root /path/to/product
+quality-pilot graph run --from-qa --question "Which test run produced evidence?" --root /path/to/product
+quality-pilot graph extract --input candidate.json --root /path/to/product  # external adapter
+quality-pilot graph quality-gate --gold labels.json --root /path/to/product
+quality-pilot graph fuse --root /path/to/product
+quality-pilot graph evaluate --gold labels.json --root /path/to/product
+quality-pilot graph serve --entity CASE-001 --root /path/to/product
+quality-pilot graph run --from-qa --question "Which test run produced evidence?" --case-id CASE-001 --entity CASE-001 --root /path/to/product</code></pre>
+        <p>Knowledge Graph 核心實作：<code>src/quality_pilot/graph_engineering/</code>；Task Graph 實作：<code>src/quality_pilot/task_graph.py</code>；BDD：<code>docs/bdd/</code>。Graph counts 不會成為 QA PASS。</p>
+        <pre><code>quality-pilot close-loop run-once --root /path/to/product
+quality-pilot close-loop run-once --resume-task-graph --confirm-publish --root /path/to/product
+quality-pilot close-loop run-once --repair-node execute:CASE-001 --resume-task-graph --root /path/to/product
+quality-pilot close-loop run-once --legacy --root /path/to/product</code></pre>
+        <p>沒有 explicit confirmation 時 graph workflow 會在 fusion human gate 回 <code>HOLD</code> 並保存 checkpoint；confirmation 只允許 local graph merge，不會 remote write。</p>
+      </section>
+
+      <section id="loop">
+        <h2>7. Close-loop 與排程</h2>
+        <pre><code>quality-pilot close-loop status --root /path/to/product
+quality-pilot close-loop run-once --root /path/to/product --dry-run
+quality-pilot close-loop run-once --root /path/to/product --case-id CASE-001
+quality-pilot close-loop heartbeat --root /path/to/product --dry-run
+quality-pilot close-loop heartbeat --root /path/to/product --every 12h --grow-count 20</code></pre>
+        <p><code>heartbeat</code> 只跑一次 tick，不會自行安裝 timer。Cron、CI 或 Hermes scheduler 必須負責下次觸發。</p>
+        <p>固定流程為：<strong>Observe → Normalize → Execute → Triage → Publish → Evolve → Prune</strong>。</p>
+      </section>
+
+      <section id="publish">
+        <h2>8. Report、Wiki 與其他唯讀命令</h2>
+        <pre><code>quality-pilot report status --root /path/to/product
+quality-pilot report json --root /path/to/product
+quality-pilot publish wiki status --root /path/to/product
+quality-pilot publish wiki plan --root /path/to/product
+quality-pilot publish wiki apply --root /path/to/product
+quality-pilot audit state --root /path/to/product
+quality-pilot subagent status --root /path/to/product</code></pre>
+        <p>Wiki <code>plan</code> 是 local/gated plan；<code>apply</code> 只更新 Gitea Wiki，不建立 issue comment、issue 或 PR。</p>
+        <details>
+          <summary>常見舊命令替代</summary>
+          <table class="status-table">
+            <tr><th>舊命令</th><th>請改用</th></tr>
+            <tr><td><code>/quality-pilot status</code></td><td><code>/quality-pilot doctor</code></td></tr>
+            <tr><td><code>/quality-pilot qa-test run-one X</code></td><td><code>/quality-pilot cases run X</code></td></tr>
+            <tr><td><code>/quality-pilot issues dedupe</code></td><td><code>/quality-pilot issues sync</code></td></tr>
+            <tr><td><code>/quality-pilot publish apply</code></td><td><code>/quality-pilot publish wiki apply</code></td></tr>
+            <tr><td><code>cases generate --fast</code></td><td><code>cases generate --init</code></td></tr>
+          </table>
+        </details>
+      </section>
+
+      <section id="truth">
+        <h2>9. 看懂輸出狀態</h2>
+        <table class="status-table">
+          <tr><th>狀態</th><th>意思</th><th>下一步</th></tr>
+          <tr><td><span class="tag good">PASS</span></td><td>所有必要 oracle/evidence 都具備，且是 deterministic engine 判定。</td><td>仍須依 workflow 的 write gate，不代表可直接 merge。</td></tr>
+          <tr><td><span class="tag bad">BLOCK</span></td><td>前置條件缺失、環境未授權、credential/fixture/硬體不可用。</td><td>先補前置條件；不要改寫成 FAIL。</td></tr>
+          <tr><td><span class="tag warn">HOLD</span></td><td>有執行痕跡但 evidence 不足、marker 缺少或需要人工確認。</td><td>補 evidence、確認 oracle 或重新執行。</td></tr>
+          <tr><td><span class="tag blue">candidate</span></td><td>Task Graph/recommendation 的候選結果，不是 QA truth。</td><td>回 source authority 再驗證。</td></tr>
+          <tr><td><span class="tag warn">SYNC_BLOCKED</span></td><td>本地 deterministic workflow 可用，但遠端 MCP snapshot 或服務尚未就緒。</td><td>先完成 snapshot handoff；不要進行 remote write。</td></tr>
+        </table>
+        <div class="callout bad"><strong>安全底線：</strong> Task node 數量、process exit code、help/parser probe、空 issue 清單，都不能單獨證明產品 PASS 或 merge allowed。</div>
+      </section>
+
+      <section id="files">
+        <h2>10. 重要輸出位置</h2>
+        <pre><code>/path/to/product/.quality-pilot.yaml
+/path/to/product/.quality-pilot-project/
+├── cases/                         # case contracts
+├── runners/                       # host-owned runners
+├── evidence/                      # redacted run evidence
+├── reports/                       # markdown reports
+├── issues/local/                  # local failure work items
+├── issues/remote/                 # synced Gitea mirrors
+└── state/
+    ├── latest-run.json
+    ├── issues-snapshot.json
+    ├── traceability-map.json
+    ├── hermes-mcp/status.json
+    ├── gitea-mcp/                 # MCP request/result snapshots
+    └── task-graph/                 # optional execution checkpoints</code></pre>
+        <p>本機自我檢查：</p>
+        <pre><code>quality-pilot doctor --root /path/to/product --json
+quality-pilot issues status --root /path/to/product
+quality-pilot report json --root /path/to/product</code></pre>
+      </section>
+
+      <section>
+        <h2>目前 auto_PID_tool 狀態</h2>
+        <table class="status-table">
+          <tr><th>項目</th><th>目前狀態</th></tr>
+          <tr><td>Environment profile</td><td><span class="tag good">ready / local</span> 使用 <code>.venv/bin/python main.py --tui</code>，fixture 為 <code>configs/config.yaml</code></td></tr>
+          <tr><td>Gitea MCP</td><td><span class="tag good">ready</span> issue snapshot 已完成唯讀同步；PR review 仍需指定 PR number</td></tr>
+          <tr><td>Redmine MCP</td><td><span class="tag warn">snapshot missing</span> 尚未可進行 Redmine issue-driven sync</td></tr>
+          <tr><td>Knowledge Graph</td><td><span class="tag good">local first slice</span> <code>graph scope/ontology/extract/quality-gate/fuse/evaluate/serve</code> 使用 SQLite canonical、JSON export 與 provenance gate</td></tr>
+          <tr><td>Task Graph</td><td><span class="tag good">default orchestration</span> <code>close-loop run-once</code> 與 <code>graph run</code> 支援 bounded workers、verifier、atomic checkpoint、repair 與 human gate；<code>--legacy</code> 是 fixed-sequence fallback</td></tr>
+          <tr><td>TUI hardware preflight</td><td><span class="tag bad">BLOCK</span> 已知 IPMI invalid command；不是產品 FAIL</td></tr>
+        </table>
+      </section>
+    </main>
+  </div>
+
+  <footer>
+    <p>相關規範：<a href="COMMANDS.md">COMMANDS.md</a> · <a href="ARCHITECTURE.md">ARCHITECTURE.md</a> · <a href="CONFIGURATION.md">CONFIGURATION.md</a> · <a href="SECURITY.md">SECURITY.md</a></p>
+    <p>這份頁面是使用說明，不會執行任何命令，也不會寫入遠端 Gitea/Redmine。</p>
+  </footer>
+</body>
+</html>

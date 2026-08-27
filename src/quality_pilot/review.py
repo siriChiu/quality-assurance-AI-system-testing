@@ -1,0 +1,2645 @@
+"""Deterministic local review workflow for any readable Gitea Pull Request.
+
+The first implementation is snapshot/handoff based: Hermes supplies a PR
+snapshot, this module pins the head in a detached worktree, selects local
+regression tests, writes a redacted report, and emits a gated Gitea review
+request only after explicit confirmation.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+from copy import deepcopy
+from html.parser import HTMLParser
+from pathlib import Path
+from typing import Any
+
+from .case_generation import CaseGenerationError, generate_cases_init
+from .config import ProjectConfig, json_dumps, load_project_config, project_paths
+from .contracts import load_contracts
+from .environment import environment_profile_status, remote_preflight
+from .execution_contract import apply_discovered_contract, normalize_execution_contract
+from .hermes_mcp import configured_mcp_json_path, mcp_server_is_available
+from .product_case_adapter import build_product_case_contract
+from .product_testing import run_product_tests
+from .runner import RunContext, run_case, stamp_result_run_id, utc_now
+from .security import ensure_safe_structure, find_secret_text, redact_structure
+
+REVIEW_SCHEMA = "quality-pilot.code-review.v1"
+REVIEW_REQUEST_SCHEMA = "quality-pilot.gitea-mcp-review-write-request.v1"
+DIFF_TARGETED_ORACLE_SCHEMA = "quality-pilot.diff-targeted-oracle.v1"
+
+
+class ReviewError(RuntimeError):
+    pass
+
+
+def review_pr(
+    config: ProjectConfig,
+    *,
+    repo: str,
+    pr_number: int,
+    pr_json: str | Path | None = None,
+    checkout: str | Path | None = None,
+    confirm: bool = False,
+    dry_run: bool = False,
+    timeout_seconds: int = 120,
+    comprehensive: bool = True,
+    prepare_dependencies: bool = True,
+    confirm_discovery: bool = False,
+) -> dict[str, Any]:
+    snapshot, snapshot_path = load_pr_snapshot(config, repo=repo, pr_number=pr_number, pr_json=pr_json)
+    effective_contract = normalize_execution_contract(config, snapshot=snapshot)
+    if comprehensive and not dry_run and effective_contract.get("status") in {"CONFIGURATION_REQUIRED", "CONFIRMATION_REQUIRED"}:
+        if not confirm_discovery:
+            return {
+                "status": "configuration_required",
+                "reason": "product_execution_contract_confirmation_required",
+                "repo": repo,
+                "pr_number": pr_number,
+                "head_sha": snapshot.get("head_sha"),
+                "effective_execution_contract": effective_contract,
+                "next_action": "Confirm the discovered contract, then rerun review with --confirm-discovery",
+                "remote_apply": False,
+            }
+        discovery_apply = apply_discovered_contract(config, confirm=True, expected_head_sha=str(snapshot.get("head_sha") or ""))
+        if discovery_apply.get("status") != "ok":
+            return {
+                "status": "configuration_required",
+                "reason": discovery_apply.get("reason") or "product_execution_contract_confirmation_failed",
+                "effective_execution_contract": discovery_apply.get("effective_contract", effective_contract),
+                "remote_apply": False,
+            }
+        config = load_project_config(config.root, config.path)
+        effective_contract = discovery_apply.get("effective_contract") or normalize_execution_contract(config, snapshot=snapshot)
+    if not dry_run and comprehensive and str(effective_contract.get("execution", {}).get("product_target") or "local") == "remote_ssh":
+        remote_preflight(config, expected_head_sha=str(snapshot.get("head_sha") or ""))
+        config = load_project_config(config.root, config.path)
+        effective_contract = normalize_execution_contract(config, snapshot=snapshot)
+    worktree = _prepare_detached_worktree(
+        config,
+        snapshot,
+        checkout=checkout,
+        dry_run=dry_run,
+    )
+    diff_info = _reconstruct_snapshot_diff(snapshot, worktree)
+    head_sha = snapshot["head_sha"]
+    diff_hash = _sha256(str(snapshot.get("diff") or ""))
+    dependency_preparation = prepare_review_dependencies(
+        config,
+        worktree=Path(str(worktree.get("path"))) if worktree.get("path") else None,
+        python_executable=_review_python_executable(config),
+        environment_profile=environment_profile_status(config),
+        enabled=prepare_dependencies and not dry_run,
+        timeout_seconds=timeout_seconds,
+        execution_contract=effective_contract,
+    )
+    test_selection = select_applicable_tests(
+        worktree.get("path"),
+        snapshot.get("changed_files", []),
+        python_executable=_review_python_executable(config),
+    )
+    test_results = run_selected_tests(
+        test_selection["selected"],
+        worktree.get("path") if worktree.get("status") in {"ready", "planned"} else None,
+        config,
+        repo=repo,
+        pr_number=pr_number,
+        head_sha=head_sha,
+        timeout_seconds=timeout_seconds,
+        dry_run=dry_run,
+    )
+    findings = analyze_diff(snapshot)
+    qa_report = (
+        _run_comprehensive_review_qa(
+            config,
+            snapshot=snapshot,
+            worktree=worktree,
+            repo=repo,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            timeout_seconds=timeout_seconds,
+            dry_run=dry_run,
+            test_selection=test_selection,
+            test_results=test_results,
+        )
+        if comprehensive
+        else _diff_only_qa_report()
+    )
+    report = _build_report(
+        config,
+        repo=repo,
+        pr_number=pr_number,
+        snapshot=snapshot,
+        snapshot_path=snapshot_path,
+        diff_hash=diff_hash,
+        diff_info=diff_info,
+        worktree=worktree,
+        test_selection=test_selection,
+        test_results=test_results,
+        findings=findings,
+        qa_report=qa_report,
+        dependency_preparation=dependency_preparation,
+        effective_execution_contract=effective_contract,
+        dry_run=dry_run,
+    )
+    report_paths = write_review_report(config, report)
+    report["report_paths"] = {
+        key: value for key, value in report_paths.items() if key != "json_path_obj"
+    }
+    safe_report, redaction_findings = redact_structure(report, prefix="review_report")
+    if not isinstance(safe_report, dict):
+        raise ReviewError("review_report_redaction_failed_closed")
+    if redaction_findings:
+        report["redaction_findings"] = [item.as_dict() for item in redaction_findings]
+    report_hash = _sha256(json_dumps(safe_report))
+    report["report_hash"] = report_hash
+
+    remote = prepare_gitea_review_reply(
+        config,
+        report,
+        report_hash=report_hash,
+        confirm=confirm,
+        dry_run=dry_run,
+    )
+    report["remote_reply"] = remote
+    safe_report["report_hash"] = report_hash
+    safe_report["remote_reply"], _ = redact_structure(remote, prefix="review_report.remote_reply")
+    safe_report["report_paths"] = report["report_paths"]
+    report_paths["json_path_obj"].write_text(json_dumps(safe_report) + "\n", encoding="utf-8")
+    markdown_path = config.root / str(report_paths["markdown_path"])
+    markdown_path.write_text(_render_detailed_text(safe_report), encoding="utf-8")
+    return report
+
+
+def load_pr_snapshot(
+    config: ProjectConfig,
+    *,
+    repo: str,
+    pr_number: int,
+    pr_json: str | Path | None = None,
+) -> tuple[dict[str, Any], str]:
+    path = Path(pr_json).expanduser() if pr_json else pr_snapshot_path(config, repo, pr_number)
+    if not path.is_absolute():
+        path = config.root / path
+    path = path.resolve()
+    if not path.exists():
+        raise ReviewError(
+            f"gitea_pr_snapshot_missing: provide Hermes Gitea PR read JSON at {_relative_or_str(path, config.root)} "
+            "or pass --pr-json"
+        )
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ReviewError(f"gitea_pr_snapshot_invalid: {path}") from exc
+    if not isinstance(raw, dict):
+        raise ReviewError("gitea_pr_snapshot_invalid: PR snapshot must be an object")
+    snapshot = _normalize_snapshot(raw, repo=repo, pr_number=pr_number)
+    return snapshot, _relative_or_str(path, config.root)
+
+
+def pr_snapshot_path(config: ProjectConfig, repo: str, pr_number: int) -> Path:
+    safe_repo = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(repo).strip()).strip("_") or "repo"
+    return config.paths.state / "gitea-mcp" / "pull-requests" / f"{safe_repo}-pr-{int(pr_number)}.json"
+
+
+def select_applicable_tests(
+    worktree: str | None,
+    changed_files: list[dict[str, Any]],
+    *,
+    python_executable: str = "python3",
+) -> dict[str, Any]:
+    if not worktree:
+        return {
+            "selected": [],
+            "skipped": [],
+            "unavailable": [{"reason": "detached_worktree_unavailable"}],
+            "signals": [],
+            "coverage_gap": True,
+        }
+    root = Path(worktree)
+    changed_paths = [str(item.get("path") or "") for item in changed_files if isinstance(item, dict)]
+    signals: list[str] = []
+    selected: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    tests_dir = root / "tests"
+    targeted_oracle: dict[str, Any] = {
+        "schema": DIFF_TARGETED_ORACLE_SCHEMA,
+        "kind": "product_test_suite",
+        "status": "HOLD",
+        "reason": "diff_targeted_test_oracle_not_found",
+        "changed_files": changed_paths,
+        "test_files": [],
+        "test_id": None,
+    }
+    if tests_dir.is_dir():
+        signals.append("tests_directory")
+        pytest_detected = _tests_use_pytest(tests_dir)
+        targeted_files = _diff_targeted_test_files(tests_dir, changed_paths)
+        targeted_oracle["test_files"] = targeted_files
+        if pytest_detected:
+            if targeted_files:
+                targeted_command = " ".join(
+                    [
+                        shlex.quote(python_executable),
+                        "-m",
+                        "pytest",
+                        *(shlex.quote(str(Path("tests") / path)) for path in targeted_files),
+                        "-q",
+                    ]
+                )
+                targeted_oracle.update(
+                    {
+                        "status": "READY",
+                        "reason": "changed_files_mapped_to_product_test_oracle",
+                        "test_id": "diff-targeted-pytest",
+                    }
+                )
+                selected.append(
+                    {
+                        "id": "diff-targeted-pytest",
+                        "command": targeted_command,
+                        "reason": "changed-file-driven product test oracle",
+                        "oracle": targeted_oracle,
+                    }
+                )
+                signals.append("diff_targeted_product_tests")
+            else:
+                targeted_oracle["reason"] = "diff_targeted_test_oracle_not_found"
+            command = f"{shlex.quote(python_executable)} -m pytest tests -q"
+            test_id = "regression-pytest"
+            signals.append("pytest_tests")
+        else:
+            targeted_oracle["reason"] = "targeted_test_runner_not_detected"
+            command = f"{shlex.quote(python_executable)} -m unittest discover -s tests"
+            test_id = "regression-unittest"
+        selected.append({"id": test_id, "command": command, "reason": "repository regression suite"})
+        matching = _matching_test_files(tests_dir, changed_paths)
+        signals.extend(f"changed_test:{path}" for path in matching)
+    if (root / "pytest.ini").exists() or (root / "pyproject.toml").exists() and _contains_pytest_config(root / "pyproject.toml"):
+        signals.append("pytest_metadata")
+    for path in changed_paths:
+        if path:
+            signals.append(f"changed_file:{path}")
+    if not selected:
+        skipped.append({"reason": "no_repo_regression_command_detected"})
+    return {
+        "selected": selected,
+        "skipped": skipped,
+        "unavailable": [],
+        "signals": sorted(set(signals)),
+        "coverage_gap": not bool(selected),
+        "targeted_oracle": targeted_oracle,
+    }
+
+
+def prepare_review_dependencies(
+    config: ProjectConfig,
+    *,
+    worktree: Path | None,
+    python_executable: str,
+    environment_profile: dict[str, Any],
+    enabled: bool,
+    timeout_seconds: int,
+    execution_contract: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Prepare declared local test dependencies in the confirmed product venv."""
+    if not enabled:
+        return {"status": "NOT_RUN", "reason": "disabled_or_dry_run"}
+    local_pytest = bool((execution_contract or {}).get("execution", {}).get("local_pytest", True))
+    if not worktree or (not environment_profile.get("ready") and not local_pytest):
+        return {"status": "BLOCK", "reason": "local_environment_not_confirmed"}
+    if not local_pytest:
+        return {"status": "NOT_RUN", "reason": "local_pytest_disabled"}
+    python_path = Path(python_executable)
+    if not python_path.is_absolute():
+        python_path = worktree / ".venv" / "bin" / "python"
+    if not python_path.is_file():
+        return {"status": "BLOCK", "reason": "product_venv_python_missing", "python": str(python_path)}
+    commands: list[list[str]] = []
+    if (worktree / "requirements.txt").is_file():
+        commands.append([str(python_path), "-m", "pip", "install", "-r", "requirements.txt"])
+    elif (worktree / "pyproject.toml").is_file():
+        commands.append([str(python_path), "-m", "pip", "install", "-e", "."])
+    commands.append([str(python_path), "-m", "playwright", "install", "chromium"])
+    evidence_dir = config.paths.evidence / "review-dependency-preparation"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    results = []
+    for index, argv in enumerate(commands):
+        completed = subprocess.run(argv, cwd=worktree, shell=False, text=True, capture_output=True, timeout=max(1, timeout_seconds), check=False)
+        stdout, _ = _redact_output(completed.stdout or "")
+        stderr, _ = _redact_output(completed.stderr or "")
+        stdout_path = evidence_dir / f"install-{index}.stdout.log"
+        stderr_path = evidence_dir / f"install-{index}.stderr.log"
+        stdout_path.write_text(stdout, encoding="utf-8")
+        stderr_path.write_text(stderr, encoding="utf-8")
+        results.append({"command": argv, "status": "PASS" if completed.returncode == 0 else "BLOCK", "exit_code": completed.returncode, "stdout": _relative_or_str(stdout_path, config.root), "stderr": _relative_or_str(stderr_path, config.root)})
+        if completed.returncode != 0:
+            return {"status": "BLOCK", "reason": "dependency_install_failed", "results": results}
+    return {"status": "PASS", "reason": "local_declared_dependencies_prepared", "results": results}
+
+
+def run_selected_tests(
+    selected: list[dict[str, Any]],
+    worktree: str | None,
+    config: ProjectConfig,
+    *,
+    repo: str,
+    pr_number: int,
+    head_sha: str,
+    timeout_seconds: int,
+    dry_run: bool,
+) -> list[dict[str, Any]]:
+    if dry_run:
+        return [{"id": item.get("id"), "command": item.get("command"), "status": "NOT_RUN", "reason": "dry_run"} for item in selected]
+    if not worktree:
+        return [{"id": item.get("id"), "command": item.get("command"), "status": "BLOCK", "reason": "detached_worktree_unavailable"} for item in selected]
+    evidence_dir = config.paths.evidence / "reviews" / f"{_repo_slug(repo)}-pr-{pr_number}-{head_sha[:12]}"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    results: list[dict[str, Any]] = []
+    for item in selected:
+        command = str(item.get("command") or "")
+        try:
+            argv = _safe_test_argv(command, worktree=Path(worktree))
+            if argv is None:
+                results.append({
+                    "id": item.get("id"),
+                    "command": command,
+                    "status": "BLOCK",
+                    "reason": "unsafe_review_test_command",
+                    "exit_code": 2,
+                    "stdout": None,
+                    "stderr": None,
+                })
+                continue
+            completed = subprocess.run(
+                argv,
+                cwd=worktree,
+                shell=False,
+                text=True,
+                capture_output=True,
+                timeout=max(1, timeout_seconds),
+                check=False,
+            )
+            stdout = completed.stdout or ""
+            stderr = completed.stderr or ""
+            exit_code = completed.returncode
+            infrastructure_reason = _review_test_infrastructure_reason(stdout, stderr)
+            if completed.returncode == 0:
+                status = "PASS"
+                reason = None
+            elif infrastructure_reason:
+                status = "BLOCK"
+                reason = infrastructure_reason
+            else:
+                status = "FAIL"
+                reason = "test_command_failed"
+        except subprocess.TimeoutExpired as exc:
+            status = "BLOCK"
+            reason = "test_command_timeout"
+            stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+            stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+            exit_code = 124
+        fallback = None
+        fallback_attempted = False
+        if status == "BLOCK" and reason == "test_dependency_missing" and len(argv) >= 4 and argv[1:3] == ["-m", "pytest"]:
+            fallback_attempted = True
+            requested_paths = argv[3:-1]
+            if requested_paths == ["tests"]:
+                fallback_paths = [
+                    str(path.relative_to(Path(worktree))).replace("\\", "/")
+                    for path in sorted(Path(worktree).joinpath("tests").rglob("test_*.py"))
+                    if "browser" not in str(path).lower() and "/ui/" not in str(path).lower()
+                ]
+            else:
+                fallback_paths = [path for path in requested_paths if "browser" not in path.lower() and "ui" not in path.lower()]
+            if fallback_paths:
+                fallback_argv = argv[:3] + fallback_paths + argv[-1:]
+                fallback_run = subprocess.run(
+                    fallback_argv,
+                    cwd=worktree,
+                    shell=False,
+                    text=True,
+                    capture_output=True,
+                    timeout=max(1, timeout_seconds),
+                    check=False,
+                )
+                fallback_stdout = fallback_run.stdout or ""
+                fallback_stderr = fallback_run.stderr or ""
+                fallback_status = "PASS" if fallback_run.returncode == 0 else "FAIL"
+                fallback = {
+                    "command": " ".join(shlex.quote(part) for part in fallback_argv),
+                    "status": fallback_status,
+                    "exit_code": fallback_run.returncode,
+                    "stdout": fallback_stdout,
+                    "stderr": fallback_stderr,
+                    "reason": None if fallback_status == "PASS" else "fallback_test_command_failed",
+                    "coverage_status": "PARTIAL",
+                    "skipped_scope": [path for path in requested_paths if path not in fallback_paths],
+                    "skipped_reason": "browser_or_ui_dependency_scope_excluded",
+                }
+            else:
+                fallback = {
+                    "command": None,
+                    "status": "NOT_RUN",
+                    "reason": "fallback_scope_empty",
+                    "coverage_status": "PARTIAL",
+                    "skipped_scope": requested_paths,
+                    "skipped_reason": "all_requested_scope_requires_missing_dependency",
+                }
+        safe_stdout, _ = _redact_output(stdout)
+        safe_stderr, _ = _redact_output(stderr)
+        stdout_path = evidence_dir / f"{item.get('id', 'test')}.stdout.log"
+        stderr_path = evidence_dir / f"{item.get('id', 'test')}.stderr.log"
+        stdout_path.write_text(safe_stdout, encoding="utf-8")
+        stderr_path.write_text(safe_stderr, encoding="utf-8")
+        results.append(
+            {
+                "id": item.get("id"),
+                "command": command,
+                "status": status,
+                "reason": reason,
+                "exit_code": exit_code,
+                "fallback": fallback,
+                "fallback_attempted": fallback_attempted,
+                "coverage_status": "PARTIAL" if fallback_attempted else "FULL",
+                "stdout": _relative_or_str(stdout_path, config.root),
+                "stderr": _relative_or_str(stderr_path, config.root),
+                "reproduction": {
+                    "steps": ["Use the pinned review worktree.", f"Run `{command}`."],
+                    "expected": "The selected test command completes with exit code 0.",
+                    "actual": f"status={status}, reason={reason}, exit_code={exit_code}",
+                    "evidence": [_relative_or_str(stdout_path, config.root), _relative_or_str(stderr_path, config.root)],
+                },
+            }
+        )
+    return results
+
+
+def analyze_diff(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    diff = str(snapshot.get("diff") or "")
+    findings: list[dict[str, Any]] = []
+    current_file = ""
+    new_line = 0
+    for raw_line in diff.splitlines():
+        if raw_line.startswith("+++ b/"):
+            current_file = raw_line[6:]
+            continue
+        if raw_line.startswith("@@"):
+            match = re.search(r"\+(\d+)", raw_line)
+            new_line = int(match.group(1)) if match else 0
+            continue
+        if raw_line.startswith("+") and not raw_line.startswith("+++"):
+            line_text = raw_line[1:]
+            findings.extend(_secret_findings_for_line(current_file, new_line, line_text, diff_hash=_sha256(diff), head_sha=str(snapshot.get("head_sha") or ""), repo=str(snapshot.get("repo") or ""), pr_number=int(snapshot.get("pr_number") or 0)))
+            new_line += 1
+        elif not raw_line.startswith("-"):
+            new_line += 1
+    return findings
+
+
+def write_review_report(config: ProjectConfig, report: dict[str, Any]) -> dict[str, Any]:
+    repo = str(report.get("repo") or "repo")
+    pr_number = int(report.get("pr_number") or 0)
+    head_sha = str(report.get("head_sha") or "unknown")
+    directory = config.paths.reports / "reviews"
+    directory.mkdir(parents=True, exist_ok=True)
+    stem = f"{_repo_slug(repo)}-pr-{pr_number}-{head_sha[:12]}"
+    json_path = directory / f"{stem}.json"
+    markdown_path = directory / f"{stem}.md"
+    legacy_text_path = directory / f"{stem}.txt"
+    safe_report, _ = redact_structure(report, prefix="review_report")
+    json_path.write_text(json_dumps(safe_report) + "\n", encoding="utf-8")
+    markdown_path.write_text(_render_detailed_text(safe_report), encoding="utf-8")
+    # The detailed human-readable report is now Markdown, not a third .txt file.
+    legacy_text_path.unlink(missing_ok=True)
+    return {
+        "json_path": _relative_or_str(json_path, config.root),
+        "markdown_path": _relative_or_str(markdown_path, config.root),
+        "json_path_obj": json_path,
+    }
+
+
+def _review_comment_body(report: dict[str, Any], inline: list[dict[str, Any]]) -> str:
+    recommendations = report.get("recommendations") if isinstance(report.get("recommendations"), list) else []
+    lines = [
+        "Quality Pilot advisory code review (COMMENT only; not approval).",
+        f"Conclusion: {report.get('conclusion') or 'UNASSESSED'}",
+        f"Test outcome: {report.get('test_outcome') or 'NOT_RUN'}",
+        f"QA outcome: {report.get('qa_outcome') or 'NOT_RUN'}",
+        f"Product test outcome: {report.get('product_test_outcome') or 'NOT_RUN'}",
+        f"Quality Pilot tooling outcome: {report.get('tooling_outcome') or 'NOT_RUN'}",
+        f"Infrastructure preflight outcome: {report.get('infrastructure_outcome') or 'NOT_RUN'}",
+        "",
+        "The final Gitea review decision remains user-owned.",
+    ]
+    if inline:
+        lines.extend(["", f"Inline findings: {len(inline)}"])
+    if recommendations:
+        lines.extend(["", "Suggested follow-up:"])
+        for item in recommendations[:12]:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                f"- [{item.get('severity', 'INFO')}] {item.get('recommendation', '')} "
+                f"(verify: {item.get('verification', '')})"
+            )
+    else:
+        lines.extend(["", "No additional deterministic follow-up was generated."])
+    return "\n".join(lines)
+
+
+def _gitea_review_comments(inline: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    comments: list[dict[str, Any]] = []
+    for item in inline:
+        path = str(item.get("path") or "").strip()
+        try:
+            line = int(item.get("line"))
+        except (TypeError, ValueError):
+            line = 0
+        if not path or line <= 0:
+            continue
+        comments.append(
+            {
+                "path": path,
+                "new_line_num": line,
+                "body": str(item.get("body") or "Review finding."),
+            }
+        )
+    return comments
+
+
+def prepare_gitea_review_reply(
+    config: ProjectConfig,
+    report: dict[str, Any],
+    *,
+    report_hash: str,
+    confirm: bool,
+    dry_run: bool,
+) -> dict[str, Any]:
+    findings = report.get("findings") if isinstance(report.get("findings"), list) else []
+    inline = _review_inline_comments(findings, head_sha=str(report.get("head_sha") or ""), report_hash=report_hash)
+    summary = str(report.get("conclusion") or "")
+    body = _review_comment_body(report, inline)
+    gitea_comments = _gitea_review_comments(inline)
+    preview = {
+        "repo": report.get("repo"),
+        "pr_number": report.get("pr_number"),
+        "head_sha": report.get("head_sha"),
+        "summary": summary,
+        "state": "COMMENT",
+        "body": body,
+        "inline_comments": inline,
+        "report_hash": report_hash,
+        "remote_action": "gitea.pull_request.review",
+    }
+    base = {
+        "status": "dry_run" if dry_run else ("awaiting_confirmation" if not confirm else "local_only_pending"),
+        "review_state": "COMMENT",
+        "approval_decision": "USER_DECISION_REQUIRED",
+        "preview": preview,
+        "remote_apply": False,
+    }
+    review_scope_present = "comprehensive_review" in report
+    qa_incomplete = review_scope_present and (
+        not bool(report.get("comprehensive_review")) or str(report.get("qa_outcome") or "") != "PASS"
+    )
+    evidence_incomplete = str(report.get("test_outcome") or "") != "PASS" or bool(report.get("coverage_gap")) or qa_incomplete
+    if dry_run:
+        return base
+    if not confirm:
+        return {
+            **base,
+            "status": "awaiting_confirmation",
+            "reason": "human_confirmation_required_for_advisory_comment",
+            "next_action": "Review the report recommendations, then explicitly confirm the COMMENT handoff if desired",
+        }
+    if config is None:
+        return {
+            **base,
+            "status": "local_only_pending",
+            "reason": "review_request_config_missing",
+            "next_action": "Use a configured product repository root to persist and apply the advisory COMMENT request",
+        }
+    request_path = review_mcp_request_path(config)
+    request_path.parent.mkdir(parents=True, exist_ok=True)
+    request = {
+        "schema": REVIEW_REQUEST_SCHEMA,
+        "operation": "gitea.pull_request.review",
+        "status": "needs_mcp_apply",
+        "repo": report.get("repo"),
+        "pr_number": report.get("pr_number"),
+        "head_sha": report.get("head_sha"),
+        "commit_id": report.get("head_sha"),
+        "report_hash": report_hash,
+        "state": "COMMENT",
+        "body": body,
+        "summary": summary,
+        "comments": gitea_comments,
+        "inline_comments": inline,
+        "advisory_only": True,
+        "approval_decision": "USER_DECISION_REQUIRED",
+        "recommendations": report.get("recommendations", []),
+        "developer_review": report.get("developer_review", {}),
+        "evidence_incomplete": evidence_incomplete,
+        "evidence": {
+            "test_outcome": report.get("test_outcome"),
+            "qa_outcome": report.get("qa_outcome"),
+            "qa_matrix": report.get("qa_review", {}).get("matrix", {}) if isinstance(report.get("qa_review"), dict) else {},
+            "coverage_gap": bool(report.get("coverage_gap")),
+            "diff_targeted_oracle": report.get("diff_targeted_oracle", {}),
+            "product_test_outcome": report.get("product_test_outcome"),
+            "browser_ui_outcome": report.get("browser_ui_outcome"),
+            "product_test": report.get("qa_review", {}).get("product_test", {}) if isinstance(report.get("qa_review"), dict) else {},
+            "test_results": report.get("test_results", []),
+            "snapshot_path": report.get("snapshot_path"),
+            "review_report_path": report.get("report_paths", {}).get("json_path"),
+            "review_report_markdown_path": report.get("report_paths", {}).get("markdown_path"),
+            "report_hash": report_hash,
+        },
+        "safety": {
+            "write_gate_required": True,
+            "current_head_required": True,
+            "self_review_allowed_but_not_approval": True,
+            "allowed_targets": ["pull_request_review"],
+            "deduplication_key": f"{report.get('repo')}:{report.get('pr_number')}:{report.get('head_sha')}:{report_hash}",
+        },
+        "request_paths": {
+            "result": _relative_or_str(review_mcp_result_path(config), config.root),
+        },
+    }
+    try:
+        ensure_safe_structure(request, context="review request")
+    except ValueError as exc:
+        return {
+            **base,
+            "status": "local_only_pending",
+            "reason": "redaction_failed_closed",
+            "message": "review request did not pass the centralized security detector",
+        }
+    safe_request, redaction_findings = redact_structure(request, prefix="review_request")
+    if redaction_findings:
+        return {
+            **base,
+            "status": "local_only_pending",
+            "reason": "redaction_failed_closed",
+            "redaction_findings": [item.as_dict() for item in redaction_findings],
+        }
+    request_path.write_text(json_dumps(safe_request) + "\n", encoding="utf-8")
+    remote_ready = mcp_server_is_available(config, "gitea")
+    return {
+        **base,
+        "status": "needs_mcp_apply" if remote_ready else "local_only_pending",
+        "remote_ready": remote_ready,
+        "request_path": _relative_or_str(request_path, config.root),
+        "next_action": "Call the configured Gitea MCP review tool" if remote_ready else "Retry after Gitea MCP readiness is available",
+    }
+
+
+def review_mcp_request_path(config: ProjectConfig) -> Path:
+    return configured_mcp_json_path(config, "review_write_request_json")
+
+
+def review_mcp_result_path(config: ProjectConfig) -> Path:
+    return configured_mcp_json_path(config, "review_write_result_json")
+
+
+def review_apply_ledger_path(config: ProjectConfig) -> Path:
+    return config.paths.state / "gitea-mcp" / "review-write-ledger.json"
+
+
+def complete_gitea_review_apply(
+    config: ProjectConfig,
+    *,
+    request_json: str | Path | None = None,
+    result_json: str | Path | None = None,
+) -> dict[str, Any]:
+    """Reconcile a Hermes Gitea MCP review result without performing a write.
+
+    Hermes performs the actual MCP call.  This deterministic step validates
+    that the returned result belongs to the exact repo/PR/head/report request,
+    records a retryable failure, and rejects duplicate application evidence.
+    """
+    request_path = _resolve_review_path(config, request_json, review_mcp_request_path(config))
+    result_path = _resolve_review_path(config, result_json, review_mcp_result_path(config))
+    request = _load_json_object(request_path, "review request")
+    result = _load_json_object(result_path, "review result")
+    if request.get("schema") != REVIEW_REQUEST_SCHEMA or request.get("operation") != "gitea.pull_request.review":
+        raise ReviewError("review_request_invalid_schema_or_operation")
+    safety = request.get("safety") if isinstance(request.get("safety"), dict) else {}
+    if safety.get("allowed_targets") != ["pull_request_review"]:
+        raise ReviewError("review_request_target_not_allowed")
+    if request.get("state") != "COMMENT" or request.get("advisory_only") is not True:
+        raise ReviewError("review_request_must_be_advisory_comment")
+    key = str(safety.get("deduplication_key") or "").strip()
+    if not key:
+        raise ReviewError("review_request_deduplication_key_missing")
+    ledger = _load_json_object(review_apply_ledger_path(config), "review apply ledger", required=False)
+    entries = ledger.get("entries") if isinstance(ledger.get("entries"), list) else []
+    previous = next((item for item in entries if isinstance(item, dict) and item.get("deduplication_key") == key), None)
+    if isinstance(previous, dict) and previous.get("status") == "ok":
+        return {
+            "status": "duplicate",
+            "reason": "review_reply_already_reconciled",
+            "deduplication_key": key,
+            "previous": previous,
+            "request_path": _relative_or_str(request_path, config.root),
+            "result_path": _relative_or_str(result_path, config.root),
+        }
+    _validate_review_result_identity(request, result)
+    try:
+        ensure_safe_structure(result, context="review result")
+    except ValueError as exc:
+        raise ReviewError("review_result_redaction_failed_closed") from exc
+    success = result.get("ok") is True or str(result.get("status") or "").lower() in {"ok", "success", "applied"}
+    entry = {
+        "deduplication_key": key,
+        "status": "ok" if success else "blocked",
+        "repo": request.get("repo"),
+        "pr_number": request.get("pr_number"),
+        "head_sha": request.get("head_sha"),
+        "report_hash": request.get("report_hash"),
+        "result_status": result.get("status"),
+        "result_path": _relative_or_str(result_path, config.root),
+        "updated_at": utc_now(),
+    }
+    merged_entries = [item for item in entries if not (isinstance(item, dict) and item.get("deduplication_key") == key)]
+    merged_entries.append(entry)
+    ledger_payload = {
+        "schema": "quality-pilot.gitea-review-write-ledger.v1",
+        "updated_at": utc_now(),
+        "entries": sorted(merged_entries, key=lambda item: str(item.get("deduplication_key") or "")),
+    }
+    ledger_path = review_apply_ledger_path(config)
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    ledger_path.write_text(json_dumps(ledger_payload) + "\n", encoding="utf-8")
+    payload = {
+        "status": "ok" if success else "blocked",
+        "reason": None if success else "gitea_mcp_review_write_failed",
+        "retryable": not success,
+        "deduplication_key": key,
+        "repo": request.get("repo"),
+        "pr_number": request.get("pr_number"),
+        "head_sha": request.get("head_sha"),
+        "report_hash": request.get("report_hash"),
+        "request_path": _relative_or_str(request_path, config.root),
+        "result_path": _relative_or_str(result_path, config.root),
+        "ledger_path": _relative_or_str(ledger_path, config.root),
+        "response": result,
+    }
+    safe_payload, findings = redact_structure(payload, prefix="review_apply")
+    if findings:
+        raise ReviewError("review_apply_redaction_failed_closed")
+    apply_path = config.paths.state / "gitea-mcp" / "review-apply-result.json"
+    apply_path.parent.mkdir(parents=True, exist_ok=True)
+    apply_path.write_text(json_dumps(safe_payload) + "\n", encoding="utf-8")
+    return {**payload, "apply_result_path": _relative_or_str(apply_path, config.root)}
+
+
+def _review_inline_comments(findings: list[Any], *, head_sha: str, report_hash: str) -> list[dict[str, Any]]:
+    comments: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in findings:
+        if not isinstance(item, dict):
+            continue
+        finding_id = str(item.get("id") or "finding")
+        dedupe = f"{finding_id}:{head_sha}:{report_hash}"
+        if dedupe in seen:
+            continue
+        seen.add(dedupe)
+        comments.append({
+            "finding_id": finding_id,
+            "path": item.get("path"),
+            "line": item.get("line"),
+            "severity": item.get("severity"),
+            "body": item.get("message"),
+            "head_sha": head_sha,
+            "report_hash": report_hash,
+            "idempotency_key": dedupe,
+        })
+    return comments
+
+
+def _validate_review_result_identity(request: dict[str, Any], result: dict[str, Any]) -> None:
+    for field in ("repo", "pr_number", "head_sha", "report_hash"):
+        returned = result.get(field)
+        if returned in (None, ""):
+            continue
+        if str(returned) != str(request.get(field)):
+            raise ReviewError(f"review_result_stale_{field}")
+
+
+def _resolve_review_path(config: ProjectConfig, value: str | Path | None, default: Path) -> Path:
+    path = Path(value).expanduser() if value else default
+    if not path.is_absolute():
+        path = config.root / path
+    return path.resolve()
+
+
+def _load_json_object(path: Path, label: str, *, required: bool = True) -> dict[str, Any]:
+    if not path.exists():
+        if required:
+            raise ReviewError(f"{label}_missing")
+        return {"entries": []}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ReviewError(f"{label}_invalid") from exc
+    if not isinstance(value, dict):
+        raise ReviewError(f"{label}_invalid")
+    return value
+
+
+def _normalize_snapshot(raw: dict[str, Any], *, repo: str, pr_number: int) -> dict[str, Any]:
+    raw_repo = str(raw.get("repo") or raw.get("full_name") or raw.get("repository") or repo)
+    if isinstance(raw.get("repository"), dict):
+        raw_repo = str(raw["repository"].get("full_name") or raw["repository"].get("name") or repo)
+    if raw_repo != repo:
+        raise ReviewError(f"PR snapshot repository mismatch: expected {repo}, got {raw_repo}")
+    number = _int_or_none(raw.get("number") or raw.get("index") or raw.get("pr_number"))
+    if number is not None and number != int(pr_number):
+        raise ReviewError(f"PR snapshot number mismatch: expected {pr_number}, got {number}")
+    head = raw.get("head") if isinstance(raw.get("head"), dict) else {}
+    base = raw.get("base") if isinstance(raw.get("base"), dict) else {}
+    head_sha = str(raw.get("head_sha") or raw.get("head_commit_id") or head.get("sha") or head.get("commit_id") or "").strip()
+    if not head_sha:
+        raise ReviewError("gitea_pr_snapshot_invalid: head SHA is required")
+    files = raw.get("changed_files") if isinstance(raw.get("changed_files"), list) else raw.get("files", [])
+    changed_files = []
+    for item in files if isinstance(files, list) else []:
+        if isinstance(item, str):
+            changed_files.append({"path": item})
+        elif isinstance(item, dict) and (item.get("filename") or item.get("path")):
+            changed_files.append({"path": item.get("filename") or item.get("path"), "status": item.get("status")})
+    author = raw.get("user") if isinstance(raw.get("user"), dict) else raw.get("author") if isinstance(raw.get("author"), dict) else {}
+    raw_state = str(raw.get("state") or "").strip().lower()
+    if not raw_state and (raw.get("closed") is True or raw.get("merged") is True):
+        raw_state = "closed"
+    return {
+        "repo": repo,
+        "pr_number": int(pr_number),
+        "title": str(raw.get("title") or ""),
+        "state": raw_state,
+        "merged": bool(raw.get("merged") is True),
+        "updated_at": str(raw.get("updated_at") or raw.get("updated_on") or ""),
+        "url": str(raw.get("html_url") or raw.get("url") or ""),
+        "author": str(author.get("login") or author.get("username") or raw.get("author_login") or ""),
+        "base_sha": str(raw.get("base_sha") or base.get("sha") or ""),
+        "base_ref": str(raw.get("base_ref") or base.get("ref") or ""),
+        "head_sha": head_sha,
+        "head_ref": str(raw.get("head_ref") or head.get("ref") or ""),
+        "diff": str(raw.get("diff") or raw.get("patch") or ""),
+        "changed_files": changed_files,
+        "source_version": str(raw.get("updated_at") or raw.get("updated_on") or head_sha),
+    }
+
+
+def _prepare_detached_worktree(
+    config: ProjectConfig,
+    snapshot: dict[str, Any],
+    *,
+    checkout: str | Path | None,
+    dry_run: bool,
+) -> dict[str, Any]:
+    source = Path(checkout).expanduser().resolve() if checkout else config.root
+    head_sha = str(snapshot["head_sha"])
+    worktree = config.paths.state / "reviews" / _repo_slug(str(snapshot["repo"])) / f"pr-{snapshot['pr_number']}-{head_sha[:12]}"
+    if dry_run:
+        return {"status": "planned", "source": str(source), "path": str(worktree), "head_sha": head_sha}
+    if not (source / ".git").exists() and not (source / "HEAD").exists():
+        return {"status": "blocked", "reason": "checkout_not_git", "source": _safe_output(str(source)), "path": None, "head_sha": head_sha}
+    worktree.parent.mkdir(parents=True, exist_ok=True)
+    fetch_status: dict[str, Any] = {}
+    if not worktree.exists():
+        fetch = _run_git(["-C", str(source), "fetch", "--no-tags", "origin", head_sha], timeout=30)
+        fetch_status["head"] = "ok" if fetch.returncode == 0 else "failed"
+        if fetch.returncode != 0:
+            return {"status": "blocked", "reason": "git_fetch_failed", "message": _safe_output(fetch.stderr), "source": _safe_output(str(source)), "path": None, "head_sha": head_sha}
+        base_sha = str(snapshot.get("base_sha") or "").strip()
+        if base_sha and base_sha != head_sha:
+            base_fetch = _run_git(["-C", str(source), "fetch", "--no-tags", "origin", base_sha], timeout=30)
+            fetch_status["base"] = "ok" if base_fetch.returncode == 0 else "failed"
+        add = _run_git(["-C", str(source), "worktree", "add", "--detach", str(worktree), head_sha], timeout=30)
+        if add.returncode != 0:
+            return {"status": "blocked", "reason": "git_worktree_failed", "message": _safe_output(add.stderr), "source": _safe_output(str(source)), "path": None, "head_sha": head_sha}
+    return {"status": "ready", "source": str(source), "path": str(worktree), "head_sha": head_sha, "fetch": fetch_status}
+
+
+def _reconstruct_snapshot_diff(snapshot: dict[str, Any], worktree: dict[str, Any]) -> dict[str, Any]:
+    existing = str(snapshot.get("diff") or "")
+    if existing:
+        snapshot["diff_source"] = "mcp_snapshot"
+        return {"status": "PASS", "source": "mcp_snapshot", "reconstructed": False}
+    changed_files = snapshot.get("changed_files") if isinstance(snapshot.get("changed_files"), list) else []
+    if not changed_files:
+        snapshot["diff_source"] = "empty_snapshot"
+        return {"status": "NOT_APPLICABLE", "source": "empty_snapshot", "reconstructed": False}
+    if worktree.get("status") != "ready":
+        snapshot["diff_source"] = "unavailable"
+        return {"status": "BLOCK", "reason": "detached_worktree_unavailable", "reconstructed": False}
+    source = str(worktree.get("source") or "")
+    base_sha = str(snapshot.get("base_sha") or "").strip()
+    head_sha = str(snapshot.get("head_sha") or "").strip()
+    if not source or not base_sha or not head_sha:
+        snapshot["diff_source"] = "unavailable"
+        return {"status": "BLOCK", "reason": "base_or_head_sha_missing", "reconstructed": False}
+    result = _run_git(["-C", source, "diff", "--no-ext-diff", base_sha, head_sha], timeout=60)
+    if result.returncode != 0:
+        fetch = _run_git(["-C", source, "fetch", "--no-tags", "origin", base_sha], timeout=30)
+        if fetch.returncode == 0:
+            result = _run_git(["-C", source, "diff", "--no-ext-diff", base_sha, head_sha], timeout=60)
+    if result.returncode != 0:
+        snapshot["diff_source"] = "reconstruction_failed"
+        return {
+            "status": "BLOCK",
+            "reason": "git_diff_reconstruction_failed",
+            "message": _safe_output(result.stderr),
+            "reconstructed": False,
+        }
+    diff = result.stdout or ""
+    if not diff:
+        snapshot["diff_source"] = "reconstructed_empty"
+        return {"status": "BLOCK", "reason": "git_diff_empty_for_changed_files", "reconstructed": False}
+    snapshot["diff"] = diff
+    snapshot["diff_source"] = "git_reconstructed"
+    return {"status": "PASS", "source": "git_reconstructed", "reconstructed": True, "changed_file_count": len(changed_files)}
+
+
+def _resolve_review_product_python(config: ProjectConfig, worktree: Path) -> Path | None:
+    """Resolve the confirmed host product interpreter for the disposable sandbox."""
+    runtime = config.data.get("runtime") if isinstance(config.data.get("runtime"), dict) else {}
+    entrypoint = str(runtime.get("primary_entrypoint") or "")
+    try:
+        candidate = Path(__import__("shlex").split(entrypoint)[0]) if entrypoint else Path(".venv/bin/python")
+    except ValueError:
+        candidate = Path(".venv/bin/python")
+    if not candidate.is_absolute():
+        candidate = config.root / candidate
+    candidate = candidate.resolve()
+    return candidate if candidate.is_file() else None
+
+
+def _build_review_project_config(config: ProjectConfig, worktree: Path, review_workspace: Path) -> ProjectConfig:
+    data = deepcopy(config.data)
+    paths = project_paths(worktree, review_workspace)
+    return ProjectConfig(
+        root=worktree,
+        path=worktree / ".quality-pilot-review.yaml",
+        data=data,
+        paths=paths,
+    )
+
+
+def _run_comprehensive_review_qa(
+    config: ProjectConfig,
+    *,
+    snapshot: dict[str, Any],
+    worktree: dict[str, Any],
+    repo: str,
+    pr_number: int,
+    head_sha: str,
+    timeout_seconds: int,
+    dry_run: bool,
+    test_selection: dict[str, Any] | None = None,
+    test_results: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    dimensions = ["black_box", "white_box", "functional", "boundary", "stress", "ui", "ux", "documentation"]
+    if dry_run:
+        return {
+            "schema": "quality-pilot.review-qa.v1",
+            "mode": "comprehensive",
+            "status": "PLANNED",
+            "generation": {"status": "PLANNED", "reason": "dry_run"},
+            "cases": [],
+            "product_test": {"schema": "quality-pilot.product-build-run.v1", "status": "PLANNED", "reason": "dry_run"},
+            "matrix": {dimension: {"status": "PLANNED", "reason": "dry_run"} for dimension in dimensions} | {"product_binary": {"status": "PLANNED", "reason": "dry_run"}},
+            "outcome": "PLANNED",
+            "required_dimensions": dimensions,
+        }
+    if worktree.get("status") != "ready" or not worktree.get("path"):
+        return {
+            "schema": "quality-pilot.review-qa.v1",
+            "mode": "comprehensive",
+            "status": "BLOCK",
+            "generation": {"status": "BLOCK", "reason": "detached_worktree_unavailable"},
+            "cases": [],
+            "matrix": {dimension: {"status": "BLOCK", "reason": "detached_worktree_unavailable"} for dimension in dimensions},
+            "outcome": "BLOCK",
+            "required_dimensions": dimensions,
+        }
+
+    worktree_path = Path(str(worktree["path"]))
+    review_workspace = config.paths.state / "reviews" / _repo_slug(repo) / f"pr-{pr_number}-{head_sha[:12]}" / "quality-pilot"
+    review_config = _build_review_project_config(config, worktree_path, review_workspace)
+    profile = environment_profile_status(review_config)
+    run_id = f"review-{_repo_slug(repo)}-pr-{pr_number}-{head_sha[:12]}"
+    product_contract = build_product_case_contract(
+        review_config,
+        case_id=f"PR-{pr_number}-PRODUCT",
+        title=f"PR #{pr_number} product build and semantic operation",
+        review_id=run_id,
+        snapshot=snapshot,
+    )
+    product_case_result = run_case(
+        product_contract,
+        RunContext(
+            root=worktree_path,
+            evidence_dir=review_config.paths.evidence / run_id,
+            environment_profile=profile,
+            adapter_config=review_config,
+            adapter_snapshot=snapshot,
+            adapter_review_id=run_id,
+            product_python=_resolve_review_product_python(config, worktree_path),
+        ),
+        dry_run=dry_run,
+    )
+    browser_regression_case_result = _run_browser_regression_case(
+        review_config,
+        worktree=worktree_path,
+        run_id=run_id,
+        selected_tests=test_selection or {},
+        existing_test_results=test_results or [],
+        environment_profile=profile,
+        python_executable=_review_python_executable(config),
+        timeout_seconds=timeout_seconds,
+    )
+    product_test = product_case_result.get("product_result") if isinstance(product_case_result.get("product_result"), dict) else product_case_result
+    product_test["case_id"] = product_case_result.get("case_id")
+    product_test["run_id"] = product_case_result.get("run_id")
+    product_test["contract_hash"] = product_case_result.get("contract_hash")
+    product_test["case_result_path"] = product_case_result.get("result_path")
+    generation: dict[str, Any]
+    case_results: list[dict[str, Any]] = []
+    product_case = _canonical_product_case(product_case_result, root=config.root)
+    if product_case is not None:
+        case_results.append(product_case)
+        browser_case = _canonical_browser_case(product_case_result, root=config.root)
+        if browser_case is not None:
+            case_results.append(browser_case)
+    if browser_regression_case_result is not None:
+        case_results.append(browser_regression_case_result)
+    contracts: list[Any] = []
+    product_contract_raw = deepcopy(product_contract.raw)
+    browser_contract_raw = deepcopy(product_case_result.get("browser_contract_raw")) if isinstance(product_case_result.get("browser_contract_raw"), dict) else None
+    try:
+        # The overlay is PR/head scoped and disposable. Rebuild its generated
+        # contracts on every review, but preserve the already executed product
+        # and Browser contracts as canonical lineage sources.
+        #
+        # The overlay is PR/head scoped and disposable. Rebuild its contracts on
+        # every review so a new diff or a changed QA engine cannot reuse stale
+        # generated cases from a previous review invocation.
+        shutil.rmtree(review_config.paths.cases, ignore_errors=True)
+        generation = generate_cases_init(
+            review_config,
+            feature=f"PR #{pr_number}: {snapshot.get('title') or repo}",
+            profile="auto",
+            count=len(dimensions),
+            fast=True,
+            force=True,
+            review_context={
+                "repo": repo,
+                "pr_number": pr_number,
+                "head_sha": head_sha,
+                "base_sha": snapshot.get("base_sha"),
+                "diff_hash": _sha256(str(snapshot.get("diff") or "")),
+                "changed_files": [
+                    str(item.get("path") or "")
+                    for item in snapshot.get("changed_files", [])
+                    if isinstance(item, dict) and item.get("path")
+                ],
+            },
+        )
+        review_config.paths.cases.mkdir(parents=True, exist_ok=True)
+        (review_config.paths.cases / f"{product_contract.case_id}.yaml").write_text(
+            json.dumps(product_contract_raw, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        if browser_contract_raw:
+            browser_case_id = str(browser_contract_raw.get("case_id") or "")
+            if browser_case_id:
+                (review_config.paths.cases / f"{browser_case_id}.yaml").write_text(
+                    json.dumps(browser_contract_raw, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+        contracts = [
+            contract for contract in load_contracts(review_config.paths.cases)
+            if contract.case_id not in {product_contract.case_id, str((browser_contract_raw or {}).get("case_id") or "")}
+        ]
+    except (CaseGenerationError, OSError, ValueError) as exc:
+        generation = {"status": "BLOCK", "reason": "case_generation_failed", "error": type(exc).__name__}
+
+    for contract in contracts:
+        try:
+            result = run_case(
+                contract,
+                RunContext(
+                    root=worktree_path,
+                    evidence_dir=review_config.paths.evidence / run_id,
+                    environment_profile=profile,
+                ),
+                dry_run=False,
+            )
+            stamp_result_run_id(result, worktree_path, run_id)
+        except Exception as exc:
+            result = {
+                "case_id": contract.case_id,
+                "status": "BLOCK",
+                "truth_status": "BLOCK",
+                "partial_probe": False,
+                "evidence": [],
+                "blocked_reason": "review_case_run_failed",
+                "error": type(exc).__name__,
+            }
+        dimensions_for_case = [str(item) for item in contract.raw.get("swqa_dimensions", []) if str(item).strip()]
+        quality = contract.raw.get("quality_pilot") if isinstance(contract.raw.get("quality_pilot"), dict) else {}
+        case_results.append(
+            {
+                "case_id": contract.case_id,
+                "title": contract.title,
+                "contract_hash": contract.contract_hash,
+                "status": result.get("status"),
+                "truth_status": result.get("truth_status"),
+                "partial_probe": bool(result.get("partial_probe")),
+                "dimensions": dimensions_for_case,
+                "black_box_capable": bool(
+                    quality.get("executable_scope") == "prepared_environment_readonly_product_command"
+                    or str(quality.get("safe_command_source_type") or "").startswith("prepared_environment")
+                ),
+                "result_path": _review_artifact_path(result.get("result_path"), worktree_path, config.root),
+                "evidence": [
+                    _review_artifact_path(item, worktree_path, config.root)
+                    for item in result.get("evidence", [])
+                    if item
+                ],
+            }
+        )
+
+    matrix = _build_review_qa_matrix(
+        snapshot=snapshot,
+        worktree=worktree,
+        regression_available=True,
+        regression_status="PASS" if not dry_run else "PLANNED",
+        findings=[],
+        case_results=case_results,
+        product_test=product_test,
+    )
+    # The diff/white-box cells are completed by the caller after diff analysis.
+    return {
+        "schema": "quality-pilot.review-qa.v1",
+        "mode": "comprehensive",
+        "status": generation.get("status", "ok"),
+        "generation": generation,
+        "cases": case_results,
+        "product_test": product_test,
+        "browser_regression_case": browser_regression_case_result,
+        "matrix": matrix,
+        "outcome": (
+            "BLOCK"
+            if generation.get("status") == "BLOCK"
+            else _review_qa_outcome(matrix)
+        ),
+        "required_dimensions": dimensions,
+        "workspace": _relative_or_str(review_workspace, config.root),
+        "profile": {
+            "status": profile.get("status"),
+            "ready": profile.get("ready"),
+            "blockers": profile.get("blockers", []),
+        },
+    }
+
+
+def _canonical_product_case(result: dict[str, Any], *, root: Path) -> dict[str, Any] | None:
+    if not isinstance(result, dict) or not result.get("case_id"):
+        return None
+    product = result.get("product_result") if isinstance(result.get("product_result"), dict) else result
+    return {
+        "case_id": result.get("case_id"),
+        "title": result.get("title") or "產品建置與語意操作",
+        "case_type": "product",
+        "contract_hash": result.get("contract_hash"),
+        "run_id": result.get("run_id"),
+        "status": result.get("status", "NOT_RUN"),
+        "truth_status": result.get("truth_status") or result.get("status", "NOT_RUN"),
+        "partial_probe": bool(result.get("partial_probe")),
+        "dimensions": ["black_box", "functional"],
+        "black_box_capable": result.get("status") == "PASS",
+        "oracle": result.get("oracle", {"type": "product_build_and_semantic_operation"}),
+        "evidence": result.get("evidence", []),
+        "result_path": result.get("result_path"),
+        "source": "product_case_adapter",
+        "execution_target": result.get("execution_target") or product.get("execution_target") or "local",
+        "evidence_origin": result.get("evidence_origin") or product.get("evidence_origin") or "local",
+        "product_result": product,
+    }
+
+
+def _run_browser_regression_case(
+    config: ProjectConfig,
+    *,
+    worktree: Path,
+    run_id: str,
+    selected_tests: dict[str, Any],
+    existing_test_results: list[dict[str, Any]],
+    environment_profile: dict[str, Any],
+    python_executable: str,
+    timeout_seconds: int,
+) -> dict[str, Any] | None:
+    selected = selected_tests.get("selected", []) if isinstance(selected_tests, dict) else []
+    browser_items = [
+        item for item in selected
+        if isinstance(item, dict) and any(token in str(item.get("command") or "").lower() for token in ("browser", "playwright", "ui"))
+    ]
+    if not browser_items:
+        return None
+    item = browser_items[0]
+    command = str(item.get("command") or "")
+    case_id = "PR-BROWSER-UI-REGRESSION"
+    evidence_dir = config.paths.evidence / "reviews" / run_id / case_id
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    existing = next((value for value in existing_test_results if value.get("id") == item.get("id")), None)
+    if isinstance(existing, dict):
+        status = str(existing.get("status") or "BLOCK")
+        reason = existing.get("reason")
+        exit_code = existing.get("exit_code", 2)
+        evidence = [value for value in (existing.get("stdout"), existing.get("stderr")) if value]
+        result = {
+            "case_id": case_id,
+            "title": "PR browser UI and UX regression tests",
+            "case_type": "playwright_ui_regression",
+            "status": status,
+            "truth_status": status,
+            "official_result": status == "PASS",
+            "partial_probe": False,
+            "dimensions": ["functional", "ui", "ux"],
+            "black_box_capable": False,
+            "contract_hash": _sha256(f"PR-BROWSER-UI-REGRESSION|{command}|{run_id}"),
+            "run_id": run_id,
+            "oracle": {"type": "pytest_playwright_semantic_tests", "command": command},
+            "commands": [{"id": "browser-regression", "command": command, "status": status, "exit_code": exit_code}],
+            "evidence": evidence,
+            "result_path": str((evidence_dir / "result.json").relative_to(config.root)) if (evidence_dir / "result.json").is_relative_to(config.root) else str(evidence_dir / "result.json"),
+            "reason": reason,
+            "source": "existing_targeted_test_result",
+            "execution_target": "local_pinned_worktree",
+            "evidence_origin": "local",
+        }
+        (evidence_dir / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return result
+    argv = _safe_test_argv(command, worktree=worktree)
+    if not environment_profile.get("ready") and str(environment_profile.get("execution_mode") or "local") != "remote":
+        status, reason, exit_code, stdout, stderr = "BLOCK", "environment_profile_required", 2, "", ""
+    elif argv is None:
+        status, reason, exit_code, stdout, stderr = "BLOCK", "unsafe_review_test_command", 2, "", ""
+    else:
+        completed = subprocess.run(argv, cwd=worktree, shell=False, text=True, capture_output=True, timeout=max(1, timeout_seconds), check=False)
+        stdout, stderr = completed.stdout or "", completed.stderr or ""
+        exit_code = completed.returncode
+        status = "PASS" if exit_code == 0 else ("BLOCK" if _review_test_infrastructure_reason(stdout, stderr) else "FAIL")
+        reason = None if status == "PASS" else (_review_test_infrastructure_reason(stdout, stderr) or "browser_ui_test_failed")
+    stdout_path = evidence_dir / "stdout.log"
+    stderr_path = evidence_dir / "stderr.log"
+    safe_stdout, _ = _redact_output(stdout)
+    safe_stderr, _ = _redact_output(stderr)
+    stdout_path.write_text(safe_stdout, encoding="utf-8")
+    stderr_path.write_text(safe_stderr, encoding="utf-8")
+    result = {
+        "case_id": case_id,
+        "title": "PR browser UI and UX regression tests",
+        "case_type": "playwright_ui_regression",
+        "status": status,
+        "execution_target": "local_pinned_worktree",
+        "evidence_origin": "local",
+        "truth_status": status,
+        "official_result": status == "PASS",
+        "partial_probe": False,
+        "dimensions": ["functional", "ui", "ux"],
+        "black_box_capable": False,
+        "contract_hash": _sha256(f"{case_id}|{command}|{run_id}"),
+        "run_id": run_id,
+        "oracle": {"type": "pytest_playwright_semantic_tests", "command": command},
+        "commands": [{"id": "browser-regression", "command": command, "status": status, "exit_code": exit_code}],
+        "evidence": [_relative_or_str(stdout_path, config.root), _relative_or_str(stderr_path, config.root)],
+        "result_path": str((evidence_dir / "result.json").relative_to(config.root)) if (evidence_dir / "result.json").is_relative_to(config.root) else str(evidence_dir / "result.json"),
+        "reason": reason,
+    }
+    (evidence_dir / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return result
+
+
+def _product_result_case(product: dict[str, Any], *, repo: str, pr_number: int, head_sha: str, root: Path) -> dict[str, Any] | None:
+    if not isinstance(product, dict):
+        return None
+    case_id = str(product.get("case_id") or f"PR-{pr_number}-PRODUCT")
+    return {
+        "case_id": case_id,
+        "title": "PR product build and semantic operation",
+        "case_type": "product_build_and_semantic_operation",
+        "contract_hash": product.get("contract_hash") or product.get("contract_identity_hash"),
+        "run_id": product.get("run_id"),
+        "status": product.get("status", "NOT_RUN"),
+        "truth_status": product.get("truth_status") or product.get("status", "NOT_RUN"),
+        "partial_probe": False,
+        "dimensions": ["black_box", "functional"],
+        "black_box_capable": product.get("status") == "PASS",
+        "oracle": {"type": "product_build_and_semantic_operation", "semantic": True},
+        "evidence": [product.get("result_path")] if product.get("result_path") else [],
+        "result_path": product.get("result_path"),
+        "source": "product_testing_adapter",
+        "execution_target": product.get("execution_target") or "local",
+        "evidence_origin": product.get("evidence_origin") or "local",
+        "pr_identity": {"repo": repo, "pr_number": pr_number, "head_sha": head_sha},
+    }
+
+
+def _canonical_browser_case(result: dict[str, Any], *, root: Path) -> dict[str, Any] | None:
+    browser = result.get("browser_case_result") if isinstance(result.get("browser_case_result"), dict) else None
+    if browser is None:
+        return None
+    return _browser_result_case(browser, parent_case_id=str(result.get("case_id") or "PRODUCT"), root=root)
+
+
+def _browser_result_case(product: dict[str, Any], *, parent_case_id: str, root: Path) -> dict[str, Any] | None:
+    browser = product.get("browser") if isinstance(product.get("browser"), dict) else None
+    if browser is None:
+        return None
+    return {
+        "case_id": str(browser.get("case_id") or f"{parent_case_id}-BROWSER-UI"),
+        "title": "PR browser UI and UX semantic flow",
+        "case_type": "playwright_ui",
+        "contract_hash": browser.get("contract_identity_hash") or product.get("contract_hash"),
+        "run_id": browser.get("run_id") or product.get("run_id"),
+        "status": browser.get("status", "NOT_RUN"),
+        "truth_status": browser.get("truth_status") or browser.get("status", "NOT_RUN"),
+        "partial_probe": False,
+        "dimensions": ["black_box", "functional", "ui", "ux"],
+        "black_box_capable": browser.get("status") == "PASS",
+        "oracle": {"type": "playwright_ui", "interaction_count": browser.get("interaction_count", 0), "state_assertion_count": browser.get("state_assertion_count", 0)},
+        "evidence": [str(value) for key, value in (browser.get("evidence", {}) if isinstance(browser.get("evidence"), dict) else {}).items() if value and not str(key).endswith("sha256")],
+        "result_path": browser.get("result_path"),
+        "source": "browser_adapter",
+        "execution_target": browser.get("execution_target") or ("remote_ssh" if browser.get("evidence_origin") == "remote" else "local_disposable_worktree"),
+        "evidence_origin": browser.get("evidence_origin") or "local",
+    }
+
+
+def _build_review_qa_matrix(
+    *,
+    snapshot: dict[str, Any],
+    worktree: dict[str, Any],
+    regression_available: bool,
+    regression_status: str,
+    findings: list[dict[str, Any]],
+    case_results: list[dict[str, Any]],
+    product_test: dict[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
+    matrix: dict[str, dict[str, Any]] = {}
+    diff = str(snapshot.get("diff") or "")
+    matrix["white_box"] = {
+        "status": regression_status if diff else "BLOCK",
+        "reason": "regression_suite_and_reconstructed_diff" if diff else "diff_unavailable",
+        "evidence": [item.get("result_path") for item in case_results if item.get("result_path")],
+    }
+    for dimension, labels in {
+        "functional": {"functional", "positive"},
+        "boundary": {"boundary", "invalid_input", "negative"},
+        "stress": {"stress_timeout_risk"},
+        "ui": {"ui"},
+        "ux": {"ux"},
+    }.items():
+        selected = [item for item in case_results if labels.intersection(set(item.get("dimensions", [])))]
+        matrix[dimension] = _review_case_dimension_result(
+            selected,
+            reason_if_empty=f"no_{dimension}_case",
+            require_product_adapter=(dimension not in {"ui", "ux"}),
+        )
+    black_box_cases = [item for item in case_results if item.get("black_box_capable")]
+    matrix["black_box"] = _review_case_dimension_result(black_box_cases, reason_if_empty="product_black_box_adapter_not_proven")
+    matrix["documentation"] = _review_documentation_result(worktree, snapshot.get("changed_files", []))
+    if isinstance(product_test, dict) and str(product_test.get("status") or "NOT_RUN") not in {"NOT_RUN"}:
+        product_status = str(product_test.get("status") or "HOLD")
+        matrix["product_binary"] = {
+            "status": product_status,
+            "reason": product_test.get("reason"),
+            "evidence": [product_test.get("result_path")] if product_test.get("result_path") else [],
+            "contract_identity_hash": product_test.get("contract_identity_hash"),
+        }
+        browser = product_test.get("browser") if isinstance(product_test.get("browser"), dict) else None
+        if browser is not None:
+            matrix["browser_ui"] = {
+                "status": str(browser.get("status") or "HOLD"),
+                "reason": browser.get("reason"),
+                "evidence": browser.get("evidence", {}),
+            }
+    return matrix
+
+
+def _review_artifact_path(value: Any, worktree: Path, root: Path) -> str | None:
+    if not value:
+        return None
+    path = Path(str(value))
+    if not path.is_absolute():
+        path = worktree / path
+    return _relative_or_str(path.resolve(), root)
+
+
+def _review_case_dimension_result(
+    cases: list[dict[str, Any]],
+    *,
+    reason_if_empty: str,
+    require_product_adapter: bool = False,
+) -> dict[str, Any]:
+    if not cases:
+        return {"status": "HOLD", "reason": reason_if_empty, "case_count": 0}
+    if require_product_adapter and any(not item.get("black_box_capable") for item in cases):
+        return {
+            "status": "HOLD",
+            "reason": "product_black_box_adapter_not_proven",
+            "case_count": len(cases),
+            "case_ids": [item.get("case_id") for item in cases],
+        }
+    statuses = {str(item.get("status") or "BLOCK").upper() for item in cases}
+    if "BLOCK" in statuses:
+        outcome = "BLOCK"
+    elif "FAIL" in statuses:
+        outcome = "FAIL"
+    elif "HOLD" in statuses or any(item.get("partial_probe") for item in cases):
+        outcome = "HOLD"
+    elif statuses == {"PASS"}:
+        outcome = "PASS"
+    else:
+        outcome = "HOLD"
+    return {
+        "status": outcome,
+        "case_count": len(cases),
+        "case_ids": [item.get("case_id") for item in cases],
+        "execution_targets": sorted({str(item.get("execution_target")) for item in cases if item.get("execution_target")}),
+        "evidence_origins": sorted({str(item.get("evidence_origin")) for item in cases if item.get("evidence_origin")}),
+    }
+
+
+def _review_documentation_result(worktree: dict[str, Any], changed_files: list[dict[str, Any]]) -> dict[str, Any]:
+    documentation = [
+        str(item.get("path") or "")
+        for item in changed_files
+        if isinstance(item, dict) and Path(str(item.get("path") or "")).suffix.lower() in {".md", ".rst", ".txt", ".html", ".htm"}
+    ]
+    if not documentation:
+        return {"status": "NOT_APPLICABLE", "reason": "no_documentation_changes", "case_count": 0}
+    root = Path(str(worktree.get("path") or "."))
+    invalid = []
+    for relative in documentation:
+        path = root / relative
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            invalid.append(relative)
+            continue
+        if not text.strip():
+            invalid.append(relative)
+        if path.suffix.lower() in {".html", ".htm"}:
+            parser = HTMLParser()
+            try:
+                parser.feed(text)
+                parser.close()
+            except Exception:
+                invalid.append(relative)
+    if invalid:
+        return {"status": "FAIL", "reason": "documentation_parse_or_read_failed", "invalid": invalid}
+    return {"status": "PASS", "reason": "changed_documentation_read_and_parsed", "files": documentation}
+
+
+def _targeted_oracle_summary(
+    test_selection: dict[str, Any],
+    test_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    plan = test_selection.get("targeted_oracle") if isinstance(test_selection.get("targeted_oracle"), dict) else {}
+    test_id = str(plan.get("test_id") or "")
+    result = next((item for item in test_results if str(item.get("id") or "") == test_id), None)
+    status = str(plan.get("status") or "HOLD").upper()
+    if status == "READY":
+        if not isinstance(result, dict):
+            status = "BLOCK"
+            reason = "diff_targeted_oracle_result_missing"
+        else:
+            result_status = str(result.get("status") or "BLOCK").upper()
+            status = result_status if result_status in {"PASS", "FAIL", "BLOCK", "HOLD"} else "HOLD"
+            reason = {
+                "PASS": "diff_targeted_product_test_oracle_passed",
+                "FAIL": "diff_targeted_product_test_oracle_failed",
+                "BLOCK": str(result.get("reason") or "diff_targeted_product_test_oracle_blocked"),
+                "HOLD": str(result.get("reason") or "diff_targeted_product_test_oracle_held"),
+            }.get(status, "diff_targeted_product_test_oracle_held")
+    else:
+        reason = str(plan.get("reason") or "diff_targeted_test_oracle_unavailable")
+        status = "HOLD"
+    return {
+        "schema": DIFF_TARGETED_ORACLE_SCHEMA,
+        "kind": "product_test_suite",
+        "status": status,
+        "reason": reason,
+        "test_id": test_id or None,
+        "test_files": list(plan.get("test_files", [])) if isinstance(plan.get("test_files"), list) else [],
+        "changed_files": list(plan.get("changed_files", [])) if isinstance(plan.get("changed_files"), list) else [],
+        "test_count": len(plan.get("test_files", [])) if isinstance(plan.get("test_files"), list) else 0,
+        "result_path": result.get("stdout") if isinstance(result, dict) else None,
+        "recorded_test_status": result.get("status") if isinstance(result, dict) else None,
+    }
+
+
+def _review_qa_outcome(matrix: dict[str, dict[str, Any]]) -> str:
+    statuses = {str(item.get("status") or "HOLD") for item in matrix.values()}
+    if "FAIL" in statuses:
+        return "FAIL"
+    if "BLOCK" in statuses:
+        return "BLOCK"
+    if statuses and statuses <= {"PASS", "NOT_APPLICABLE"}:
+        return "PASS"
+    return "HOLD"
+
+
+def _diff_only_qa_report() -> dict[str, Any]:
+    return {
+        "schema": "quality-pilot.review-qa.v1",
+        "mode": "diff_only",
+        "status": "NOT_RUN",
+        "generation": {"status": "NOT_RUN", "reason": "diff_only"},
+        "cases": [],
+        "matrix": {},
+        "outcome": "NOT_RUN",
+        "required_dimensions": [],
+    }
+
+
+def _review_recommendations(
+    *,
+    test_outcome: str,
+    qa_outcome: str,
+    product_test: dict[str, Any],
+    matrix: dict[str, dict[str, Any]],
+    case_results: list[dict[str, Any]],
+    comprehensive: bool,
+    findings: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    recommendations: list[dict[str, Any]] = []
+
+    def add(
+        recommendation_id: str,
+        *,
+        severity: str,
+        category: str,
+        status: str,
+        recommendation: str,
+        verification: str,
+    ) -> None:
+        recommendations.append(
+            {
+                "id": recommendation_id,
+                "severity": severity,
+                "category": category,
+                "status": status,
+                "recommendation": recommendation,
+                "verification": verification,
+            }
+        )
+
+    if test_outcome != "PASS":
+        add(
+            "regression-test-follow-up",
+            severity="HIGH" if test_outcome in {"FAIL", "BLOCK"} else "MEDIUM",
+            category="test-execution",
+            status=test_outcome,
+            recommendation=(
+                "修復回歸測試失敗或測試環境/依賴問題後重新執行 review；不要把未執行的測試當成通過。"
+                if test_outcome in {"FAIL", "BLOCK"}
+                else "補足可執行的回歸測試並重新執行 review。"
+            ),
+            verification="targeted 與完整 regression command 均成功，且 evidence path 可追溯。",
+        )
+
+    product_status = str(product_test.get("status") or "NOT_RUN").upper()
+    product_reason = str(product_test.get("reason") or "")
+    if comprehensive and product_status != "PASS":
+        if product_reason in {
+            "product_test_contract_missing",
+            "build_recipe_missing",
+            "run_operation_missing",
+            "artifact_path_missing",
+            "build_artifact_missing",
+        }:
+            product_message = (
+                "在 target repo 的 runtime.product_testing 提供 user-owned build_recipe、artifact_path、"
+                "至少一個帶 semantic assertion 的 run_operations；若 README 命令要執行，另提供明確 allowlist。"
+            )
+            verification = "重新 review 時產生 artifact hash，並有實際產品操作的 semantic evidence。"
+        elif product_reason == "product_testing_disabled":
+            product_message = "Comprehensive review 需要產品驗證；啟用 product_testing，或明確改用 --diff-only，不要以停用設定冒充完整 review。"
+            verification = "product build/run contract 實際執行並產生 semantic evidence。"
+        elif product_status == "FAIL":
+            product_message = "檢查 product build/run evidence 與實際產品行為；若需求正確，修復產品後重新執行 semantic oracle。"
+            verification = "build 成功且產品操作 assertion 通過；不要只以 exit code 替代語意驗證。"
+        elif product_status == "HOLD":
+            product_message = "將目前 probe 補成明確的產品操作與 positive semantic assertion，避免 help/version/exit-only probe。"
+            verification = "至少一個真實產品操作取得 PASS，並保存 stdout/stderr/rc 與 assertion evidence。"
+        else:
+            product_message = "補齊並確認產品 build/run contract 與執行環境，再重新執行 comprehensive review。"
+            verification = "product binary contract 不再是 NOT_RUN/BLOCK/HOLD。"
+        add(
+            "product-test-contract",
+            severity="HIGH",
+            category="product-validation",
+            status=product_status,
+            recommendation=product_message,
+            verification=verification,
+        )
+
+    for dimension, item in matrix.items():
+        if dimension in {"white_box", "product_binary", "browser_ui", "documentation"} or not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or "HOLD").upper()
+        if status in {"PASS", "NOT_APPLICABLE"}:
+            continue
+        reason = str(item.get("reason") or "")
+        if reason == "test_dependency_missing" and dimension == "functional":
+            continue
+        if dimension == "black_box":
+            message = "新增產品專屬 black-box adapter（CLI/TUI/API/UI 依產品實際介面），並以 semantic assertion 驗證，不要用 generic probe 代替。"
+            verification = "black_box adapter 在 pinned product artifact 上實際執行並產生可追溯 evidence。"
+        elif dimension == "boundary":
+            message = "補充產品邊界契約：空值、型別錯誤、範圍邊界、硬體/環境前置條件與明確 failure oracle。"
+            verification = "boundary cases 實際執行，結果與預期狀態/錯誤語意一致。"
+        elif dimension == "stress":
+            message = "補充 bounded stress/timeout/soak contract，定義負載、時間上限、資源上限與可接受結果。"
+            verification = "stress evidence 包含 duration、timeout/resource observations 與明確 oracle。"
+        else:
+            message = f"處理 {dimension} 維度的缺口（{reason or 'missing_or_incomplete_oracle'}），補上產品專屬 contract 與 evidence。"
+            verification = f"{dimension} matrix status 變為 PASS，且 evidence 可追溯。"
+        add(
+            f"{dimension}-coverage",
+            severity="HIGH" if dimension in {"black_box", "boundary"} else "MEDIUM",
+            category="qa-coverage",
+            status=status,
+            recommendation=message,
+            verification=verification,
+        )
+
+    partial_cases = [str(item.get("case_id") or "case") for item in case_results if item.get("partial_probe")]
+    if partial_cases:
+        add(
+            "partial-probe-follow-up",
+            severity="MEDIUM",
+            category="case-oracle",
+            status="HOLD",
+            recommendation=f"將 partial probe case（{', '.join(partial_cases)}）改為完整產品操作，補上成功/失敗語意 oracle。",
+            verification="case 不再標記 partial_probe，且結果由產品行為而非命令退出碼決定。",
+        )
+
+    if findings:
+        add(
+            "inline-finding-follow-up",
+            severity="HIGH",
+            category="code-review",
+            status="FINDINGS",
+            recommendation="逐一處理 inline finding 的修補建議，或由使用者在 Gitea review 中標記為接受風險並說明理由。",
+            verification="每個 finding 有修補、明確 rationale 或 user-owned disposition。",
+        )
+
+    add(
+        "human-review-decision",
+        severity="INFO",
+        category="human-gate",
+        status="USER_DECISION_REQUIRED",
+        recommendation="由使用者依報告與上述建議決定 Gitea 的 COMMENT、REQUEST_CHANGES 或 APPROVED；Quality Pilot 不自動代替批准。",
+        verification="使用者明確確認最終 review state；本工具的 remote handoff 預設只建立 COMMENT。",
+    )
+    return recommendations
+
+
+def _recommendation_next_actions(recommendations: list[dict[str, Any]]) -> list[str]:
+    actions: list[str] = []
+    for item in recommendations:
+        if not isinstance(item, dict) or item.get("id") == "human-review-decision":
+            continue
+        recommendation_id = str(item.get("id") or "")
+        action = {
+            "product-test-contract": "補上 runtime.product_testing contract（build_recipe、artifact_path、semantic run_operations）後重新執行 review",
+            "black_box-coverage": "補上產品專屬 black-box adapter 與 semantic assertion",
+            "boundary-coverage": "補上 boundary cases、硬體前置條件與 failure oracle",
+            "stress-coverage": "補上 bounded stress/timeout/soak contract 與 resource oracle",
+            "partial-probe-follow-up": "將 partial probe 改成實際產品操作與語意 assertion",
+            "regression-test-follow-up": "處理 regression/test infrastructure 缺口後重新執行 review",
+        }.get(recommendation_id)
+        if action:
+            actions.append(action)
+    actions.append("由使用者決定 Gitea COMMENT、REQUEST_CHANGES 或 APPROVED；Quality Pilot 不代替批准")
+    return actions
+
+
+def _build_developer_review_report(
+    *,
+    findings: list[dict[str, Any]],
+    recommendations: list[dict[str, Any]],
+    test_outcome: str,
+    product_test_outcome: str,
+    qa_outcome: str,
+    matrix: dict[str, dict[str, Any]],
+    test_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    actionable = [
+        item for item in recommendations
+        if isinstance(item, dict) and item.get("id") != "human-review-decision"
+    ]
+    must_fix: list[dict[str, Any]] = []
+    should_fix: list[dict[str, Any]] = []
+    nice_to_have: list[dict[str, Any]] = []
+    for item in findings:
+        if not isinstance(item, dict):
+            continue
+        severity = str(item.get("severity") or "").upper()
+        if severity in {"CRITICAL", "BLOCKER"} or item.get("blocking") is True:
+            must_fix.append(item)
+        else:
+            should_fix.append(item)
+    for item in actionable:
+        severity = str(item.get("severity") or "INFO").upper()
+        if severity in {"CRITICAL", "BLOCKER"}:
+            must_fix.append(item)
+        elif severity == "HIGH":
+            should_fix.append(item)
+        else:
+            nice_to_have.append(item)
+
+    def item_text(item: dict[str, Any]) -> str:
+        return str(item.get("recommendation") or item.get("message") or item.get("body") or "").strip()
+
+    def verification_text(item: dict[str, Any]) -> str:
+        return str(item.get("verification") or item.get("recommendation") or "").strip()
+
+    categories = {
+        "security": 0,
+        "maintainability": 0,
+        "performance": 0,
+        "style": 0,
+    }
+    for item in findings + actionable:
+        category = str(item.get("category") or "").lower()
+        if "security" in category:
+            categories["security"] += 1
+        elif "stress" in category or "performance" in category:
+            categories["performance"] += 1
+        elif "style" in category:
+            categories["style"] += 1
+        else:
+            categories["maintainability"] += 1
+
+    status_by_dimension = {
+        key: str(value.get("status") or "UNKNOWN")
+        for key, value in matrix.items()
+        if isinstance(value, dict)
+    }
+    return {
+        "schema": "quality-pilot.developer-code-review.v1",
+        "decision": "REQUEST_CHANGES" if must_fix else "COMMENT",
+        "decision_owner": "USER",
+        "decision_note": "This is a user-owned recommendation. The remote handoff remains COMMENT and never grants merge permission.",
+        "summary": {
+            "total_issues": len(must_fix) + len(should_fix) + len(nice_to_have),
+            "must_fix": len(must_fix),
+            "should_fix": len(should_fix),
+            "nice_to_have": len(nice_to_have),
+            "findings": len(findings),
+            "recommendations": len(actionable),
+        },
+        "evidence": {
+            "test_results": [
+                {
+                    "id": item.get("id"),
+                    "command": item.get("command"),
+                    "status": item.get("status"),
+                    "reason": item.get("reason"),
+                    "exit_code": item.get("exit_code"),
+                    "stdout": item.get("stdout"),
+                    "stderr": item.get("stderr"),
+                    "reproduction": {
+                        "steps": [
+                            "Use the pinned review worktree.",
+                            f"Run `{item.get('command')}`.",
+                        ],
+                        "expected": "The selected test command completes with exit code 0.",
+                        "actual": f"status={item.get('status')}, reason={item.get('reason')}, exit_code={item.get('exit_code')}",
+                        "evidence": [item.get("stdout"), item.get("stderr")],
+                    },
+                }
+                for item in test_results
+            ],
+            "finding_evidence": [
+                {
+                    "id": item.get("id"),
+                    "path": item.get("path"),
+                    "line": item.get("line"),
+                    "kind": (item.get("evidence") or {}).get("kind") if isinstance(item.get("evidence"), dict) else None,
+                    "reproducibility": item.get("reproducibility"),
+                }
+                for item in findings
+            ],
+        },
+        "impact_areas": {
+            "security": categories["security"],
+            "maintainability": categories["maintainability"],
+            "performance": categories["performance"],
+            "style": categories["style"],
+        },
+        "test_evidence": {
+            "test_outcome": test_outcome,
+            "product_test_outcome": product_test_outcome,
+            "qa_outcome": qa_outcome,
+            "matrix": status_by_dimension,
+        },
+        "sections": {
+            "must_fix": must_fix,
+            "should_fix": should_fix,
+            "nice_to_have": nice_to_have,
+            "verification": [
+                {
+                    "item": str(item.get("id") or "finding"),
+                    "action": verification_text(item),
+                }
+                for item in must_fix + should_fix + nice_to_have
+            ],
+        },
+        "localized_summary": {
+            "en": {
+                "must_fix": "None." if not must_fix else [item_text(item) for item in must_fix],
+                "should_fix": "None." if not should_fix else [item_text(item) for item in should_fix],
+                "nice_to_have": "None." if not nice_to_have else [item_text(item) for item in nice_to_have],
+                "verification": [verification_text(item) for item in must_fix + should_fix + nice_to_have],
+            },
+            "zh-TW": {
+                "must_fix": "無。" if not must_fix else [item_text(item) for item in must_fix],
+                "should_fix": "無。" if not should_fix else [item_text(item) for item in should_fix],
+                "nice_to_have": "無。" if not nice_to_have else [item_text(item) for item in nice_to_have],
+                "verification": [verification_text(item) for item in must_fix + should_fix + nice_to_have],
+            },
+        },
+    }
+
+
+def _build_report(
+    config: ProjectConfig,
+    *,
+    repo: str,
+    pr_number: int,
+    snapshot: dict[str, Any],
+    snapshot_path: str,
+    diff_hash: str,
+    diff_info: dict[str, Any],
+    worktree: dict[str, Any],
+    test_selection: dict[str, Any],
+    test_results: list[dict[str, Any]],
+    findings: list[dict[str, Any]],
+    qa_report: dict[str, Any],
+    dependency_preparation: dict[str, Any] | None = None,
+    effective_execution_contract: dict[str, Any] | None = None,
+    dry_run: bool,
+) -> dict[str, Any]:
+    test_outcome = "NOT_RUN" if dry_run else ("HOLD" if not test_results else "PASS")
+    if any(item.get("status") == "BLOCK" for item in test_results) or worktree.get("status") == "blocked":
+        test_outcome = "BLOCK"
+    elif any(item.get("status") == "FAIL" for item in test_results):
+        test_outcome = "FAIL"
+    matrix = qa_report.get("matrix") if isinstance(qa_report.get("matrix"), dict) else {}
+    white_box = matrix.get("white_box") if isinstance(matrix.get("white_box"), dict) else {}
+    if findings:
+        white_box.update({"status": "FAIL", "reason": "deterministic_diff_finding", "finding_count": len(findings)})
+    elif diff_info.get("status") != "PASS":
+        white_box.update({"status": "BLOCK", "reason": diff_info.get("reason") or "diff_unavailable"})
+    elif test_outcome in {"FAIL", "BLOCK", "HOLD", "NOT_RUN"}:
+        white_box.update({"status": test_outcome, "reason": "regression_test_outcome"})
+    if white_box:
+        matrix["white_box"] = white_box
+    targeted_oracle = _targeted_oracle_summary(test_selection, test_results)
+    product_test = qa_report.get("product_test") if isinstance(qa_report.get("product_test"), dict) else {}
+    product_test_outcome = str(product_test.get("status") or "NOT_RUN")
+    browser_result = product_test.get("browser") if isinstance(product_test.get("browser"), dict) else {}
+    browser_outcome = str(browser_result.get("status") or "NOT_RUN")
+    remote_preflight = effective_execution_contract.get("remote_preflight") if isinstance(effective_execution_contract, dict) and isinstance(effective_execution_contract.get("remote_preflight"), dict) else {}
+    preflight_status = str(remote_preflight.get("status") or "NOT_RUN")
+    tooling_outcome = "TOOLING_FAIL" if preflight_status == "TOOLING_FAIL" else "NOT_RUN"
+    infrastructure_outcome = preflight_status if preflight_status in {"INFRASTRUCTURE_BLOCK", "REMOTE_SOURCE_MISMATCH", "REMOTE_SOURCE_DIRTY", "REMOTE_SOURCE_UNVERIFIED"} else "NOT_RUN"
+    if targeted_oracle["status"] in {"PASS", "FAIL", "BLOCK"}:
+        matrix["functional"] = {
+            "status": targeted_oracle["status"],
+            "reason": targeted_oracle["reason"],
+            "case_count": targeted_oracle.get("test_count", 0),
+            "test_id": targeted_oracle.get("test_id"),
+            "test_files": targeted_oracle.get("test_files", []),
+        }
+    matrix_outcome = _review_qa_outcome(matrix) if matrix else str(qa_report.get("outcome") or "NOT_RUN")
+    qa_outcome = "BLOCK" if qa_report.get("outcome") == "BLOCK" else matrix_outcome
+    if tooling_outcome == "TOOLING_FAIL" or infrastructure_outcome != "NOT_RUN":
+        product_test_outcome = "NOT_EVALUATED"
+        browser_outcome = "NOT_EVALUATED"
+        qa_outcome = "UNASSESSED"
+        matrix["product_binary"] = {
+            "status": "NOT_RUN",
+            "reason": "blocked_by_quality_pilot_tooling_failure" if tooling_outcome == "TOOLING_FAIL" else "blocked_by_remote_infrastructure_preflight",
+        }
+    qa_report["matrix"] = matrix
+    qa_report["targeted_oracle"] = targeted_oracle
+    qa_report["outcome"] = qa_outcome
+    comprehensive = qa_report.get("mode") == "comprehensive"
+    coverage_gap = bool(
+        test_selection.get("coverage_gap")
+        or test_selection.get("unavailable")
+        or (comprehensive and qa_outcome != "PASS")
+        or (comprehensive and product_test_outcome not in {"PASS", "NOT_RUN"})
+    )
+    if findings:
+        conclusion = "REQUEST_CHANGES"
+    elif tooling_outcome == "TOOLING_FAIL":
+        conclusion = "QUALITY_PILOT_TOOLING_FAILURE_REQUIRES_REPAIR"
+    elif infrastructure_outcome != "NOT_RUN":
+        conclusion = "REMOTE_SOURCE_RECONCILIATION_REQUIRED" if infrastructure_outcome in {"REMOTE_SOURCE_MISMATCH", "REMOTE_SOURCE_DIRTY", "REMOTE_SOURCE_UNVERIFIED"} else "INFRASTRUCTURE_PREFLIGHT_REQUIRED"
+    elif test_outcome == "FAIL":
+        conclusion = "TEST_FAILURE_REQUIRES_TRIAGE"
+    elif qa_outcome == "FAIL" and product_test_outcome == "FAIL":
+        conclusion = "PRODUCT_TEST_FAILURE_REQUIRES_TRIAGE"
+    elif qa_outcome == "FAIL":
+        conclusion = "QA_MATRIX_FAILURE_REQUIRES_TRIAGE"
+    elif product_test_outcome in {"BLOCK", "HOLD", "INTERRUPTED", "PLANNED"}:
+        conclusion = "HOLD_FOR_PRODUCT_TEST_COVERAGE"
+    elif test_outcome in {"BLOCK", "HOLD", "NOT_RUN"} or qa_outcome in {"BLOCK", "HOLD", "PLANNED", "NOT_RUN"} or coverage_gap:
+        conclusion = "HOLD_FOR_TEST_COVERAGE"
+    else:
+        conclusion = "NO_BLOCKING_FINDINGS"
+    recommendations = _review_recommendations(
+        test_outcome=test_outcome,
+        qa_outcome=qa_outcome,
+        product_test=product_test,
+        matrix=matrix,
+        case_results=qa_report.get("cases", []) if isinstance(qa_report.get("cases"), list) else [],
+        comprehensive=comprehensive,
+        findings=findings,
+    )
+    developer_review = _build_developer_review_report(
+        findings=findings,
+        recommendations=recommendations,
+        test_outcome=test_outcome,
+        product_test_outcome=product_test_outcome,
+        qa_outcome=qa_outcome,
+        matrix=matrix,
+        test_results=test_results,
+    )
+    return {
+        "schema": REVIEW_SCHEMA,
+        "status": "ok" if worktree.get("status") in {"ready", "planned"} else "blocked",
+        "repo": repo,
+        "pr_number": pr_number,
+        "title": snapshot.get("title"),
+        "author": snapshot.get("author"),
+        "pr_state": snapshot.get("state"),
+        "pr_merged": bool(snapshot.get("merged") is True),
+        "pr_updated_at": snapshot.get("updated_at"),
+        "base_sha": snapshot.get("base_sha"),
+        "base_ref": snapshot.get("base_ref"),
+        "head_sha": snapshot.get("head_sha"),
+        "head_ref": snapshot.get("head_ref"),
+        "diff_hash": diff_hash,
+        "diff_source": snapshot.get("diff_source"),
+        "diff_reconstruction": diff_info,
+        "snapshot_path": snapshot_path,
+        "changed_files": snapshot.get("changed_files", []),
+        "worktree": {key: value for key, value in worktree.items() if key != "source" or value},
+        "test_selection": test_selection,
+        "diff_targeted_oracle": targeted_oracle,
+        "test_results": test_results,
+        "test_outcome": test_outcome,
+        "product_test_outcome": product_test_outcome,
+        "browser_ui_outcome": browser_outcome,
+        "tooling_outcome": tooling_outcome,
+        "infrastructure_outcome": infrastructure_outcome,
+        "product_evaluation_status": "NOT_EVALUATED" if tooling_outcome == "TOOLING_FAIL" or infrastructure_outcome != "NOT_RUN" else "EVALUATED",
+        "findings": findings,
+        "qa_review": qa_report,
+        "qa_outcome": qa_outcome,
+        "coverage_gap": coverage_gap,
+        "conclusion": conclusion,
+        "recommendation": conclusion,
+        "review_decision": "USER_DECISION_REQUIRED",
+        "recommendations": recommendations,
+        "next_actions": _recommendation_next_actions(recommendations),
+        "developer_review": developer_review,
+        "residual_risk": ["Test coverage gap must be reviewed before treating this report as approval."] if coverage_gap else [],
+        "comprehensive_review": comprehensive,
+        "dependency_preparation": dependency_preparation or {"status": "NOT_RUN"},
+        "effective_execution_contract": effective_execution_contract or {},
+        "execution_targets": {
+            "local_review_worktree": bool((effective_execution_contract or {}).get("execution", {}).get("local_review_worktree", True)),
+            "local_pytest": bool((effective_execution_contract or {}).get("execution", {}).get("local_pytest", True)),
+            "product_target": (effective_execution_contract or {}).get("execution", {}).get("product_target", "local"),
+            "playwright_target": (effective_execution_contract or {}).get("execution", {}).get("playwright_target", "local"),
+            "evidence_origin_policy": "local_and_remote_explicit",
+        },
+        "remote_preflight": ((effective_execution_contract or {}).get("remote_preflight") if isinstance((effective_execution_contract or {}).get("remote_preflight"), dict) else None),
+        "dry_run": dry_run,
+        "generated_at": utc_now(),
+    }
+
+
+def _secret_findings_for_line(path: str, line: int, text: str, *, diff_hash: str = "", head_sha: str = "", repo: str = "", pr_number: int = 0) -> list[dict[str, Any]]:
+    safe_context, _ = _redact_output(text)
+    return [
+        {
+            "id": f"secret-{_sha256(f'{path}:{line}:{finding.kind}')[:12]}",
+            "severity": "CRITICAL",
+            "category": "security",
+            "blocking": True,
+            "path": path or None,
+            "line": line or None,
+            "symbol": None,
+            "code_context": safe_context,
+            "message": "The added line contains secret-like material and must be removed or referenced through an environment variable.",
+            "evidence": {"kind": finding.kind},
+            "recommendation": "Remove the raw value and use an approved environment-variable reference or redacted fixture.",
+            "reproducibility": {
+                "status": "REPRODUCIBLE_FROM_DETERMINISTIC_INPUT",
+                "deterministic_input": {
+                    "diff_hash": diff_hash,
+                    "head_sha": head_sha,
+                    "repo": repo,
+                    "pr_number": pr_number,
+                    "file_path": path,
+                    "line_number": line,
+                    "pattern_name": finding.kind,
+                },
+                "steps": [
+                    f"Checkout the pinned PR head `{head_sha}`.",
+                    f"Run the review against `{repo}#{pr_number}` with the same pinned head.",
+                    f"Verify the finding is reported at `{path}:{line}` with kind `{finding.kind}`.",
+                ],
+                "expected": "The same file and line are reported as credential_assignment.",
+                "actual": "Quality Pilot detected secret-like material; the raw value is intentionally redacted.",
+                "evidence": "deterministic diff scan; finding evidence kind=credential_assignment",
+            },
+        }
+        for finding in find_secret_text(text, path=path or "diff")
+    ]
+
+
+def _redact_output(text: str) -> tuple[str, list[dict[str, str]]]:
+    safe, findings = redact_structure(str(text or ""), prefix="test_output")
+    return str(safe), [item.as_dict() for item in findings]
+
+
+def _render_markdown(report: dict[str, Any]) -> str:
+    """Render the complete Chinese developer report for a Gitea comment.
+
+    Machine-readable JSON and local filesystem paths stay local; this output is
+    intentionally self-contained for direct PR discussion.
+    """
+    detailed = _render_detailed_text(report)
+    safe_lines: list[str] = []
+    for line in detailed.splitlines():
+        if "report_path" in line or ".quality-pilot-project/" in line or "/root/" in line:
+            continue
+        if line.startswith("證據：") and ("/" in line or "\\" in line):
+            safe_lines.append("證據：已保存於本地證據區；遠端留言不顯示本機路徑。")
+        else:
+            safe_lines.append(line)
+    return "\n".join(safe_lines) + "\n"
+
+    lines = [
+        f"# Code Review: {report.get('repo')} PR #{report.get('pr_number')}",
+        "",
+        f"- Base: `{report.get('base_ref') or report.get('base_sha')}`",
+        f"- Head: `{report.get('head_ref') or report.get('head_sha')}` (`{report.get('head_sha')}`)",
+        f"- Diff hash: `{report.get('diff_hash')}`",
+        f"- Diff source: **{report.get('diff_source')}**",
+        f"- Test outcome: **{report.get('test_outcome')}**",
+        f"- Product test outcome: **{report.get('product_test_outcome')}**",
+        f"- Browser UI outcome: **{report.get('browser_ui_outcome')}**",
+        f"- Comprehensive QA outcome: **{report.get('qa_outcome')}**",
+        f"- Conclusion: **{report.get('conclusion')}**",
+        "",
+        "## Summary",
+        "",
+        "This report was generated from a pinned PR snapshot and local review workflow.",
+        "",
+        "## Tests",
+        "",
+    ]
+    for item in report.get("test_results", []):
+        lines.append(f"- `{item.get('id')}`: **{item.get('status')}** — `{item.get('command')}`")
+    if not report.get("test_results"):
+        lines.append("- No applicable test was executed.")
+    developer = report.get("developer_review") if isinstance(report.get("developer_review"), dict) else {}
+    test_evidence = developer.get("evidence", {}).get("test_results", []) if isinstance(developer.get("evidence"), dict) else []
+    if test_evidence:
+        lines.extend(["", "## Test Reproduction Evidence", ""])
+        for item in test_evidence:
+            if not isinstance(item, dict):
+                continue
+            reproduction = item.get("reproduction") if isinstance(item.get("reproduction"), dict) else {}
+            lines.extend(
+                [
+                    f"- `{item.get('id')}`: **{item.get('status')}** — {item.get('reason') or 'no error'}",
+                    f"  - Command: `{item.get('command')}`",
+                    f"  - Steps: {'; '.join(str(step) for step in reproduction.get('steps', []))}",
+                    f"  - Expected: {reproduction.get('expected', '-')}",
+                    f"  - Actual: {reproduction.get('actual', '-')}",
+                    f"  - Evidence: {', '.join(str(path) for path in reproduction.get('evidence', []) if path)}",
+                ]
+            )
+    targeted = report.get("diff_targeted_oracle") if isinstance(report.get("diff_targeted_oracle"), dict) else {}
+    if targeted:
+        lines.extend(
+            [
+                "",
+                "## Diff-targeted Product Oracle",
+                "",
+                f"- Status: **{targeted.get('status')}** — {targeted.get('reason', '')}",
+                f"- Test files: `{', '.join(str(item) for item in targeted.get('test_files', [])) or 'none'}`",
+            ]
+        )
+    developer = report.get("developer_review") if isinstance(report.get("developer_review"), dict) else {}
+    lines.extend(["", "## Comprehensive QA Matrix", ""])
+    qa_review = report.get("qa_review") if isinstance(report.get("qa_review"), dict) else {}
+    matrix = qa_review.get("matrix") if isinstance(qa_review.get("matrix"), dict) else {}
+    for dimension in ("black_box", "white_box", "functional", "boundary", "stress", "documentation", "product_binary", "browser_ui"):
+        item = matrix.get(dimension)
+        if not isinstance(item, dict):
+            continue
+        lines.append(f"- `{dimension}`: **{item.get('status')}** — {item.get('reason', '')}")
+    cases = qa_review.get("cases") if isinstance(qa_review.get("cases"), list) else []
+    if cases:
+        lines.extend(["", "## Generated Case Runs", ""])
+        for case in cases:
+            if isinstance(case, dict):
+                lines.append(f"- `{case.get('case_id')}`: **{case.get('status')}** — {case.get('result_path')}")
+    lines.extend(["", "## Findings", ""])
+    findings = report.get("findings", [])
+    if not findings:
+        lines.append("No deterministic blocking code findings were detected.")
+    for item in findings:
+        reproduction = item.get("reproducibility") if isinstance(item.get("reproducibility"), dict) else {}
+        lines.extend(
+            [
+                f"- **{item.get('severity')}** `{item.get('path')}:{item.get('line')}` — {item.get('message')}",
+                f"  - Recommendation: {item.get('recommendation')}",
+                f"  - Reproducibility: {reproduction.get('status', 'REVIEW_REQUIRED')}",
+                f"  - Steps: {'; '.join(str(step) for step in reproduction.get('steps', []))}",
+                f"  - Expected: {reproduction.get('expected', '-')}",
+                f"  - Actual: {reproduction.get('actual', '-')}",
+            ]
+        )
+    recommendations = report.get("recommendations") if isinstance(report.get("recommendations"), list) else []
+    developer = report.get("developer_review") if isinstance(report.get("developer_review"), dict) else {}
+    summary = developer.get("summary") if isinstance(developer.get("summary"), dict) else {}
+    lines.extend(
+        [
+            "",
+            "## Developer Code Review Summary",
+            "",
+            f"- Decision: **{developer.get('decision', 'COMMENT')}** (user-owned; not approval)",
+            f"- Total issues: **{summary.get('total_issues', 0)}**",
+            f"- Must Fix: **{summary.get('must_fix', 0)}**",
+            f"- Should Fix: **{summary.get('should_fix', 0)}**",
+            f"- Nice to Have: **{summary.get('nice_to_have', 0)}**",
+            "",
+            "### Review Sources",
+            "",
+            "- Deterministic diff, test execution, product-test, and case evidence are reported below.",
+            "- No external analyzer result is used in this report.",
+        ]
+    )
+    lines.extend(["", "## Remediation Recommendations", ""])
+    sections = developer.get("sections") if isinstance(developer.get("sections"), dict) else {}
+    for key, title in (("must_fix", "Must Fix"), ("should_fix", "Should Fix"), ("nice_to_have", "Nice to Have")):
+        lines.extend([f"### {title}", ""])
+        items = sections.get(key) if isinstance(sections.get(key), list) else []
+        if not items:
+            lines.append("- None.")
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            lines.extend(
+                [
+                    f"- **{item.get('severity', 'INFO')}** `{item.get('id', 'item')}` ({item.get('status', 'ADVISORY')}) — {item.get('recommendation') or item.get('message')}",
+                    f"  - Verification: {item.get('verification') or item.get('recommendation')}",
+                ]
+            )
+    lines.extend(["### Verification", ""])
+    verification = sections.get("verification") if isinstance(sections.get("verification"), list) else []
+    lines.extend([f"- {item.get('item')}: {item.get('action')}" for item in verification if isinstance(item, dict)] or ["- None."])
+    localized = developer.get("localized_summary") if isinstance(developer.get("localized_summary"), dict) else {}
+    for language, title, labels in (
+        ("zh-TW", "中文詳細摘要", {"must_fix": "必須修復", "should_fix": "應該修復", "nice_to_have": "可改善項目"}),
+    ):
+        content = localized.get(language) if isinstance(localized.get(language), dict) else {}
+        lines.extend(["", f"## {title}", ""])
+        for key in ("must_fix", "should_fix", "nice_to_have"):
+            lines.append(f"### {labels[key]}")
+            value = content.get(key, "無。" if language == "zh-TW" else "None.")
+            if isinstance(value, list):
+                lines.extend([f"- {entry}" for entry in value] or ["- 無。" if language == "zh-TW" else "- None."])
+            else:
+                lines.append(f"- {value}")
+        lines.append("### Verification")
+        value = content.get("verification", [])
+        lines.extend([f"- {entry}" for entry in value] or ["- 無。" if language == "zh-TW" else "- None."])
+    lines.extend(
+        [
+            "",
+            "## 遠端回覆預覽",
+            "",
+            f"狀態：{report.get('remote_reply', {}).get('preview', {}).get('state', 'COMMENT')}",
+            f"摘要：{report.get('remote_reply', {}).get('preview', {}).get('summary', '-')}",
+            "說明：此處只顯示使用者可讀內容，不嵌入 JSON。",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _zh_value(value: Any) -> str:
+    mapping = {
+        "CRITICAL": "嚴重",
+        "HIGH": "高",
+        "MEDIUM": "中",
+        "LOW": "低",
+        "INFO": "資訊",
+        "PASS": "通過",
+        "FAIL": "失敗",
+        "BLOCK": "阻擋",
+        "HOLD": "暫緩",
+        "NOT_RUN": "未執行",
+        "ADVISORY": "建議",
+        "security": "安全性",
+        "test-execution": "測試執行",
+        "product-validation": "產品驗證",
+        "qa-coverage": "品質保證覆蓋",
+        "case-oracle": "測試案例判定規則",
+        "code-review": "程式碼審查",
+        "human-gate": "人工決策閘門",
+        "COMMENT": "留言審查",
+        "REQUEST_CHANGES": "要求修改",
+        "APPROVED": "核准",
+        "PASS": "通過",
+        "FAIL": "失敗",
+        "BLOCK": "阻擋",
+        "HOLD": "暫緩",
+        "NOT_RUN": "未執行",
+    }
+    text = str(value)
+    return mapping.get(text, text)
+
+
+def _detailed_reason(item: dict[str, Any]) -> str:
+    reasons = {
+        "regression-test-follow-up": "測試沒有完成，無法確認修改後仍通過既有回歸測試；依賴缺口也可能掩蓋真實的回歸問題。",
+        "product-test-contract": "沒有建置產物與產品語意操作，只能證明部分測試程式，不能證明使用者實際操作的產品行為。",
+        "boundary-coverage": "未涵蓋異常輸入、範圍與前置條件，實際產品可能出現未定義行為。",
+        "black_box-coverage": "單元測試通過不代表從產品入口執行時的整體行為正確。",
+        "stress-coverage": "沒有負載、逾時與資源判定規則，無法判斷卡死、資源耗盡或效能退化行為。",
+        "partial-probe-follow-up": "部分探針只能證明命令可執行，不能證明產品輸出或狀態正確。",
+        "inline-finding-follow-up": "每個問題可能有不同風險與修補範圍，必須逐項處理或留下可追溯的接受風險理由。",
+    }
+    return reasons.get(str(item.get("id") or ""), "此缺口會降低 code review 的可驗證性或增加產品風險。")
+
+
+def _render_detailed_text(report: dict[str, Any]) -> str:
+    """Render the complete developer-facing plain-text report."""
+    developer = report.get("developer_review") if isinstance(report.get("developer_review"), dict) else {}
+    summary = developer.get("summary") if isinstance(developer.get("summary"), dict) else {}
+    lines = [
+        "QUALITY PILOT－開發人員詳細程式碼審查報告",
+        "=" * 80,
+        f"儲存庫：{report.get('repo')}",
+        f"合併請求：第 {report.get('pr_number')} 號",
+        f"基準：{report.get('base_ref') or report.get('base_sha')}",
+        f"目前版本：{report.get('head_ref') or report.get('head_sha')}",
+        "",
+        "本報告用於協助開發人員理解、重現與修復問題，不是自動批准或合併決定。",
+        "最終的 COMMENT／REQUEST_CHANGES／APPROVED 由使用者決定。",
+        "所有建議的重現步驟都會標示是否實際執行；沒有證據的步驟不宣稱為測試結果。",
+        "",
+        "整體審查狀態",
+        f"建議決定：{_zh_value(developer.get('decision', 'COMMENT'))}",
+        f"測試結果：{_zh_value(report.get('test_outcome'))}",
+        f"產品測試結果：{_zh_value(report.get('product_test_outcome'))}",
+        f"Browser UI 結果：{_zh_value(report.get('browser_ui_outcome'))}",
+        f"Quality Pilot tooling 結果：{_zh_value(report.get('tooling_outcome'))}",
+        f"Infrastructure preflight 結果：{_zh_value(report.get('infrastructure_outcome'))}",
+        f"產品評估狀態：{_zh_value(report.get('product_evaluation_status'))}",
+        f"品質保證結果：{_zh_value(report.get('qa_outcome'))}",
+        f"結論：{report.get('conclusion')}",
+        f"問題總數：{summary.get('total_issues', 0)}",
+        f"必須修復：{summary.get('must_fix', 0)}",
+        f"應該修復：{summary.get('should_fix', 0)}",
+        f"可改善項目：{summary.get('nice_to_have', 0)}",
+        "",
+        "執行分層與證據來源",
+        f"- local review worktree：{_zh_value(report.get('execution_targets', {}).get('local_review_worktree')) if isinstance(report.get('execution_targets'), dict) else '未確認'}",
+        f"- local pytest：{_zh_value(report.get('execution_targets', {}).get('local_pytest')) if isinstance(report.get('execution_targets'), dict) else '未確認'}",
+        f"- product target：{(report.get('execution_targets') or {}).get('product_target', '未確認') if isinstance(report.get('execution_targets'), dict) else '未確認'}",
+        f"- Playwright target：{(report.get('execution_targets') or {}).get('playwright_target', '未確認') if isinstance(report.get('execution_targets'), dict) else '未確認'}",
+        f"- remote preflight：{((report.get('remote_preflight') or {}).get('status', 'NOT_RUN')) if isinstance(report.get('remote_preflight'), dict) else 'NOT_RUN'}",
+        "- 每個 case 必須明確標示 execution target 與 evidence origin；local 與 remote 證據不得混寫。",
+        "",
+        "證據規則",
+        "- 確定性問題來自 pinned diff、實際執行命令、產品測試介面或 generated case 證據。",
+        "- 疑似機密值會完整遮蔽，但在安全範圍內保留程式碼上下文。",
+        "- 建議的重現步驟只有在附有執行狀態與證據時，才會被描述為已執行結果。",
+        "",
+    ]
+    findings = report.get("findings") if isinstance(report.get("findings"), list) else []
+    lines.extend(["確定性問題詳細內容", "-" * 80])
+    if not findings:
+        lines.append("無。")
+    for number, item in enumerate(findings, 1):
+        evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+        repro = item.get("reproducibility") if isinstance(item.get("reproducibility"), dict) else {}
+        context = item.get("code_context") or "[已遮蔽的上下文目前無法取得]"
+        lines.extend([
+            "",
+            f"問題 {number}：{item.get('id')}",
+            f"嚴重程度：{_zh_value(item.get('severity'))}",
+            f"分類：{_zh_value(item.get('category'))}",
+            f"位置：{item.get('path')}：第 {item.get('line')} 行",
+            f"來源：確定性差異掃描器；規則={evidence.get('kind', '未知')}",
+            "程式碼片段（已遮蔽敏感內容）：",
+            f"  {context}",
+            "問題：",
+            f"  {item.get('message')}",
+            "為什麼需要處理：",
+            "  原始碼中的疑似機密值可能被提交、複製、寫入紀錄，或在不應有的信任範圍外被使用。",
+            "重現步驟：",
+            *[f"  {step}" for step in repro.get("steps", [])],
+            f"預期結果：{repro.get('expected', '在相同位置產生相同問題。')}",
+            f"實際結果：{repro.get('actual', '偵測到疑似機密內容；原始值已遮蔽。')}",
+            f"證據：{repro.get('evidence', '確定性 diff 掃描')}",
+            "建議修補方式：",
+            f"  {item.get('recommendation')}",
+            "修補後驗證方式：",
+            "  移除原始值，改用核准的環境變數／秘密儲存區參照或明確標示的遮蔽測試 fixture，然後重新執行相同的 pinned review。",
+        ])
+    sections = developer.get("sections") if isinstance(developer.get("sections"), dict) else {}
+    for key, title in (("must_fix", "必須修復"), ("should_fix", "應該修復"), ("nice_to_have", "可改善項目")):
+        lines.extend(["", title, "-" * 80])
+        items = sections.get(key) if isinstance(sections.get(key), list) else []
+        if not items:
+            lines.append("無。")
+            continue
+        for number, item in enumerate(items, 1):
+            item_id = item.get("id", f"{key}-{number}")
+            lines.extend([
+                "",
+                f"{title} {number}：{item_id}",
+                f"嚴重程度：{_zh_value(item.get('severity', 'INFO'))}",
+                f"狀態：{_zh_value(item.get('status', 'ADVISORY'))}",
+                f"來源：{_zh_value(item.get('category', '審查分析'))}",
+                "問題／缺口：",
+                f"  {item.get('recommendation') or item.get('message')}",
+                "為什麼應該處理：",
+                f"  {_detailed_reason(item)}",
+                "調查／重現步驟：",
+                "  1. 使用 pinned review worktree，以及下方記錄的確切命令／證據。",
+                "  2. 檢查 stdout／stderr 或 case 證據中的實際狀態。",
+                "  3. 如果是覆蓋缺口，請執行建議的產品層級情境；不能因為沒有測試就推定 PASS。",
+                "修補後預期結果：",
+                f"  {item.get('verification') or '具備確定性的產品或測試 oracle，且驗證通過。'}",
+                "目前實際狀態：",
+                f"  本次 review 回報狀態={item.get('status', 'UNKNOWN')}；這不自動代表產品有缺陷。",
+                "建議實作方式：",
+                f"  {item.get('recommendation') or item.get('message')}",
+                "驗證方式：",
+                f"  {item.get('verification') or '重新執行受影響的測試並保存證據。'}",
+            ])
+    test_results = developer.get("evidence", {}).get("test_results", []) if isinstance(developer.get("evidence"), dict) else []
+    lines.extend(["", "測試執行證據", "-" * 80])
+    for item in test_results:
+        if not isinstance(item, dict):
+            continue
+        repro = item.get("reproduction") if isinstance(item.get("reproduction"), dict) else {}
+        lines.extend([
+            "",
+            f"測試：{item.get('id')}",
+            f"命令：{item.get('command')}",
+            f"狀態：{_zh_value(item.get('status'))}／原因={_zh_value(item.get('reason'))}",
+            f"結束代碼：{item.get('exit_code')}",
+            f"覆蓋狀態：{item.get('coverage_status', 'FULL')}",
+            f"是否嘗試替代測試：{item.get('fallback_attempted', False)}",
+            f"替代測試詳情：狀態={((item.get('fallback') or {}).get('status', '未執行'))}；原因={((item.get('fallback') or {}).get('reason', '無'))}；跳過範圍={', '.join(str(value) for value in ((item.get('fallback') or {}).get('skipped_scope') or [])) or '無'}",
+            f"預期結果：{repro.get('expected', '結束代碼為 0')}",
+            f"實際結果：{repro.get('actual', _zh_value(item.get('reason')))}",
+            f"證據：{', '.join(str(path) for path in repro.get('evidence', []) if path)}",
+        ])
+    return "\n".join(lines) + "\n"
+
+
+def _review_test_infrastructure_reason(stdout: str, stderr: str) -> str | None:
+    text = f"{stdout}\n{stderr}".lower()
+    if "modulenotfounderror" in text or "no module named" in text or re.search(r"importerror:.*cannot import", text):
+        return "test_dependency_missing"
+    if "command not found" in text or "executable_not_found" in text:
+        return "test_executable_missing"
+    return None
+
+
+def _safe_test_argv(command: str, *, worktree: Path | None = None) -> list[str] | None:
+    """Convert a selected repository test command into argv without a shell.
+
+    Review tests are discovered from repository metadata, not chat.  Still, a
+    review checkout is an untrusted boundary, so only bounded Python unittest
+    or pytest commands are executable by this workflow.
+    """
+    try:
+        argv = shlex.split(str(command or ""))
+    except ValueError:
+        return None
+    if len(argv) < 3:
+        return None
+    executable = Path(argv[0]).name.lower()
+    if not executable.startswith("python"):
+        return None
+    if argv[1:] == ["-m", "unittest", "discover", "-s", "tests"]:
+        return argv
+    if len(argv) >= 5 and argv[1:3] == ["-m", "pytest"] and argv[-1] == "-q":
+        test_paths = argv[3:-1]
+        if test_paths and all(
+            path.startswith("tests/")
+            and path != "tests/"
+            and not path.startswith("-")
+            and path.endswith(".py")
+            and ".." not in Path(path).parts
+            and (
+                worktree is None
+                or (
+                    (worktree / path).resolve().is_file()
+                    and (worktree / path).resolve().is_relative_to((worktree / "tests").resolve())
+                )
+            )
+            for path in test_paths
+        ):
+            return argv
+    if argv[1:] == ["-m", "pytest", "tests", "-q"]:
+        return argv
+    return None
+
+
+def _matching_test_files(tests_dir: Path, changed_paths: list[str]) -> list[str]:
+    stems = {Path(path).stem.replace("test_", "") for path in changed_paths if path}
+    return sorted(str(path.relative_to(tests_dir)) for path in tests_dir.rglob("test_*.py") if path.stem.replace("test_", "") in stems)
+
+
+def _diff_targeted_test_files(tests_dir: Path, changed_paths: list[str]) -> list[str]:
+    """Map changed product surfaces to existing, product-owned test files.
+
+    This is deliberately conservative: a missing mapping stays HOLD instead of
+    inventing a black-box oracle. Matching uses explicit changed test files,
+    filename tokens, and import references found in test source.
+    """
+    tests = sorted(path for path in tests_dir.rglob("test_*.py") if path.is_file())
+    if not tests:
+        return []
+    selected: set[Path] = set()
+    normalized_changed = [str(path).replace("\\", "/").strip("/") for path in changed_paths if str(path).strip()]
+    for changed in normalized_changed:
+        changed_path = Path(changed)
+        if changed.startswith("tests/"):
+            candidate = tests_dir.parent / changed
+            if candidate.is_file():
+                selected.add(candidate.resolve())
+        stem = changed_path.stem.lower()
+        stem_tokens = {
+            token
+            for token in re.split(r"[^a-z0-9]+", stem)
+            if len(token) >= 3 and token not in {"py", "test"}
+        }
+        if stem_tokens:
+            for test in tests:
+                test_tokens = {
+                    token
+                    for token in re.split(r"[^a-z0-9]+", test.stem.lower())
+                    if len(token) >= 3 and token not in {"py", "test"}
+                }
+                if stem_tokens & test_tokens:
+                    selected.add(test.resolve())
+        module_path = changed_path.with_suffix("").as_posix().replace("/", ".")
+        import_pattern = re.compile(
+            rf"(?m)^\s*(?:from|import)\s+{re.escape(module_path)}(?:\s|$)"
+        )
+        for test in tests:
+            try:
+                text = test.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            if import_pattern.search(text):
+                selected.add(test.resolve())
+        if changed_path.name == "main.py":
+            selected.update(test.resolve() for test in tests if test.stem.lower() in {"test_cli", "test_main"})
+
+    relative = []
+    for path in sorted(selected):
+        try:
+            value = path.relative_to(tests_dir.parent).as_posix()
+        except ValueError:
+            continue
+        if value.startswith("tests/"):
+            relative.append(value.removeprefix("tests/"))
+    return relative[:12]
+
+
+def _tests_use_pytest(tests_dir: Path) -> bool:
+    for path in tests_dir.rglob("test_*.py"):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if re.search(r"(?m)^\s*(?:import\s+pytest|from\s+pytest\b)", text):
+            return True
+        # Bare test functions and pytest fixtures are unambiguous enough for
+        # review selection, while unittest.TestCase classes are not matched.
+        if re.search(r"(?m)^\s*def\s+test_[A-Za-z0-9_]+\s*\(", text):
+            return True
+    return False
+
+
+def _review_python_executable(config: ProjectConfig) -> str:
+    """Choose a project-owned Python environment before falling back to python3."""
+    candidates: list[str] = []
+    runtime = config.data.get("runtime") if isinstance(config.data.get("runtime"), dict) else {}
+    entrypoint = str(runtime.get("primary_entrypoint") or "").strip()
+    if entrypoint:
+        try:
+            first = shlex.split(entrypoint)[0]
+        except ValueError:
+            first = ""
+        if first:
+            candidates.append(first)
+    candidates.extend(
+        [
+            str(config.root / ".venv" / "bin" / "python"),
+            sys.executable,
+            "python3",
+        ]
+    )
+    for candidate in candidates:
+        name = Path(candidate).name.lower()
+        if name.startswith("python") and (Path(candidate).is_file() or candidate == sys.executable or candidate == "python3"):
+            return candidate
+    return "python3"
+
+
+def _contains_pytest_config(path: Path) -> bool:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return "pytest" in text.lower() or "[tool.pytest" in text
+
+
+def _run_git(args: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+    """Run an explicit git argv command.
+
+    Callers pass git's arguments (for example ``-C <checkout> fetch ...``);
+    the executable itself must remain the first argv item.  Keeping this
+    wrapper explicit prevents a flag such as ``-C`` from being interpreted as
+    the executable by ``subprocess``.
+    """
+    return subprocess.run(["git", *args], text=True, capture_output=True, check=False, timeout=timeout)
+
+
+def _safe_output(value: str | None) -> str:
+    text = str(value or "")
+    safe, _findings = _redact_output(text[-1000:])
+    return safe
+
+
+def _repo_slug(repo: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(repo).strip()).strip("_") or "repo"
+
+
+def _sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _relative_or_str(path: Path, root: Path) -> str:
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)

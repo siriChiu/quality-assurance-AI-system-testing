@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .security import find_secret_text
+
 try:
     import yaml
 except ImportError:  # pragma: no cover - exercised only in minimal installs
@@ -105,6 +107,8 @@ tracker:
     redmine_issues_json: {workspace}/state/redmine-mcp/issues.json
     wiki_write_request_json: {workspace}/state/gitea-mcp/wiki-write-request.json
     wiki_write_result_json: {workspace}/state/gitea-mcp/wiki-write-result.json
+    review_write_request_json: {workspace}/state/gitea-mcp/review-write-request.json
+    review_write_result_json: {workspace}/state/gitea-mcp/review-write-result.json
 
 runtime:
   primary_entrypoint: ""
@@ -116,6 +120,27 @@ runtime:
   fixture_paths: []
   credential_envs: []
   side_effect_boundary: ""
+  execution:
+    local_review_worktree: true
+    local_pytest: true
+    product_target: ""
+    playwright_target: ""
+    contract_confirmed: false
+  remote:
+    ssh_host: ""
+    remote_repo: ""
+    remote_python: ""
+    expected_head_sha: ""
+  # Comprehensive PR review requires an explicit product-test contract.
+  product_testing:
+    enabled: true
+    allow_readme_commands: false
+    readme_command_allowlist: []
+    build_recipe: []
+    artifact_path: ""
+    run_operations: []
+    web_ui:
+      enabled: false
 
 subagents:
   enabled: true
@@ -273,6 +298,11 @@ def validate_config_data(data: dict[str, Any]) -> list[str]:
     secret_paths = find_raw_secret_paths(data)
     for path in secret_paths:
         errors.append(f"raw secret-like value at {path}")
+    runtime = data.get("runtime") if isinstance(data.get("runtime"), dict) else {}
+    entrypoint = runtime.get("primary_entrypoint")
+    if isinstance(entrypoint, str) and entrypoint:
+        if find_secret_text(entrypoint, path="runtime.primary_entrypoint"):
+            errors.append("raw secret-like value at runtime.primary_entrypoint")
     return errors
 
 

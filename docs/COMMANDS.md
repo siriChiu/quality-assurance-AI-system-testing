@@ -4,13 +4,13 @@ AI Quality Pilot 的公開入口是 Hermes 聊天室中的 `/quality-pilot ...`�
 
 直接輸入 `/quality-pilot` 不需要再補 `help`：Hermes 會開啟繁中總覽，並自動顯示最多四個依目前狀態排序的建議功能。選單中的唯讀動作可直接執行；涉及寫檔、測試、MCP、Wiki、issue 或 PR 的項目會標示「需確認」。
 
-在 Hermes 輸入框中，輸入 `/quality-pilot` 尚未按 Enter 時也會出現即時下拉補全：第一列保留裸指令的總覽入口，後面列出 `help`、`setup`、`doctor`、`environment`、`issues`、`cases`、`publish`、`close-loop`、`report`、`tracker` 與 `subagent`。輸入空格後會沿著 nested command tree 繼續補全，例如 `/quality-pilot environment configure`、`/quality-pilot cases generate`、`/quality-pilot publish wiki status`、`/quality-pilot close-loop heartbeat`；leaf command 後也會提示安全選項如 `--init`、`--growing`。按 Tab 或點選即可帶入建議；按 Enter 仍會執行目前輸入的指令。
-`environment` 也包含在同一棵 nested completion tree：輸入 `/quality-pilot environment` 後會建議 `status` 與 `configure`，並提示 `--mode local|remote`、`--entrypoint`、`--fixture` 等欄位。
+在 Hermes 輸入框中，輸入 `/quality-pilot` 尚未按 Enter 時也會出現即時下拉補全：第一列保留裸指令的總覽入口，輸入空格後由 skill-owned nested completion tree 列出 `help`、`setup`、`doctor`、`environment`、`issues`、`cases`、`publish`、`close-loop`、`report`、`tracker` 與 `subagent`。可繼續補全 `/quality-pilot cases generate`、`/quality-pilot publish wiki status`、`/quality-pilot close-loop heartbeat`，leaf command 後也會提示安全選項如 `--init`、`--growing`。這些只是 UI suggestion，不是 native Hermes subcommands 或授權；按 Enter 後仍由 Quality Pilot dispatcher 驗證整條指令。
+`environment` 也包含在同一棵 nested completion tree：輸入 `/quality-pilot environment` 後會建議 `status`、`preflight` 與 `configure`，並提示 `--mode local|remote`、`--entrypoint`、`--fixture`、`--expected-head-sha` 等欄位。
 
 注意：`/reload-skills` 只會重新掃描 `SKILL.md` 與 skill map，不會重新載入已在記憶體中的 Hermes Python slash completer。若剛更新 Hermes completion integration，必須退出並重新啟動目前的 Hermes CLI/TUI process；只執行 `/reload-skills` 仍會看到舊的單一指令補全。
 
 只有生產型 `/quality-pilot` 指令會由 Hermes 系統級提示強制先執行已安裝的
-`grill-me` companion：`setup`、`doctor --fix`、`environment configure`、`issues sync/create-from-failure/fix`、所有
+`grill-me` companion：`setup`、`doctor --fix`、`environment configure/preflight`、`issues sync/create-from-failure/fix`、`review pr/apply`、所有
 `cases generate ...`、`cases push-pr`、`publish wiki plan/apply`、所有
 `close-loop ...`、`tracker plan-write` 與 `subagent configure`。這不是建議，也不需要
 使用者另外輸入 `/grill-me`；Hermes 必須完成訪談、等待回答，再把答案帶入 dispatcher。
@@ -35,8 +35,12 @@ workflow entry points，但 resumable A0-A8 module session 仍是 Partial。
 /quality-pilot doctor
 /quality-pilot doctor --fix
 /quality-pilot environment status
+/quality-pilot environment preflight
 /quality-pilot environment configure --mode <local|remote>
 /quality-pilot audit state
+/quality-pilot review pr --repo <owner/repo> --pr-number <number>
+/quality-pilot review pr --repo <owner/repo> --pr-number <number> --confirm-discovery
+/quality-pilot review apply
 
 /quality-pilot issues sync
 /quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]
@@ -76,10 +80,46 @@ workflow entry points，但 resumable A0-A8 module session 仍是 Partial。
 
 ## Intent-based happy paths
 
-不要把所有公開命令當成一條必跑 checklist。先選使用目的，執行最短路徑，
+不要把所有公開命令當成一條必跑 checklist。`close-loop run-once` 與 heartbeat 預設使用
+Task Graph；run-once 第一次會在 local publication gate 回 `HOLD`，再用
+`--resume-task-graph --confirm-publish` 繼續。只有明確指定 `--legacy` 才會選擇舊
+fixed-sequence pipeline。先選使用目的，執行最短路徑，
 再依 dispatcher 的 `next_actions` 繼續。`doctor --fix` 只在 setup 尚未完成或
 `doctor` 建議修復 safe skeleton 時使用；不需要每次同時執行 `doctor` 和
 `doctor --fix`。
+
+### PR review path
+
+```text
+/quality-pilot review pr --repo <owner/repo> --pr-number <number>
+```
+
+這個命令會針對 pinned branch/PR head 建立 detached worktree；若 MCP snapshot
+只有 changed files 沒有 diff，會從 pinned base/head commits 重建 diff。它會選擇
+repository regression suite，並實際執行測試。若 tests 使用 pytest，會優先使用
+host project 的 `.venv` 並執行 `python -m pytest tests -q`；否則使用 bounded unittest
+discovery。預設也會透過 case-generation/case-run 模組建立 PR-scoped QA matrix，
+涵蓋 black-box、white-box、functional、boundary、stress、documentation；
+`--diff-only` 才跳過這個 comprehensive path。Comprehensive review 會依 changed files
+建立 `diff_targeted_oracle`；只有實際對應的 product test command 成功執行才會成為
+functional evidence，找不到對應測試仍是 HOLD，不會自動產生黑箱結論。Comprehensive
+mode 會先分析 README、`--help`、CLI parser、既有 Browser tests、目前 config 與 SSH aliases，
+產生 runner/target/URL/semantic-step candidate；使用者只需一次確認，不需要手寫完整
+`runtime.product_testing` YAML。確認後的 normalized execution contract 是唯一 authority。
+Product build、product operation、Browser UI 是獨立 cases；local white-box 使用 pinned
+worktree，remote product 可使用 SSH target，Browser client 依 contract 使用 local Playwright
++ SSH tunnel。Product build BLOCK 不會自動阻塞獨立 Browser case。只有在 remote source HEAD
+等於 pinned PR head 且工作樹乾淨時，remote evidence 才是 official。README command 只能在明確
+allowlist 後執行。若啟用 Web UI contract，會使用真實 Playwright browser interaction
+與 positive UI assertion；缺少 Playwright/browser/server/oracle 回 `BLOCK`/`HOLD`，不會
+降級為 curl/API probe。測試輸出、build log、artifact hash、browser screenshot/trace
+會保存到 redacted review evidence；缺少測試依賴會回 `BLOCK`，不會誤稱產品測試
+`FAIL`。`--dry-run` 才是不執行測試的模式；`--diff-only` 明確跳過 product case/build/browser
+流程，只做 deterministic diff、targeted test 與 regression test。命令回應會直接顯示
+PR head、test result、product test、QA matrix、conclusion、finding、具體修補建議與 remote reply
+preview；不需要先打開 JSON 才能預覽內容。即使 QA 有 BLOCK/HOLD，`--confirm` 仍只會準備
+明確標示為 `COMMENT` 的 advisory Gitea review；Quality Pilot 不自動 APPROVED，最終
+COMMENT/REQUEST_CHANGES/APPROVED 由使用者決定。
 
 ### Local repo QA
 
@@ -87,7 +127,8 @@ workflow entry points，但 resumable A0-A8 module session 仍是 Partial。
 
 ```text
 /quality-pilot setup
-/quality-pilot environment configure --mode <local|remote> --entrypoint '<product command>' --side-effect-boundary 'readonly/sandbox boundary'
+# setup 會先分析 README、--help 與既有測試；確認後可使用 --confirm-discovery
+/quality-pilot setup --confirm-discovery
 /quality-pilot environment status
 /quality-pilot doctor
 /quality-pilot cases generate --init
@@ -147,19 +188,94 @@ Heartbeat 只執行一次，不會安裝 12 小時計時器。Hermes 或外部 s
 | Group | Commands | Purpose |
 |---|---|---|
 | root | `help`, `setup`, `doctor`, `doctor --fix` | 看手冊、初始化、檢查/修復 config skeleton、檢查 Gitea/Redmine MCP readiness |
-| environment | `status`, `configure` | 確認 local/remote、入口、fixture、credential env 與副作用邊界；不保存秘密值 |
+| environment | `status`, `configure`, `tui-probe` | 確認 local/remote、入口、fixture、credential env 與副作用邊界；PTY transcript probe 需 explicit marker；不保存秘密值 |
 | audit | `state` | 只讀檢查 overlay 語意一致性：case、evidence、issues、reports、MCP、subagent |
+| graph | `tutor`, `status`, `scope`, `representation`, `ontology`, `extract`, `quality-gate`, `fuse`, `evaluate`, `serve`, `run --from-qa` | Knowledge Graph 九階段 + Task Graph orchestration；優先投影既有 cases/runs/evidence/review artifacts；SQLite canonical、JSON export、provenance、fusion gate、read-only serving |
+| review | `pr`, `apply` | pinned detached local review、allowlisted regression report、分離 snapshot/report/evidence traceability、BLOCK/HOLD remediation recommendations、advisory COMMENT Gitea review handoff 與 MCP result reconciliation |
 | issues | `sync`, `status`, `report`, `show`, `fix` | 同步、去重、prune、issue QA report、Gitea evidence writeback handoff、修復 handoff、產品修復 PR |
 | cases | `generate`, `review`, `validate`, `list`, `run`, `push-pr` | 產生與執行 test case contracts，依 linked case/evidence 建產品修復或驗證 PR |
-| publish wiki | `status`, `plan`, `apply` | 狀態看板，只更新 Gitea Wiki，不建立 issue comment/issue/PR |
-| close-loop | `status`, `run-once`, `heartbeat` | Observe/Normalize/Execute/Triage/Publish/Evolve/Prune health、單輪流程、sensor-driven 持續成長 |
+| publish wiki | `status`, `plan`, `apply` | 狀態看板，只更新 Gitea Wiki，不建立 issue comment/issue/PR；auto-sync 僅 local plan |
+| close-loop | `status`, `run-once`, `run-once --legacy`, `heartbeat`, `heartbeat --legacy` | Task Graph 預設 orchestration；checkpoint/verifier/human gate；`--legacy` 僅作 fixed-sequence fallback；sensor-driven 持續成長 |
 | report | `status`, `json` | 查看 Markdown/JSON 報告 |
 | tracker | `plan-write` | 相容保留的單一 write-gate 檢查 |
 | subagent | `status`, `configure` | 設定文字生成 subagent handoff，預設 Open WebUI |
 
+## Graph Engineering
+
+Quality Pilot follows the reference project's two halves:
+
+```text
+Knowledge Graph (what agents remember)
+  scope -> representation -> ontology -> entities/relations/events
+        -> quality-gate -> reversible fusion -> evaluation -> read-only serving
+
+Task Graph (how agents work)
+  Context -> Contract -> DAG -> source adapter -> parallel extraction -> independent verifier
+          -> merge owner -> human gate -> checkpoint -> repair
+```
+
+Knowledge Graph commands:
+
+```text
+/quality-pilot graph tutor
+/quality-pilot graph scope --question "Which test run produced evidence for this case?"
+/quality-pilot graph representation
+/quality-pilot graph ontology
+/quality-pilot graph run --from-qa --question "Which test run produced evidence for this case?" \
+  --case-id CASE-001 --review state/reviews/pr-report.json
+/quality-pilot graph extract --input candidate.json  # external adapter only
+/quality-pilot graph quality-gate --gold labels.json
+/quality-pilot graph fuse
+/quality-pilot graph evaluate --gold labels.json
+/quality-pilot graph serve --entity <id-or-name>
+```
+
+The canonical local store is SQLite and the portable artifact is JSON. Every fact needs
+source, extraction time, confidence, and evidence. Candidate extraction is validated before
+write; fusion is reversible and requires explicit confirmation; serving is read-only.
+
+The integration-first path is `graph run --from-qa`: it projects existing case contracts,
+canonical run/evidence records, and an optional pinned PR review report into candidates.
+When `--review` is supplied, schema, report hash, pinned head/base, PR identity,
+open/merged state, optional `updated_at`, and evidence paths are validated fail-closed.
+External candidate input remains explicit, so an LLM/subagent cannot write directly:
+
+```json
+{
+  "entities": [{
+    "entity_id": "case-1",
+    "entity_type": "TestCase",
+    "canonical": "CASE-1",
+    "provenance": {
+      "source_ref": "cases/CASE-1.yaml",
+      "evidence": "CASE-1 is the executable contract",
+      "confidence": 1.0
+    }
+  }],
+  "relations": [],
+  "events": []
+}
+```
+
+`/quality-pilot graph run --from-qa` compiles these stages with
+`compile_graph_engineering_task_graph()`: existing QA artifacts are projected first,
+entity extraction runs before relation/event fan-out, a separate verifier checks quality,
+fusion is behind a human gate, and the graph workflow checkpoint supports resume/repair.
+The graph is a read model; it does not need Neo4j and graph counts do not produce QA `PASS`,
+`READY`, `APPROVED`, or `MERGE_ALLOWED`.
+
+The QA Task Graph path is now the default close-loop orchestration:
+
+```text
+/quality-pilot close-loop run-once
+/quality-pilot close-loop run-once --resume-task-graph --confirm-publish
+/quality-pilot close-loop run-once --repair-node execute:<case_id> --resume-task-graph
+/quality-pilot close-loop run-once --legacy  # explicit fixed-sequence fallback
+```
+
 ## Audit
 
-`audit state` 是只讀語意稽核，不會修改 `.quality-pilot-project`。它補足 `cases validate` 的盲點：YAML 語法可以有效，但 overlay state 仍可能混用新舊流程，造成 evidence、Gitea handoff、Wiki report 和 MCP readiness 互相不一致。
+`audit state` 是只讀語意稽核，不會修改 `.quality-pilot-project`。它補足 `cases validate` 的盲點：YAML 語法可以有效，但 overlay state 仍可能混用新舊流程，造成 evidence、Gitea handoff、Wiki report、graph provenance 和 MCP readiness 互相不一致。
 
 ```text
 /quality-pilot audit state
@@ -306,6 +422,8 @@ local workflow 可以保持未設定或停用。
 ```text
 /quality-pilot subagent configure
 ```
+
+`setup` 的 `readiness.mode` 是 `SETUP_READY`，代表本地 config/overlay 建立成功；遠端 issue/Wiki 狀態另看 `remote_sync_readiness` 與 `readiness.remote_sync_blockers`。`gitea_mcp_snapshot_missing` 不應讓 setup 顯示成 `SYNC_BLOCKED`，但在 snapshot 完成前仍禁止 remote sync/write。
 
 `setup`、`doctor --fix` 與 `configure` 只應建立安全 routing skeleton；使用者
 需要提供 deployment-owned Open WebUI endpoint/model。API key 只允許用

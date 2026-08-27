@@ -1,0 +1,142 @@
+diff --git a/agent/skill_commands.py b/agent/skill_commands.py
+index a14aebb118..4d1816a754 100644
+--- a/agent/skill_commands.py
++++ b/agent/skill_commands.py
+@@ -448,6 +448,11 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
+                             if line and not line.startswith('#'):
+                                 description = line[:80]
+                                 break
++                    metadata = frontmatter.get('metadata')
++                    hermes_metadata = metadata.get('hermes') if isinstance(metadata, dict) else {}
++                    completion = hermes_metadata.get('completion') if isinstance(hermes_metadata, dict) else {}
++                    if not isinstance(completion, dict):
++                        completion = {}
+                     seen_names.add(name)
+                     # Normalize to hyphen-separated slug, stripping
+                     # non-alnum chars (e.g. +, /) to avoid invalid
+@@ -487,6 +492,10 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
+                         "description": description or f"Invoke the {name} skill",
+                         "skill_md_path": str(skill_md),
+                         "skill_dir": str(skill_md.parent),
++                        # Optional skill-owned nested slash completion metadata.
++                        # Hermes itself remains the dispatcher; this is only UI
++                        # metadata and must never be treated as authorization.
++                        "completion": completion,
+                     }
+                 except Exception:
+                     continue
+diff --git a/hermes_cli/commands.py b/hermes_cli/commands.py
+index cb8fb4a0f2..352c8664ef 100644
+--- a/hermes_cli/commands.py
++++ b/hermes_cli/commands.py
+@@ -1540,6 +1540,98 @@ class SlashCommandCompleter(Completer):
+                 display_meta=f"⚡ {short_desc}",
+             )
+ 
++    def _skill_completion_spec(self, base_cmd: str) -> dict[str, Any] | None:
++        """Return optional nested completion metadata for a skill command."""
++        info = self._iter_skill_commands().get(base_cmd)
++        if not isinstance(info, dict):
++            return None
++        spec = info.get("completion")
++        return spec if isinstance(spec, dict) else None
++
++    @staticmethod
++    def _skill_completion_node(spec: dict[str, Any], tokens: list[str]) -> dict[str, Any] | None:
++        node = spec
++        for token in tokens:
++            if token.startswith("-"):
++                break
++            children = node.get("subcommands")
++            if not isinstance(children, dict):
++                return None
++            child = children.get(token.lower())
++            if not isinstance(child, dict):
++                return None
++            node = child
++        return node
++
++    def _skill_nested_completions(self, text: str, base_cmd: str):
++        """Complete skill-owned nested command metadata without dispatching it.
++
++        A dynamic skill remains the sole Hermes slash command (for example
++        ``/quality-pilot``); nested entries are UI hints carried by the skill
++        frontmatter. They are not native Hermes commands or authorization.
++        """
++        spec = self._skill_completion_spec(base_cmd)
++        if spec is None:
++            return
++        parts = text.split(maxsplit=1)
++        sub_text = parts[1] if len(parts) > 1 else ""
++        tokens = sub_text.split()
++        if sub_text.endswith(" "):
++            completed = tokens
++            current_word = ""
++        else:
++            completed = tokens[:-1]
++            current_word = tokens[-1] if tokens else ""
++        node = self._skill_completion_node(spec, completed)
++        if node is None:
++            return
++
++        if current_word.startswith("-"):
++            options = node.get("options")
++            if isinstance(options, dict):
++                for option, description in options.items():
++                    option_text = str(option)
++                    if not option_text.startswith(current_word):
++                        continue
++                    replacement = f"{option_text} " if option_text == current_word else option_text
++                    yield Completion(
++                        replacement,
++                        start_position=-len(current_word),
++                        display=option_text,
++                        display_meta=str(description),
++                    )
++            return
++
++        children = node.get("subcommands")
++        if isinstance(children, dict):
++            for name, child in children.items():
++                name_text = str(name)
++                if not name_text.startswith(current_word.lower()):
++                    continue
++                child_info = child if isinstance(child, dict) else {}
++                description = str(child_info.get("description") or "")
++                args_hint = str(child_info.get("args_hint") or "").strip()
++                if args_hint:
++                    description = f"{description} ({args_hint})" if description else args_hint
++                replacement = f"{name_text} " if name_text == current_word.lower() else name_text
++                yield Completion(
++                    replacement,
++                    start_position=-len(current_word),
++                    display=name_text,
++                    display_meta=description,
++                )
++            return
++
++        options = node.get("options")
++        if current_word == "" and isinstance(options, dict):
++            for option, description in options.items():
++                yield Completion(
++                    str(option),
++                    start_position=0,
++                    display=str(option),
++                    display_meta=str(description),
++                )
++
+     # Commands that open pickers when run without arguments.
+     # These should NOT receive a trailing space in completions because:
+     # - The TUI's submit handler applies completions on Enter if input differs
+@@ -2077,7 +2169,10 @@ class SlashCommandCompleter(Completer):
+             # unbroken (see split_stacked_skill_commands in
+             # agent/skill_commands.py).
+             if self._is_skill_command(base_cmd):
+-                yield from self._stacked_skill_completions(text)
++                if self._skill_completion_spec(base_cmd) is not None:
++                    yield from self._skill_nested_completions(text, base_cmd)
++                else:
++                    yield from self._stacked_skill_completions(text)
+                 return
+ 
+             # Dynamic completions for commands with runtime lists

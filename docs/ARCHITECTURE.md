@@ -77,6 +77,137 @@ The current close-loop runner marks `health_status: NOT_EVALUATED` because it
 does not execute the `doctor` health checks. QA and write-gate outcomes never
 stand in for independent component health.
 
+## Graph Engineering: two complementary graphs
+
+This project follows the reference definition: Graph Engineering designs both the
+structures an agent remembers and the structures an agent works through.
+
+```text
+Knowledge Graph (memory)
+  scope -> representation -> ontology -> entities/relations/events
+          -> quality gate -> reversible fusion -> evaluation -> read-only serving
+                                      ^
+                                      |
+Task Graph (work)
+  Context -> Contract -> DAG -> source adapter -> parallel extraction -> independent verifier
+          -> owned merge -> human gate -> checkpoint -> targeted repair
+```
+
+### Knowledge Graph runtime
+
+`src/quality_pilot/graph_engineering/` implements a local first slice:
+
+- SQLite is the canonical store; JSON is the portable snapshot/export.
+- `GraphEntity`, `GraphRelation`, and `GraphEvent` require source, timestamp,
+  confidence, and evidence provenance.
+- Ontology validation enforces typed relation domain/range and event schemas.
+- The integration-first adapter projects existing case contracts, canonical run/evidence
+  records, and pinned PR review reports into graph candidates; external deterministic or
+  LLM-generated candidate JSON/YAML remains an explicitly owned adapter path. The
+  deterministic validator owns graph writes.
+- Quality gates distinguish structural validity from adjudicated precision/recall.
+- Fusion uses deterministic blocking, records reversible merge ledgers, and requires
+  explicit confirmation before applying merges.
+- Serving is read-only and provenance-preserving; graph counts never become QA truth.
+
+The public modular workflow is:
+
+```text
+/quality-pilot graph scope --question <question>
+/quality-pilot graph representation
+/quality-pilot graph ontology
+/quality-pilot graph run --from-qa --question <question>
+/quality-pilot graph quality-gate
+/quality-pilot graph fuse
+/quality-pilot graph evaluate
+/quality-pilot graph serve
+```
+
+`graph run --from-qa` consumes the existing Quality Pilot case/run/evidence/review
+artifacts; it does not create a competing QA authority. A supplied PR review report is
+validated for schema, report hash, pinned head/base, PR repo/number/ref identity, open/merged state,
+optional `updated_at`, and evidence paths before strict projection.
+`graph extract --input` remains available for a separately owned candidate adapter.
+
+### Task Graph orchestration
+
+The deterministic core owns `ContextPacket`, node contracts, real data dependencies,
+single-writer ownership, topological scheduling, validator results, checkpoints, stop
+rules, and repair invalidation. `compile_graph_engineering_task_graph()` compiles the
+nine-stage KG workflow into a Task Graph: entity extraction fans out, relation/event
+extraction consume recognized entities, an independent verifier checks the graph, fusion
+is behind a human gate, and evaluation/serving remain downstream.
+
+The default `close-loop run-once` orchestrates QA cases through Task Graph. `graph run --from-qa`
+projects those existing case/run/evidence/review artifacts into the Knowledge Graph workflow;
+it uses the same executor and persists
+`state/graph/task-graph-latest.json`. A node `PASS` is local evidence only. It cannot become
+product `PASS`, `READY`, `APPROVED`, or `MERGE_ALLOWED` without separate deterministic truth
+and write-gate policies.
+
+The external MIT-licensed `codejunkie99/graph-engineering` teaching material is bundled into
+the installed Quality Pilot skill under `references/graph-engineering/` (source snapshot
+`cfacb56a05a31ba69bf84d0b8b00f5ce463127ef`). It provides tutor mode and modular workflow
+references; the dispatcher remains the authority for safe, provenance-backed local artifacts.
+
+## Development-only subagent assistance
+
+The local subagent council is an out-of-band development aid for objective code,
+architecture, and state analysis. It is not a runtime Task Graph node, product
+oracle, mapping authority, QA source, or release feature. Provider suggestions
+remain candidate text; the lead agent must independently validate and manually
+apply any resulting code or policy change. No subagent output may write
+contracts, runs, evidence, graph state, or remote requests.
+
+## Pinned Gitea PR review
+
+`review pr --repo <owner/repo> --pr-number <number>` consumes a Hermes Gitea
+read snapshot, pins the reported head SHA, creates a detached local worktree,
+selects available repository regression tests, and writes a redacted report.
+When the checkout contains pytest-based tests it prefers the project-owned Python
+environment and runs `python -m pytest tests -q`; otherwise it runs the bounded
+unittest discovery command. Missing test dependencies are `BLOCK`, not a product
+FAIL. In comprehensive mode the review also creates a PR-scoped temporary case
+overlay, calls case generation and case execution, and reports black-box, white-box,
+functional, boundary, stress, and documentation dimensions separately. It also
+invokes the product-test adapter: a user-owned build recipe must produce a real
+artifact in a disposable writable copy of the pinned worktree, then at least one
+semantic product operation must pass. README commands are candidate input only and
+require explicit allowlisting; exit-only probes remain `HOLD`. When a web UI contract
+is enabled, the browser adapter uses real Playwright interaction and positive UI
+assertions; missing browser prerequisites are `BLOCK` and there is no curl/API
+fallback. Missing product-specific adapters remain `HOLD`; they cannot be counted as
+PASS. Review test selection now also emits a changed-file-driven
+`diff_targeted_oracle` plan when changed product files map to existing product tests;
+the plan is `PASS` only after that exact targeted command executes successfully.
+Missing mappings remain `HOLD`. Review test and product execution use allowlisted
+argv commands without `shell=True`; their payloads separate snapshot path,
+review-report paths, product/build/browser evidence, and report hash. The report
+also emits actionable remediation recommendations for each BLOCK/HOLD dimension.
+Without `--confirm` it only returns the conclusion, recommendations, and payload
+preview; confirmation creates a local gated Gitea **COMMENT** request even when
+QA evidence is incomplete. This is an advisory code review, not an approval.
+Hermes performs the actual MCP call, then `/quality-pilot review apply`
+validates the result against repo/PR/head/report hash, advisory COMMENT state,
+allowed target, and a local deduplication ledger. The user owns the final
+COMMENT/REQUEST_CHANGES/APPROVED decision. Permission reconciliation, live
+Gitea comment lookup, and automatic new-head invalidation remain project-owned
+adapter work.
+
+## Bounded PTY/TUI environment boundary
+
+Terminal products need an adapter beyond `subprocess.run`. The current
+`environment tui-probe` boundary uses a pseudo-terminal, fixed terminal size,
+allowlisted keys, bounded duration, redacted transcript, and explicit screen
+markers. It reports `BLOCK` for an unconfirmed environment or known hardware/
+runtime preflight failure, `HOLD` when no oracle marker is supplied or the
+marker is missing, and only reports PASS when every explicit marker is
+observed. Process exit alone cannot produce FAIL/PASS; it remains diagnostic.
+Remote mode uses argv-only SSH and never stores the target value.
+This is a deterministic boundary foundation, not a complete UI test oracle;
+project-owned adapters must add screen state, widget/keypress semantics, and
+hardware/BMC preflight.
+
 ## Environment-confirmed execution
 
 Repository analysis can infer a likely executable, but it cannot infer whether

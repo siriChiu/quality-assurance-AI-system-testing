@@ -19,12 +19,80 @@ dependencies = [
   "PyYAML>=6.0",
 ]
 
+[project.optional-dependencies]
+bdd = [
+  "pytest>=8.0",
+  "pytest-bdd>=7.2",
+]
+browser = [
+  "playwright>=1.40",
+]
+
 [project.scripts]
 quality-pilot = "quality_pilot.cli:main"
 quality-pilot-hermes = "quality_pilot.hermes:main"
+
+[tool.pytest.ini_options]
+markers = [
+  "current: scenario describes the current checkout",
+  "supported: current behavior is implemented and supported",
+  "partial: current behavior is incomplete",
+  "planned: target behavior that is not implemented yet",
+  "defect: scenario exposes a known defect",
+  "question: scenario still requires a product or environment decision",
+  "task-graph: task graph topology and execution",
+  "context: scoped context packet coverage",
+  "contract: node contract coverage",
+  "execution: task execution coverage",
+  "integration: explicit integration-path coverage",
+  "checkpoint: durable checkpoint coverage",
+  "repair: targeted repair coverage",
+  "human-gate: irreversible action approval coverage",
+  "code-review: Code Review workflow coverage",
+  "review: pull-request review coverage",
+  "diff: pull-request diff reconstruction coverage",
+  "case-generation: generated case coverage",
+  "case-run: generated case execution coverage",
+  "docs-contract: documentation contract coverage",
+  "evidence-completeness: evidence gate coverage",
+  "code_review: Code Review workflow coverage",
+  "evidence_completeness: evidence gate coverage",
+  "security: security and redaction coverage",
+  "tui: PTY/TUI boundary coverage",
+  "subagent: subagent permission coverage",
+  "docs_contract: documentation contract coverage",
+  "redmine: Redmine integration coverage",
+  "idempotency: idempotency coverage",
+  "heartbeat: heartbeat coverage",
+  "paths: workspace path coverage",
+  "freshness: snapshot freshness coverage",
+  "contracts: case contract coverage",
+  "wiki: Wiki publication coverage",
+  "environment: environment profile coverage",
+  "boundary: project boundary coverage",
+  "graph-engineering: Knowledge and Task Graph engineering coverage",
+  "knowledge-graph: Knowledge Graph workflow coverage",
+  "graph-scope: graph scope coverage",
+  "graph-ontology: ontology validation coverage",
+  "graph-extraction: extraction coverage",
+  "graph-quality-gate: graph quality gate coverage",
+  "graph-fusion: entity fusion coverage",
+  "graph-serving: read-only graph serving coverage",
+  "qa-artifacts: canonical Quality Pilot artifact projection coverage",
+  "graph-task-graph: graph workflow Task Graph coverage",
+  "provenance: provenance contract coverage",
+  "schema: graph schema coverage",
+  "evaluation: graph evaluation coverage",
+  "human-gate: irreversible graph merge gate coverage",
+  "read-only: read-only graph serving coverage",
+  "product-test: product adapter coverage",
+  "browser: browser adapter coverage",
+  "dependency: dependency preparation coverage",
+  "attachment: evidence attachment coverage",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-quality_pilot = ["py.typed", "template_files/project/**/*"]
+quality_pilot = ["py.typed", "template_files/project/**/*", "skill_references/**/*"]

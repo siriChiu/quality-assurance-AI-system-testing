@@ -35,6 +35,10 @@ boundary. Hermes persists only those non-secret facts through
 `/quality-pilot environment status` is ready, prepared-environment cases return
 `BLOCK`; exit-only probes alone return `HOLD`, never official `PASS`.
 
+## 快速使用頁面
+
+- [HTML 使用指南](USAGE.html) — 互動式繁中操作說明、CLI/Hermes 範例、狀態語意與目前 `auto_PID_tool` 狀態。
+
 ## Choose your journey
 
 - **Local repo QA:** follow the local-only happy path in
@@ -53,7 +57,8 @@ boundary. Hermes persists only those non-secret facts through
 ## Product truth and test depth
 
 - [Capability matrix](CAPABILITY_MATRIX.md) — what is Supported, Partial, and Planned.
-- [Architecture](ARCHITECTURE.md) — deterministic pipeline, component boundaries, and truth axes.
+- [Architecture](ARCHITECTURE.md) — deterministic pipeline, dual Graph Engineering boundaries, context/contracts, provenance, truth axes, and human gates.
+- Graph engineering — Knowledge Graph models provenance-backed memory and Task Graph models execution topology. See [Architecture](ARCHITECTURE.md#graph-engineering-two-complementary-graphs) and [Command Surface](COMMANDS.md#graph-engineering).
 - [SWQA test design](SWQA_TEST_DESIGN.md) — current structured assertions and stratified init selection, plus explicitly planned deeper strategies.
 - [Command surface](COMMANDS.md) — task-oriented journeys and CLI reference.
 - [Configuration](CONFIGURATION.md) — host-project config, integrations, and local-versus-remote behavior.

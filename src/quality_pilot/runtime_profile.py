@@ -88,8 +88,9 @@ def discover_runtime_surfaces(config: ProjectConfig) -> dict[str, Any]:
         *({"kind": "cargo_bin", "name": item, "entrypoint": item, "source": "Cargo.toml"} for item in cargo_bins),
         *({"kind": "readme_command", "name": Path(item.split()[0]).name, "entrypoint": item, "source": "README"} for item in readme_commands),
     ])
+    entrypoint_candidates = _repo_entrypoint_candidates(root, readme, surfaces)
     executable_candidates = _executable_candidates(root, surfaces)
-    suggested_executable = executable_candidates[0] if executable_candidates else {}
+    suggested_executable = entrypoint_candidates[0] if entrypoint_candidates else (executable_candidates[0] if executable_candidates else {})
     detected_profile = _detected_profile(root, readme, pyproject, package_json, cargo_toml, surfaces)
     return {
         "root": str(root),
@@ -97,10 +98,11 @@ def discover_runtime_surfaces(config: ProjectConfig) -> dict[str, Any]:
         "surface_count": len(surfaces),
         "user_visible_surfaces": surfaces[:12],
         "executable_candidates": executable_candidates[:12],
+        "entrypoint_candidates": entrypoint_candidates[:12],
         "suggested_executable_path": suggested_executable.get("path", ""),
         "suggested_executable_source": suggested_executable.get("source", ""),
         "suggested_executable_confidence": suggested_executable.get("confidence", ""),
-        "suggested_primary_entrypoint": surfaces[0]["entrypoint"] if surfaces else "",
+        "suggested_primary_entrypoint": suggested_executable.get("entrypoint") or (surfaces[0]["entrypoint"] if surfaces else ""),
         "has_readme": bool(readme),
         "has_pyproject": bool(pyproject),
         "has_package_json": bool(package_json),
@@ -115,7 +117,7 @@ def primary_runtime_entrypoint(config: ProjectConfig) -> str:
     if configured:
         return configured
     discovery = discover_runtime_surfaces(config)
-    return str(discovery.get("suggested_executable_path") or discovery.get("suggested_primary_entrypoint") or "").strip()
+    return str(discovery.get("suggested_primary_entrypoint") or discovery.get("suggested_executable_path") or "").strip()
 
 
 def configured_runtime_binary(config: ProjectConfig) -> str:
@@ -174,6 +176,80 @@ def _runtime_questions(discovery: dict[str, Any], missing: list[str]) -> list[di
             ),
         },
     ]
+
+
+def _repo_entrypoint_candidates(root: Path, readme: str, surfaces: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Find real product launch commands before generic executable scans."""
+    candidates: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def add(entrypoint: str, source: str, confidence: str) -> None:
+        value = entrypoint.strip()
+        if not value or value in seen:
+            return
+        seen.add(value)
+        candidates.append({"entrypoint": value, "path": value, "source": source, "confidence": confidence})
+
+    if (root / "main.py").is_file():
+        launcher = _python_launcher(root)
+        # Prefer an explicitly documented product mode over a generic TUI
+        # heuristic.  The README/help surface is the source of truth for the
+        # user-facing runner (for example: main.py --browser).
+        if _repo_mentions_flag(root, "--browser") or _readme_mentions_command(readme, "--browser"):
+            add(f"{launcher} main.py --browser", "README/help documented browser entrypoint", "high")
+        tui_flag = " --tui" if _repo_mentions_tui(root) else ""
+        add(f"{launcher} main.py{tui_flag}", "repo main.py plus application --tui" if tui_flag else "repo main.py", "high")
+    for command in _extract_readme_commands(readme):
+        tokens = command.split()
+        if not tokens:
+            continue
+        first = Path(tokens[0]).name.lower()
+        if first in {"pip", "pip3", "screen", "make", "v1.0"} or first[0:1].isdigit():
+            continue
+        if any(marker in command for marker in ("main.py", "--browser", "--tui", "--smart", "--fan_zone_status")):
+            normalized = _normalize_python_command(command, _python_launcher(root))
+            add(normalized, "README product command", "high")
+    return candidates
+
+
+def _python_launcher(root: Path) -> str:
+    for relative in (".venv/bin/python", "venv/bin/python"):
+        path = root / relative
+        if _is_executable_file(path):
+            # Preserve the host-selected interpreter path instead of resolving
+            # a venv symlink to /usr/bin/python; this is the reproducible
+            # entrypoint the operator can inspect and configure.
+            return str(path)
+    return "python3"
+
+
+def _normalize_python_command(command: str, launcher: str) -> str:
+    try:
+        tokens = command.split()
+    except AttributeError:
+        return command
+    if tokens and Path(tokens[0]).name.lower() in {"python", "python3", "python3.12"} and len(tokens) > 1:
+        return " ".join([launcher, *tokens[1:]])
+    return command
+
+
+def _readme_mentions_command(readme: str, flag: str) -> bool:
+    return any(flag in command and "main.py" in command for command in _extract_readme_commands(readme))
+
+
+def _repo_mentions_flag(root: Path, flag: str) -> bool:
+    for relative in ("main.py", "application/cli.py", "application/ui/browser/server.py"):
+        if flag in _read_text(root / relative, limit=30000):
+            return True
+    return False
+
+
+def _repo_mentions_tui(root: Path) -> bool:
+    for relative in ("main.py", "application/cli.py", "application/ui/tui/fanzone.py"):
+        text = _read_text(root / relative, limit=20000)
+        if "--tui" in text:
+            return True
+    return False
 
 
 def _executable_candidates(root: Path, surfaces: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -302,28 +378,44 @@ def _extract_readme_commands(text: str) -> list[str]:
     if not text:
         return []
     out: list[str] = []
-    for match in re.finditer(r"`((?:\./)?[A-Za-z0-9_.-]+(?:\s+--?[A-Za-z0-9][^`]*)?)`", text):
-        command = match.group(1).strip()
-        if _looks_like_user_command(command):
-            out.append(command)
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith(("$ ", "> ")):
+    in_fence = False
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            command = stripped[2:].strip() if stripped.startswith(("$ ", "> ")) else stripped
+            if _looks_like_user_command(command):
+                out.append(command)
+        elif stripped.startswith(("$ ", "> ")):
             command = stripped[2:].strip()
             if _looks_like_user_command(command):
                 out.append(command)
-    return _unique_strings(out)[:8]
+
+    # Inline command examples are useful, but only accept a compact command
+    # token plus flags. This rejects prose accidentally enclosed in backticks.
+    for match in re.finditer(r"`([^`\n]+)`", text):
+        command = match.group(1).strip()
+        if _looks_like_user_command(command):
+            out.append(command)
+    return _unique_strings(out)[:16]
 
 
 def _looks_like_user_command(command: str) -> bool:
     try:
-        first = command.split()[0]
+        tokens = command.split()
+        first = tokens[0]
     except IndexError:
         return False
     name = Path(first).name.lower()
-    if name in {"go", "python", "python3", "pytest", "npm", "yarn", "make", "cmake", "ninja", "docker"}:
+    if name in {"go", "python", "python3", "pytest", "npm", "yarn", "make", "cmake", "ninja", "docker", "pip", "pip3", "screen"}:
         return False
-    return bool(re.fullmatch(r"\.?/?[A-Za-z0-9_.-]+", first))
+    if name[:1].isdigit() or any(char in command for char in ("**", "：", "。", "，")):
+        return False
+    if not re.fullmatch(r"\.?/?[A-Za-z0-9_.-]+", first):
+        return False
+    return all(re.fullmatch(r"--?[A-Za-z0-9_.=-]+|[A-Za-z0-9_./:-]+", token) for token in tokens[1:])
 
 
 def _detected_profile(root: Path, readme: str, pyproject: str, package_json: str, cargo_toml: str, surfaces: list[dict[str, str]]) -> str:

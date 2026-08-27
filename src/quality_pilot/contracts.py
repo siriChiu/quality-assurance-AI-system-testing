@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import load_yaml
+from .security import find_sensitive_paths
 
 
 class ContractError(ValueError):
@@ -48,6 +49,14 @@ def load_contract(path: Path) -> CaseContract:
     data = load_yaml(path)
     if not isinstance(data, dict):
         raise ContractError("contract_not_mapping", "Contract root must be a mapping", path=str(path))
+    secret_paths = find_sensitive_paths(data)
+    if secret_paths:
+        finding = secret_paths[0]
+        raise ContractError(
+            "raw_secret_detected",
+            f"Raw secret-like value at {finding.path} ({finding.kind})",
+            path=str(path),
+        )
     for key in ["case_id", "title", "commands"]:
         if key not in data or data[key] in ("", None):
             raise ContractError("missing_required_field", f"Missing {key}", path=str(path))

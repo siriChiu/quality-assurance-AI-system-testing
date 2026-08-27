@@ -4,6 +4,7 @@ import json
 import os
 import hashlib
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from .gitea_ledger import record_gitea_mcp_write_request, write_ledger_path
 from .hermes_mcp import hermes_mcp_readiness, mcp_server_is_available
 from .issues import issue_fingerprint, load_issue_snapshot
 from .runner import utc_now
+from .security import redact_structure, redact_text
 from .subagents import text_generation_handoff
 from .write_gate import evaluate_write_gate
 
@@ -256,7 +258,10 @@ def sync_redmine_issues(
                 write_request,
                 request_path,
                 source_module="redmine_issue_sync",
-                target_type="issue_create",
+                target_type="issue_update" if any(
+                    isinstance(action, dict) and action.get("operation") == "gitea.issue.update"
+                    for action in write_request.get("actions", [])
+                ) else "issue_create",
             )
     return {
         **payload,
@@ -423,6 +428,19 @@ def validate_redmine_mcp_snapshot(
             root=config.root,
         )
 
+    freshness_error = _validate_snapshot_freshness(loaded, fetched_at=fetched_at)
+    if freshness_error:
+        return _redmine_snapshot_validation(
+            False,
+            "redmine_mcp_snapshot_stale",
+            freshness_error,
+            requested_issue_ids=requested,
+            path=path,
+            root=config.root,
+            fetched_at=fetched_at,
+            freshness=loaded.get("freshness"),
+        )
+
     raw_issues = _extract_issue_list(loaded)
     selected = [item for item in raw_issues if (_raw_redmine_issue_id(item) in set(requested))]
     missing_payload_ids = sorted(set(requested) - {_raw_redmine_issue_id(item) for item in selected if _raw_redmine_issue_id(item) is not None})
@@ -464,6 +482,29 @@ def validate_redmine_mcp_snapshot(
         include=sorted(include),
         snapshot_issue_ids=manifest_ids,
     )
+
+
+def _validate_snapshot_freshness(loaded: dict[str, Any], *, fetched_at: str) -> str | None:
+    """Validate explicit source/fetch ordering without inventing a global TTL."""
+    freshness = loaded.get("freshness") if isinstance(loaded.get("freshness"), dict) else {}
+    required_after = freshness.get("required_after") or loaded.get("required_after")
+    source_updated_at = freshness.get("source_updated_at") or loaded.get("source_updated_at")
+    if required_after and _parse_timestamp(fetched_at) < _parse_timestamp(str(required_after)):
+        return "Redmine MCP snapshot was fetched before the required source version."
+    if source_updated_at and _parse_timestamp(fetched_at) < _parse_timestamp(str(source_updated_at)):
+        return "Redmine MCP snapshot was fetched before the source updated timestamp."
+    return None
+
+
+def _parse_timestamp(value: str) -> datetime:
+    text = str(value or "").strip()
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def normalize_redmine_issue(raw: dict[str, Any]) -> dict[str, Any]:
@@ -686,10 +727,16 @@ def build_redmine_gitea_sync_plan(config: ProjectConfig, issues: list[dict[str, 
     for issue in issues:
         title = f"[Redmine #{issue['id']}] {issue['subject']}"
         body = render_gitea_candidate_body(issue)
-        qa_summary = redmine_issue_qa_summary(issue)
+        qa_summary_raw = redmine_issue_qa_summary(issue)
+        qa_summary, qa_redaction_findings = redact_structure(qa_summary_raw, prefix=f"redmine[{issue['id']}]")
         fingerprint = issue_fingerprint(issue["subject"], issue.get("description", ""))
         existing = _find_existing_gitea_issue(issue, fingerprint, snapshot_items, write_result_items)
         labels = ["redmine", "needs-triage", "needs-reproduction"]
+        action = (
+            "update_existing_gitea_issue"
+            if existing and _gitea_issue_needs_update(existing, title=title, body=body)
+            else ("link_existing_gitea_issue" if existing else "create_gitea_issue_candidate")
+        )
         candidates.append(
             {
                 "id": f"redmine-{issue['id']}",
@@ -699,13 +746,15 @@ def build_redmine_gitea_sync_plan(config: ProjectConfig, issues: list[dict[str, 
                 "body": body,
                 "labels": labels,
                 "qa_summary": qa_summary,
+                "redaction_findings": [finding.as_dict() for finding in qa_redaction_findings],
                 "qa_text_generation": text_generation_handoff(config, "redmine_issue_summary"),
                 "text_generation": text_generation_handoff(config, "gitea_issue_body"),
                 "dedupe_fingerprint": fingerprint,
                 "idempotency_key": _issue_create_idempotency_key(issue["id"], fingerprint),
-                "action": "link_existing_gitea_issue" if existing else "create_gitea_issue_candidate",
+                "action": action,
                 "existing_gitea_issue_id": existing.get("issue_id") if existing else None,
                 "existing_gitea_issue_url": existing.get("url") if existing else None,
+                "update_required": action == "update_existing_gitea_issue",
                 "write_gate_required": True,
                 "write_gate_result": None,
             }
@@ -729,7 +778,8 @@ def attach_gitea_issue_write_gate(config: ProjectConfig, plan: dict[str, Any]) -
     for candidate in plan.get("issue_candidates", []):
         if not isinstance(candidate, dict):
             continue
-        if candidate.get("action") != "create_gitea_issue_candidate":
+        action = str(candidate.get("action") or "")
+        if action == "link_existing_gitea_issue":
             candidate["write_gate_result"] = {
                 "allowed": True,
                 "reason": "existing_gitea_issue_linked",
@@ -743,6 +793,7 @@ def attach_gitea_issue_write_gate(config: ProjectConfig, plan: dict[str, Any]) -
                 "status": "PASS",
                 "evidence": ["redmine_mcp_snapshot"],
                 "contract_hash": f"redmine-{candidate.get('redmine_issue_id')}",
+                "qa_summary": candidate.get("qa_summary"),
             },
             target_state="open",
             duplicate_candidate=False,
@@ -764,7 +815,7 @@ def build_gitea_issue_write_request(config: ProjectConfig, plan: dict[str, Any])
         if not isinstance(candidate, dict):
             continue
         gate = candidate.get("write_gate_result") if isinstance(candidate.get("write_gate_result"), dict) else {}
-        if candidate.get("action") != "create_gitea_issue_candidate":
+        if candidate.get("action") == "link_existing_gitea_issue":
             skipped.append(
                 {
                     "id": candidate.get("id"),
@@ -794,10 +845,12 @@ def build_gitea_issue_write_request(config: ProjectConfig, plan: dict[str, Any])
             )
             continue
         labels = list(candidate.get("labels", []))
+        is_update = candidate.get("action") == "update_existing_gitea_issue"
         actions.append(
             {
                 "id": candidate.get("id"),
-                "operation": "gitea.issue.create",
+                "operation": "gitea.issue.update" if is_update else "gitea.issue.create",
+                "gitea_issue_id": candidate.get("existing_gitea_issue_id") if is_update else None,
                 "redmine_issue_id": candidate.get("redmine_issue_id"),
                 "title": candidate.get("title"),
                 "body": candidate.get("body"),
@@ -832,7 +885,7 @@ def build_gitea_issue_write_request(config: ProjectConfig, plan: dict[str, Any])
         "blocked_by_gate": len(blocked),
         "safety": {
             "allowed_targets": ["issues"],
-            "allowed_operations": ["gitea.issue.create"],
+            "allowed_operations": ["gitea.issue.create", "gitea.issue.update"],
             "source": "redmine_mcp_snapshot",
             "write_gate_required": True,
             "do_not_comment_or_close_existing_issues": True,
@@ -854,7 +907,7 @@ def _empty_gitea_issue_write_request(config: ProjectConfig, *, status: str) -> d
         "blocked_by_gate": 0,
         "safety": {
             "allowed_targets": ["issues"],
-            "allowed_operations": ["gitea.issue.create"],
+            "allowed_operations": ["gitea.issue.create", "gitea.issue.update"],
             "source": "redmine_mcp_snapshot",
             "write_gate_required": True,
             "do_not_comment_or_close_existing_issues": True,
@@ -932,16 +985,24 @@ def render_gitea_candidate_body(issue: dict[str, Any]) -> str:
         "",
         _render_human_redmine_context(issue),
     ]
-    return "\n".join(lines) + "\n"
+    body = "\n".join(lines) + "\n"
+    redacted, findings = redact_text(body, path="gitea_issue_body")
+    if findings:
+        # Remote body construction is fail-closed: recognizable secrets are
+        # replaced, while the write gate still sees a safe payload.
+        return redacted
+    return body
 
 
 def build_redmine_qa_summary_payload(config: ProjectConfig, issues: list[dict[str, Any]]) -> dict[str, Any]:
-    return {
+    raw_payload = {
         "schema": "quality-pilot.redmine-qa-summary.v1",
         "generated_at": utc_now(),
         "text_generation": text_generation_handoff(config, "redmine_issue_summary"),
         "issues": [redmine_issue_qa_summary(issue) for issue in issues],
     }
+    safe_payload, _findings = redact_structure(raw_payload, prefix="redmine_qa_summary")
+    return safe_payload
 
 
 def redmine_issue_qa_summary(issue: dict[str, Any]) -> dict[str, Any]:
@@ -1432,6 +1493,17 @@ def _label_resolution(write_request: dict[str, Any]) -> list[dict[str, Any]]:
                 }
             )
     return rows
+
+
+def _gitea_issue_needs_update(existing: dict[str, Any], *, title: str, body: str) -> bool:
+    """Return whether a linked issue's known content differs from Redmine."""
+    existing_title = existing.get("title")
+    existing_body = existing.get("body")
+    if existing_title is None and existing_body is None:
+        # A write-result-only link has no content snapshot; update it so the
+        # latest Redmine QA summary is not silently lost.
+        return True
+    return str(existing_title or "").strip() != title.strip() or str(existing_body or "").strip() != body.strip()
 
 
 def _find_existing_gitea_issue(

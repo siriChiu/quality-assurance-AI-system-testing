@@ -1,0 +1,2 @@
+# Unified diff fixtures contain required leading spaces on blank context lines.
+*.patch -whitespace

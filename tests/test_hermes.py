@@ -66,6 +66,41 @@ class HermesDispatchTest(unittest.TestCase):
                     self.assertEqual(result["payload"]["error"], "command_removed")
                     self.assertIn("replacement", result["payload"])
 
+    def test_review_response_renders_preview_content_before_confirmation(self) -> None:
+        response = hermes.render_chat_response(
+            {
+                "status": "ok",
+                "schema": "quality-pilot.code-review.v1",
+                "repo": "owner/repo",
+                "pr_number": 7,
+                "head_sha": "abc123",
+                "test_outcome": "PASS",
+                "conclusion": "NO_BLOCKING_FINDINGS",
+                "test_results": [{"id": "regression-pytest", "status": "PASS", "command": "python3 -m pytest tests -q"}],
+                "findings": [],
+                "remote_reply": {
+                    "status": "awaiting_confirmation",
+                    "remote_apply": False,
+                    "preview": {"summary": "NO_BLOCKING_FINDINGS", "inline_comments": []},
+                },
+                "report_paths": {"json_path": "reports/review.json", "markdown_path": "reports/review.md"},
+            }
+        )
+        self.assertIn("PR review preview:", response)
+        self.assertIn("regression-pytest", response)
+        self.assertIn("remote request: awaiting_confirmation", response)
+        self.assertIn("remote apply: False", response)
+        self.assertIn("NO_BLOCKING_FINDINGS", response)
+
+    def test_graph_commands_are_first_class_modular_workflows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hermes.dispatch_chat_command("/quality-pilot setup", root=tmp)
+            result = hermes.dispatch_chat_command("/quality-pilot graph status", root=tmp)
+            self.assertEqual(result["exit_code"], 0)
+            self.assertEqual(result["payload"]["status"], "ok")
+            self.assertEqual(result["payload"]["canonical_store"], "sqlite")
+            self.assertFalse(result["payload"]["neo4j_required"])
+
     def test_redmine_missing_snapshot_retry_keeps_current_workflow(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -88,6 +123,18 @@ class HermesDispatchTest(unittest.TestCase):
                 "/quality-pilot cases generate --redmine-issues 144732 144694",
             )
             self.assertIn("重跑 generate", generate["payload"]["next_actions"][0]["label"])
+
+    def test_setup_keeps_remote_sync_blocker_separate_from_local_setup_readiness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = hermes.dispatch_chat_command("/quality-pilot setup", root=tmp)
+            self.assertEqual(result["exit_code"], 0)
+            payload = result["payload"]
+            self.assertEqual(payload["readiness"]["mode"], "SETUP_READY")
+            self.assertEqual(payload["readiness"]["scope"], "setup")
+            self.assertIn("gitea_mcp_snapshot_missing", payload["readiness"]["remote_sync_blockers"])
+            self.assertNotEqual(payload["readiness"]["mode"], "SYNC_BLOCKED")
+            self.assertIn("entrypoint:", result["chat_response"])
+            self.assertIn("遠端 issue sync 尚未 ready", result["chat_response"])
 
     def test_quick_start_chat_commands_dispatch_to_engine(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -115,9 +162,18 @@ class HermesDispatchTest(unittest.TestCase):
             self.assertIn("result:", run_one["chat_response"])
 
             close_loop = hermes.dispatch_chat_command("/quality-pilot close-loop run-once", root=root)
-            self.assertEqual(close_loop["status"], "PASS")
+            self.assertEqual(close_loop["status"], "HOLD")
+            self.assertEqual(close_loop["payload"]["execution_mode"], "task_graph")
+            self.assertEqual(close_loop["payload"]["task_graph"]["human_gate_status"], "HOLD")
             self.assertIn("latest_run_json", close_loop["payload"])
             self.assertIn("report_path", close_loop["payload"])
+
+            resumed = hermes.dispatch_chat_command(
+                "/quality-pilot close-loop run-once --resume-task-graph --confirm-publish",
+                root=root,
+            )
+            self.assertEqual(resumed["status"], "PASS")
+            self.assertEqual(resumed["payload"]["execution_mode"], "task_graph")
 
             report = hermes.dispatch_chat_command("/quality-pilot report status", root=root)
             self.assertEqual(report["status"], "ok")
@@ -178,7 +234,8 @@ class HermesDispatchTest(unittest.TestCase):
             for command in commands:
                 with self.subTest(command=command):
                     result = hermes.dispatch_chat_command(command, root=root)
-                    self.assertEqual(result["exit_code"], 0)
+                    expected_exit = 4 if command.endswith("close-loop heartbeat") else (2 if command.endswith("close-loop run-once") else 0)
+                    self.assertEqual(result["exit_code"], expected_exit)
                     self.assertNotEqual(result["status"], "error")
                     self.assertTrue(result["engine_argv"])
                     self.assertIn("payload", result)
@@ -230,6 +287,11 @@ class HermesDispatchTest(unittest.TestCase):
             self.assertIn("/quality-pilot help", manifest["commands"])
             self.assertIn("/quality-pilot doctor --fix", manifest["commands"])
             self.assertIn("/quality-pilot audit state", manifest["commands"])
+            self.assertIn("/quality-pilot close-loop run-once", manifest["commands"])
+            self.assertIn("/quality-pilot close-loop run-once --legacy", manifest["commands"])
+            self.assertIn("/quality-pilot graph tutor", manifest["commands"])
+            self.assertIn("/quality-pilot graph run", manifest["commands"])
+            self.assertIn("/quality-pilot review pr --repo <owner/repo> --pr-number <number>", manifest["commands"])
             self.assertIn("/quality-pilot cases generate --init", manifest["commands"])
             self.assertIn("/quality-pilot cases generate --init --count 5", manifest["commands"])
             self.assertIn("/quality-pilot cases generate --growing", manifest["commands"])
@@ -297,6 +359,13 @@ class HermesDispatchTest(unittest.TestCase):
                 code = hermes.main(["status", "--agent-dir", agent_tmp])
             self.assertEqual(code, 0)
             self.assertEqual(json.loads(buf.getvalue())["status"], "ok")
+
+    def test_completion_tree_is_nested_but_not_claimed_as_native_hermes_subcommands(self) -> None:
+        tree = hermes.HERMES_COMPLETION_TREE
+        self.assertIn("cases", tree)
+        self.assertIn("generate", tree["cases"]["subcommands"])
+        self.assertIn("wiki", tree["publish"]["subcommands"])
+        self.assertEqual(hermes.HERMES_COMPLETION_SUBCOMMANDS["cases"], "產生、審查、驗證與執行測試 cases")
 
     def test_install_skill_creates_hermes_skill_slash_command(self) -> None:
         with tempfile.TemporaryDirectory() as skills_tmp:

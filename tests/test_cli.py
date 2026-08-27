@@ -316,12 +316,17 @@ class CliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self.run_cli(["setup", "--root", tmp])
             code, payload = self.run_cli(["close-loop", "run-once", "--root", tmp, "--json"])
+            self.assertEqual(code, 2)
+            self.assertEqual(payload["status"], "HOLD")
+            self.assertEqual(payload["execution_mode"], "task_graph")
+            self.assertEqual(payload["task_graph"]["human_gate_status"], "HOLD")
+            self.assertIn("latest_run_json", payload)
+            self.assertIn("context.build", [step["name"] for step in payload["steps"]])
+
+            code, payload = self.run_cli(["close-loop", "run-once", "--root", tmp, "--resume-task-graph", "--confirm-publish", "--json"])
             self.assertEqual(code, 0)
             self.assertEqual(payload["status"], "PASS")
-            self.assertIn("latest_run_json", payload)
-            self.assertEqual(payload["tracker_writes"]["blocked_by_gate"], 0)
-            self.assertIn("issues_sync_readiness", [step["name"] for step in payload["steps"]])
-            self.assertIn("publish_wiki_status", [step["name"] for step in payload["steps"]])
+            self.assertEqual(payload["task_graph"]["human_gate_status"], "PASS")
 
             code, payload = self.run_cli(["tracker", "plan-write", "--root", tmp, "--target-state", "closed", "--json"])
             self.assertEqual(code, 0)

@@ -5,10 +5,12 @@ scope: generic AI Quality Pilot test design
 
 This document contains both current executable contracts and the deeper test
 strategy AI Quality Pilot is growing toward. The current checkout supports a
-first slice of structured command assertions, four-axis truth, and stratified
-init selection. Complete white-box/black-box, mutation, fuzz, security,
-UI/browser, API-schema, load/soak, and distributed-system coverage is **Planned**,
-not implied by generated dimension labels. See
+first slice of structured command assertions, four-axis truth, stratified
+init selection, explicit product build/run contracts, and an optional real
+Playwright boundary for comprehensive PR review. Complete white-box/black-box,
+mutation, fuzz, security, multi-page UI/browser, API-schema, load/soak, and
+distributed-system coverage is **Planned**, not implied by generated dimension
+labels. See
 [`CAPABILITY_MATRIX.md`](CAPABILITY_MATRIX.md).
 
 The target is to model how an experienced SWQA engineer expands one confirmed
@@ -83,8 +85,12 @@ also summarizes oracle strength/partial state. An assertion can fail even when
 the process exit code is zero.
 
 This is only the first oracle slice. Database state, HTTP/schema validation,
-files, distributed traces, UI state, business invariants, resource curves, and
-custom project runners remain future oracle families.
+files, distributed traces, business invariants, resource curves, and custom
+project runners remain future oracle families. Comprehensive PR review has a
+separate product-test contract that can execute a documented build/artifact and
+semantic product operation; its browser branch uses real Playwright when
+explicitly configured. Exit-only product probes and browser screenshots without
+interaction remain HOLD.
 
 ## Supported first slice: four-axis truth
 

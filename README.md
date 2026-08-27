@@ -30,7 +30,7 @@ AI Quality Pilot 的目標不是多包一層 CLI，而是把 SWQA lifecycle 變�
 - Subagent 可以協助摘要、候選 testcase、報告文字、修復策略，但不能繞過 deterministic validation、write gate 或 evidence truth。
 
 先看 [Capability Matrix](docs/CAPABILITY_MATRIX.md) 區分 Supported、Partial、
-Planned。完整 flowchart-based 改善計畫見
+Planned；使用操作請看 [HTML 使用指南](docs/USAGE.html)。完整 flowchart-based 改善計畫見
 [Agent Close Loop Improvement Plan](docs/AGENT_CLOSE_LOOP_IMPROVEMENT_PLAN.md)，
 追蹤任務見 [Quality Pilot UX Hardening Tasks](docs/QUALITY_PILOT_UX_HARDENING_TASKS.md)；
 這兩份是 roadmap，不是已實作功能清單。
@@ -107,9 +107,11 @@ Analyze -> Normalize -> Generate -> Execute -> Report -> Fix -> Publish -> Re-en
 
 | Module | Current Command Surface | Current State |
 |---|---|---|
-| A0 Orchestrator | `close-loop status`, `close-loop run-once`, `close-loop heartbeat` | Pipeline exists; heartbeat grows new work before execution; richer module contract/session roadmap pending |
+| A0 Orchestrator | `close-loop status`, `close-loop run-once`, `close-loop run-once --legacy`, `close-loop heartbeat` | Task Graph is now the default close-loop orchestration with checkpoints, bounded workers, independent verification, and human gate; the legacy fixed sequence remains an explicit `--legacy` fallback |
 | A1 Redmine Intake | `issues sync --redmine-issues ...` | Full snapshot required, stale/trimmed payloads rejected |
 | A2 Issues Sync | `issues sync`, `issues status` | Redmine/Gitea mirrors, dedupe, gated Gitea issue create/update, canonical mapping audit |
+| A2b Graph Engineering compiler | `graph ...`, `graph run --from-qa`, `close-loop run-once` | Knowledge Graph nine-stage local read model (SQLite/JSON/provenance/ontology/fusion/serve) plus default Task Graph scoped contracts, parallel extraction, independent verifiers, checkpoints, repair, and human gates; existing cases/runs/evidence/pinned reviews now have an adapter; live source reads and remote GraphRAG remain planned |
+| A2c PR review | `review pr --repo ... --pr-number ...`, `review apply` | Detached branch/PR/head review, reconstructed diff, changed-file-driven product-test oracle selection, regression tests, PR-scoped case generation/run, actionable BLOCK/HOLD remediation recommendations, user-owned product build/artifact plus README-operation contract, optional real Playwright UI flow, comprehensive black-box/white-box/functional/boundary/stress/documentation matrix, advisory COMMENT-only Gitea request, and deterministic MCP-result reconciliation; final review decision remains user-owned |
 | A3 Case Generate | `cases generate --init/--growing/--redmine-issues ...` | Runtime-first；init 有第一版 stratified selection，growing 有 operation matrix；不代表完整深度白箱/黑箱 coverage |
 | A4 Case Run | `cases run [case_id]` | 支援 exit/stdout/stderr/duration structured assertions，保存 oracle evidence 與 contract hash |
 | A5 Issues Report | `issues report`, `report status/json` | Per-issue report exists and FAIL/BLOCK results create gated linked Gitea issue evidence update payloads; richer subagent wording and module session state remain roadmap work |
@@ -142,12 +144,17 @@ chmod +x "$RUNNER"
 PYTHONPATH="$SRC" python3 -m quality_pilot.hermes install-skill --force --runner-command "$RUNNER"
 ```
 
-2. Reload Hermes skills:
+2. Reload Hermes skills and restart the running Hermes process when the completer itself was updated:
 
 ```text
 /reload-skills
 /quality-pilot help
 ```
+
+`/reload-skills` refreshes the skill map, but an already-running Hermes process may
+still hold the old completer. After updating Hermes' nested skill completion
+support, exit and restart Hermes before testing `/quality-pilot cases ` or
+`/quality-pilot publish wiki ` suggestions.
 
 3. 在 Hermes 中切換到 **target product repo**；不要留在 AI Quality Pilot
 source checkout。依使用目的選一條 happy path。
@@ -216,7 +223,7 @@ Important behavior:
 
 ## Runtime Profile
 
-`doctor` and `setup` analyze the repo before asking repo-derived runtime questions. They inspect package metadata, README command examples, common executable output paths, Go `cmd/*`, Python console scripts, npm bins, Cargo bins, and existing project state. For the initial Hermes `/quality-pilot setup` gate, grill-me may first collect the user's known local/remote and safety facts; after setup/doctor analysis, Hermes reconciles the inferred runner with those answers. The inferred executable only identifies a candidate runner; it does not identify a safe test environment.
+`doctor` and `setup` analyze the repo before asking repo-derived runtime questions. They inspect package metadata, README command examples, common executable output paths, Go `cmd/*`, Python console scripts, npm bins, Cargo bins, and existing project state. For a Python product with `main.py` and a TUI flag, analysis prefers the product runner (for example `<repo>/.venv/bin/python main.py --tui`) over an unrelated executable such as `install.sh`. For the initial Hermes `/quality-pilot setup` gate, grill-me may first collect the user's known local/remote and safety facts; after setup/doctor analysis, Hermes reconciles the inferred runner with those answers. The inferred executable only identifies a candidate runner; it does not identify a safe test environment.
 
 For an actual test run, Hermes performs the mandatory `grill-me`
 interview and confirms local versus remote execution, the product entrypoint,
@@ -299,8 +306,12 @@ Use:
 
 `doctor --fix` and `subagent configure` can create the Open WebUI routing
 skeleton. Endpoint/model/API key env remain user-owned because the tool must not
-guess private services or raw credentials. Local deterministic workflows remain
-usable without a configured subagent.
+guess private services or raw credentials. The separate local `subagents` MCP
+council is candidate-only: temporary output, `logged_in`, or a printed URL is not
+proof of a provider-persisted chat record. Use the `quality-pilot-subagents`
+adapter and mark a provider `UNVERIFIED` until its authenticated chat URL/ID can
+be reloaded with matching prompt/answer. Local deterministic workflows remain
+usable without either subagent path.
 
 ## Public Commands
 
@@ -310,6 +321,8 @@ usable without a configured subagent.
 /quality-pilot doctor
 /quality-pilot doctor --fix
 /quality-pilot audit state
+/quality-pilot review pr --repo <owner/repo> --pr-number <number>
+/quality-pilot review apply
 
 /quality-pilot issues sync
 /quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]
@@ -358,6 +371,7 @@ usable without a configured subagent.
 | 修復缺失 config skeleton / overlay 目錄後再檢查 | `/quality-pilot doctor --fix` |
 | 只讀稽核 overlay semantic consistency | `/quality-pilot audit state` |
 | 同步 issues，內建 dedupe/prune | `/quality-pilot issues sync` |
+| Review 任意可讀取的 Gitea PR | `/quality-pilot review pr --repo <owner/repo> --pr-number <number>`、`/quality-pilot review apply` |
 | 從 Redmine IDs 同步本地 mirrors 並經 gate 建立/更新 linked Gitea issues | `/quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]` |
 | 看 issue sync、duplicate、fix queue、PR handoff | `/quality-pilot issues status` |
 | 產生每個 issue 的 QA report，並為 FAIL/BLOCK 產生 linked Gitea evidence update handoff | `/quality-pilot issues report` |
@@ -379,6 +393,78 @@ usable without a configured subagent.
 | 產生報告 | `/quality-pilot report status` |
 | 設定 subagent | `/quality-pilot subagent configure` |
 
+`close-loop run-once` 與 heartbeat 預設使用 Task Graph；run-once 第一次會在 local
+publication human gate 回 `HOLD`，再用 `/quality-pilot close-loop run-once --resume-task-graph --confirm-publish`
+繼續。只有明確指定 `--legacy` 才會使用舊 fixed-sequence pipeline。
+
+## Graph Engineering 與既有指令互通
+
+Quality Pilot 現在採用 Graph Engineering 的完整雙半部定義：
+
+- **Knowledge Graph**：agent 記住什麼；ontology、typed entities/relations/events、provenance、quality gate、fusion、evaluation、read-only serving。
+- **Task Graph**：agent 如何工作；Context、Contract、DAG、parallel workers、independent verifier、merge、human gate、checkpoint、repair。
+
+```text
+Knowledge Graph:
+  scope -> representation -> ontology -> extraction
+        -> quality-gate -> fusion -> evaluation -> serving
+                                      ^
+                                      |
+Task Graph:
+  Context -> Contract -> source adapter -> parallel extraction -> verifier
+          -> merge owner -> human gate -> checkpoint / repair
+```
+
+Knowledge Graph runtime 位於 `src/quality_pilot/graph_engineering/`：
+
+- SQLite 是 canonical local store，JSON 是 portable export。
+- entity/relation/event 必須帶 source、timestamp、confidence、evidence。
+- relation 會做 ontology domain/range validation。
+- integration-first path 會從既有 case contracts、canonical runs/evidence 與 pinned PR review reports 建立 candidates；PR review report 會先驗證 schema、report hash、pinned head/base、PR identity、open/merged state、optional freshness 與 evidence paths。外部 candidate JSON/YAML 只是明確擁有者的 adapter，不把 LLM 輸出直接寫入 graph。
+- fusion 是可逆 ledger，套用前必須 explicit confirmation。
+- graph serving 是唯讀 projection；node/edge count 不能變成 QA truth。
+
+模組化指令：
+
+```text
+/quality-pilot graph tutor
+/quality-pilot graph scope --question "..."
+/quality-pilot graph representation
+/quality-pilot graph ontology
+/quality-pilot graph run --from-qa --question "Which test run produced evidence for this case?" \
+  --case-id CASE-001 --review state/reviews/pr-report.json
+/quality-pilot graph extract --input candidate.json  # external adapter only
+/quality-pilot graph quality-gate --gold labels.json
+/quality-pilot graph fuse
+/quality-pilot graph evaluate --gold labels.json
+/quality-pilot graph serve --entity <id-or-name>
+/quality-pilot graph run
+```
+
+`graph run --from-qa` 使用 `compile_graph_engineering_task_graph()`，先投影既有
+Quality Pilot case/run/evidence/review artifacts，再執行 entity/relation/event extraction、
+獨立 quality verifier、fusion human gate、checkpoint 與 repair。Graph SQLite/JSON 是
+provenance-backed read model，不取代原本 QA modules 或 source authority。
+
+既有 QA Task Graph 指令仍保留：
+
+```text
+/quality-pilot close-loop run-once
+/quality-pilot close-loop run-once --resume-task-graph --confirm-publish
+/quality-pilot close-loop run-once --repair-node execute:<case_id> --resume-task-graph
+/quality-pilot close-loop run-once --legacy
+```
+
+外部 MIT-licensed `codejunkie99/graph-engineering` skill 已隨 Quality Pilot source
+與 Hermes install bundle 導入至 `references/graph-engineering/`（source snapshot
+`cfacb56a05a31ba69bf84d0b8b00f5ce463127ef`），保留 tutor、九階段 workflow 與
+modeling/extraction/fusion/task-graph 教材；dispatcher 才是 artifact、provenance、
+human gate 與安全寫入的 authority。
+
+## BDD coverage 與六色帽審查
+
+`setup`、`doctor`、`issues status` 會回傳 `bdd_contract`：它列出 feature scenario 總數、current/partial/planned 數、真正有 pytest-bdd binding 的數量，以及未綁定 current scenario。六色帽會議後新增 Context/Contract、Task Graph topology、parallel workers、independent verifier、checkpoint/repair、human gate、comprehensive PR review、Knowledge Graph ontology/extraction/fusion/serving 與 PTY/TUI marker-oracle scenarios；未綁定或 planned 行為明確標記，不會用 node/edge count 冒充 workflow evidence。這是刻意揭露路燈效應：`142 tests passed` 是 core unittest regression，不是完整 BDD coverage；fake adapter 測試也不等於 remote integration。
+
 ## Project Layout
 
 ```text
@@ -388,8 +474,9 @@ your-product/
     issues/       # Gitea/Redmine local mirrors
     cases/        # YAML case contracts
     runners/      # project-owned runner scripts
-    rules/        # project rules and wiki categories
-    state/        # snapshots, latest-run, handoff requests/results
+    rules/        # project rules, wiki categories, and graph ontology
+    graph/        # optional graph working area
+    state/        # snapshots, latest-run, graph SQLite/JSON, handoff requests/results
     evidence/     # stdout/stderr/rc/meta/result JSON
     reports/      # Markdown/JSON reports
 ```
@@ -550,6 +637,8 @@ tracker:
     redmine_issues_json: .quality-pilot-project/state/redmine-mcp/issues.json
     wiki_write_request_json: .quality-pilot-project/state/gitea-mcp/wiki-write-request.json
     wiki_write_result_json: .quality-pilot-project/state/gitea-mcp/wiki-write-result.json
+    review_write_request_json: .quality-pilot-project/state/gitea-mcp/review-write-request.json
+    review_write_result_json: .quality-pilot-project/state/gitea-mcp/review-write-result.json
 ```
 
 Hermes must expose available MCP servers before `doctor` can mark remote readiness as ready. Either set this for the dispatcher process:

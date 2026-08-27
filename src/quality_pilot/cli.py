@@ -12,6 +12,7 @@ from urllib import parse
 
 from . import config as config_module
 from .automation_profile import build_automation_profile_candidate, write_automation_profile_candidate
+from .bdd_contract import audit_bdd_contract
 from .config import (
     CONFIG_FILE,
     DEFAULT_PROJECT_WORKSPACE,
@@ -35,8 +36,10 @@ from .case_generation import (
     validate_generated_cases,
 )
 from .contracts import ContractError, list_contract_paths, load_contract, load_contracts, select_contracts
-from .environment import configure_environment, environment_profile_status
+from .environment import configure_environment, environment_profile_status, remote_preflight
+from .execution_contract import apply_discovered_contract, normalize_execution_contract
 from .fix_issues import FixIssueError, fix_status, plan_fix_issue, run_fix_case, run_fix_issue, submit_fix_pr
+from .review import ReviewError, complete_gitea_review_apply, pr_snapshot_path, review_pr
 from .gitea import GiteaError
 from .heartbeat import (
     HEARTBEAT_DEFAULT_EVERY,
@@ -46,11 +49,25 @@ from .heartbeat import (
 )
 from .hermes_mcp import hermes_mcp_readiness, persist_hermes_mcp_status_from_env
 from .issues import IssueSyncError, dedupe_issues, issue_status, issue_sync_readiness, local_issue_dir, show_issue, sync_issues
-from .pipeline import PIPELINE_ORDER, run_close_loop
+from .pipeline import PIPELINE_ORDER, run_close_loop, run_close_loop_task_graph
+from .graph_engineering import (
+    GraphValidationError,
+    graph_evaluate,
+    graph_extract,
+    graph_fuse,
+    graph_ontology,
+    graph_quality_gate,
+    graph_representation,
+    graph_scope,
+    graph_serve,
+    graph_status,
+    graph_tutor,
+    run_graph_task_graph,
+)
 from .publishing import PublishError, apply_publish_plan, plan_publish, publish_status
 from .redmine import RedmineError, redmine_readiness, sync_redmine_issues
 from .reports import create_issues_from_failures, load_latest_payload, load_latest_results, render_issues_report, render_status_report
-from .runner import RunContext, run_case, utc_now
+from .runner import RunContext, run_case, stamp_result_run_id, utc_now
 from .runtime_profile import runtime_profile_status
 from .state_audit import audit_project_state, audit_summary
 from .subagents import (
@@ -62,10 +79,13 @@ from .subagents import (
     configure_subagent,
     subagent_status,
 )
-from .templates import EXAMPLE_CONTRACT, EXAMPLE_RUNNER, SWQA_TEST_DESIGN_RULE, WIKI_CATEGORIES_RULE
+from . import templates as templates_module
+from .templates import EXAMPLE_CONTRACT, EXAMPLE_RUNNER, GRAPH_ONTOLOGY_TEMPLATE, SWQA_TEST_DESIGN_RULE, WIKI_CATEGORIES_RULE
+from .tui_probe import TUIProbeError, tui_probe
 from .ux import (
     attach_readiness,
     build_readiness,
+    build_setup_readiness,
     canonical_case_id,
     canonical_issue_id,
     resolve_identifier,
@@ -148,7 +168,9 @@ def cmd_init_project(args: argparse.Namespace) -> int:
             "message": "Refusing to write host-project assets into a AI Quality Pilot source checkout. Use --workspace .quality-pilot-project or another host-owned overlay path.",
         }, exit_code=4)
 
-    for path in [paths.cases, paths.runners, paths.rules, paths.issues, paths.state, paths.evidence, paths.reports]:
+    graph_state = paths.state / "graph"
+    graph_workspace = paths.workspace / "graph"
+    for path in [paths.cases, paths.runners, paths.rules, paths.issues, paths.state, paths.evidence, paths.reports, graph_state, graph_workspace]:
         path.mkdir(parents=True, exist_ok=True)
 
     created = []
@@ -162,27 +184,39 @@ def cmd_init_project(args: argparse.Namespace) -> int:
         created.append(str(paths.rules / "swqa-test-design.md"))
     if write_if_missing(paths.rules / "wiki-categories.yaml", WIKI_CATEGORIES_RULE, force=args.force):
         created.append(str(paths.rules / "wiki-categories.yaml"))
+    if write_if_missing(paths.rules / "graph-ontology.yaml", GRAPH_ONTOLOGY_TEMPLATE, force=args.force):
+        created.append(str(paths.rules / "graph-ontology.yaml"))
 
     issue_sync = None
     wiki_sync = None
+    bdd = None
     subagents = None
     runtime_profile = None
     environment_profile = None
     automation_profile = None
     automation_profile_candidate_path = None
+    effective_execution_contract = None
+    discovery_apply = None
     config_error = None
     if paths.config.exists():
         try:
             config = load_project_config(root)
             issue_sync = issue_sync_readiness(config)
             wiki_sync = wiki_readiness(config)
+            bdd = audit_bdd_contract()
             subagents = subagent_status(config)
             runtime_profile = runtime_profile_status(config)
             environment_profile = environment_profile_status(config)
             automation_profile = build_automation_profile_candidate(config, runtime_profile)
             automation_profile_candidate_path = write_automation_profile_candidate(config, automation_profile)
+            effective_execution_contract = normalize_execution_contract(config)
+            if getattr(args, "confirm_discovery", False):
+                discovery_apply = apply_discovered_contract(config, confirm=True)
+                effective_execution_contract = discovery_apply.get("effective_contract")
         except QAConfigError as exc:
             config_error = {"error": exc.error, "message": exc.message, **exc.details}
+        except ValueError as exc:
+            config_error = {"error": str(exc), "message": str(exc)}
 
     payload = {
         "status": "ok",
@@ -192,15 +226,23 @@ def cmd_init_project(args: argparse.Namespace) -> int:
         "tracker_setup": tracker_setup["payload"],
         "issue_sync": issue_sync,
         "wiki_sync": wiki_sync,
+        "bdd_contract": bdd,
         "subagents": subagents,
         "runtime_profile": runtime_profile,
         "environment_profile": environment_profile,
         "automation_profile": automation_profile,
         "automation_profile_candidate_path": automation_profile_candidate_path,
+        "effective_execution_contract": effective_execution_contract,
+        "discovery_apply": discovery_apply,
         "config_error": config_error,
         "embedded_tool_checkout_detected": is_quality_pilot_source_checkout(root / LEGACY_PROJECT_WORKSPACE),
     }
-    return print_json(attach_readiness(payload, build_readiness(issue_sync=issue_sync, wiki_sync=wiki_sync)))
+    payload["remote_sync_readiness"] = build_readiness(issue_sync=issue_sync, wiki_sync=wiki_sync)
+    return print_json(attach_readiness(payload, build_setup_readiness(
+        issue_sync=issue_sync,
+        wiki_sync=wiki_sync,
+        environment_profile=environment_profile,
+    )))
 
 
 def cmd_setup(args: argparse.Namespace) -> int:
@@ -214,7 +256,7 @@ def cmd_environment_status(args: argparse.Namespace) -> int:
         return _error_payload(exc)
     profile = environment_profile_status(config)
     payload = {
-        "status": "ok" if profile.get("ready") else "needs_user_input",
+        "status": "ok" if profile.get("ready") else str(profile.get("status") or "needs_user_input"),
         "environment_profile": profile,
         "next": (
             "/quality-pilot cases run"
@@ -223,6 +265,35 @@ def cmd_environment_status(args: argparse.Namespace) -> int:
         ),
     }
     return print_json(payload, exit_code=0 if profile.get("ready") else 2)
+
+
+def cmd_environment_preflight(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        result = remote_preflight(config, expected_head_sha=getattr(args, "expected_head_sha", None))
+    except QAConfigError as exc:
+        return _error_payload(exc)
+    return print_json({"status": result.get("status"), "remote_preflight": result}, exit_code=0 if result.get("status") == "READY" else 2)
+
+
+def cmd_environment_tui_probe(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        payload = tui_probe(
+            config,
+            entrypoint=args.entrypoint,
+            duration_seconds=args.duration,
+            expected_markers=args.expect,
+            keys=args.key,
+            width=args.width,
+            height=args.height,
+            confirm=args.confirm,
+            dry_run=args.dry_run,
+        )
+    except (QAConfigError, TUIProbeError) as exc:
+        return _error_payload(exc)
+    status = str(payload.get("status") or "")
+    return print_json(payload, exit_code=0 if status in {"PASS", "HOLD", "dry_run", "awaiting_confirmation"} else 2)
 
 
 def cmd_environment_configure(args: argparse.Namespace) -> int:
@@ -237,6 +308,11 @@ def cmd_environment_configure(args: argparse.Namespace) -> int:
             credential_envs=args.credential_env,
             side_effect_boundary=args.side_effect_boundary,
             confirm=not args.no_confirm,
+            ssh_host=args.ssh_host,
+            remote_repo=args.remote_repo,
+            remote_python=args.remote_python,
+            remote_fixture_paths=args.remote_fixture,
+            auth_method=args.auth_method,
         )
     except QAConfigError as exc:
         return _error_payload(exc)
@@ -344,6 +420,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     payload_status = "ok" if config_exists else "setup_required"
     issue_sync = None
     wiki_sync = None
+    bdd = None
     config_error = None
     runtime_profile = None
     environment_profile = None
@@ -354,6 +431,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             config = load_project_config(root)
             issue_sync = issue_sync_readiness(config)
             wiki_sync = wiki_readiness(config)
+            bdd = audit_bdd_contract()
             subagents = subagent_status(config)
             runtime_profile = runtime_profile_status(config)
             environment_profile = environment_profile_status(config)
@@ -391,6 +469,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         "workspace_exists": paths.workspace.exists(),
         "workspace_is_tool_checkout": is_quality_pilot_source_checkout(paths.workspace),
         "embedded_tool_checkout_detected": is_quality_pilot_source_checkout(root / LEGACY_PROJECT_WORKSPACE),
+        "bdd_contract": bdd,
         "case_contract_count": len(cases),
         "runner_count": len([p for p in runners if p.is_file()]),
         "latest_run": latest_payload,
@@ -419,6 +498,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 continue
             checks.append({"name": f"path.{name}", "status": "PASS" if path.exists() else "WARN", "path": str(path)})
         hermes_status_persist = persist_hermes_mcp_status_from_env(config)
+        bdd = audit_bdd_contract()
         hermes_ready = hermes_mcp_readiness(config)
         checks.extend(hermes_ready.get("checks", []))
         readiness = issue_sync_readiness(config)
@@ -431,6 +511,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         environment_profile = environment_profile_status(config)
         automation_profile = build_automation_profile_candidate(config, runtime_profile)
         automation_profile_candidate_path = write_automation_profile_candidate(config, automation_profile)
+        effective_execution_contract = normalize_execution_contract(config)
         checks.append({
             "name": "runtime.profile",
             "status": "WARN" if runtime_profile.get("needs_user_input") else "PASS",
@@ -452,6 +533,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             ),
             "execution_mode": environment_profile.get("execution_mode"),
             "blockers": environment_profile.get("blockers", []),
+        })
+        checks.append({
+            "name": "execution.contract",
+            "status": "PASS" if effective_execution_contract.get("status") == "READY" else "WARN",
+            "message": "Normalized product/browser contract is ready." if effective_execution_contract.get("status") == "READY" else "Discovery candidate requires one explicit confirmation.",
+            "contract_status": effective_execution_contract.get("status"),
+            "candidate_runner_count": len(effective_execution_contract.get("discovery", {}).get("runner_candidates", [])),
+            "browser_test_count": effective_execution_contract.get("discovery", {}).get("browser_test_count", 0),
+            "conflicts": effective_execution_contract.get("discovery_conflicts", []),
         })
         checks.append({
             "name": "automation.profile",
@@ -494,6 +584,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             "checks": checks,
             "hermes_mcp": hermes_ready,
             "hermes_mcp_status_persist": hermes_status_persist,
+            "bdd_contract": bdd,
             "issue_sync": readiness,
             "redmine_sync": redmine_ready,
             "subagents": subagents,
@@ -501,6 +592,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             "environment_profile": environment_profile,
             "automation_profile": automation_profile,
             "automation_profile_candidate_path": automation_profile_candidate_path,
+            "effective_execution_contract": effective_execution_contract,
             "state_audit": audit_summary(state_audit),
             "wiki_sync": wiki_ready,
             "fix": fix_result,
@@ -787,6 +879,108 @@ def cmd_audit_state(args: argparse.Namespace) -> int:
     return print_json(payload)
 
 
+def _graph_config(args: argparse.Namespace):
+    return load_project_config(Path(args.root), getattr(args, "config", None))
+
+
+def _print_graph_payload(payload: dict[str, Any]) -> int:
+    status = str(payload.get("status") or "")
+    exit_code = 2 if status in {"BLOCK", "FAIL", "error", "needs_input"} or payload.get("error") else 0
+    return print_json(payload, exit_code=exit_code)
+
+
+def cmd_graph_status(args: argparse.Namespace) -> int:
+    try:
+        return _print_graph_payload(graph_status(_graph_config(args)))
+    except (QAConfigError, GraphValidationError) as exc:
+        return _error_payload(exc)
+
+
+def cmd_graph_tutor(args: argparse.Namespace) -> int:
+    return _print_graph_payload(graph_tutor())
+
+
+def cmd_graph_scope(args: argparse.Namespace) -> int:
+    try:
+        return _print_graph_payload(graph_scope(_graph_config(args), questions=args.question, source_refs=args.source, graph_id=args.graph_id, dry_run=args.dry_run))
+    except (QAConfigError, GraphValidationError) as exc:
+        return _error_payload(exc)
+
+
+def cmd_graph_representation(args: argparse.Namespace) -> int:
+    try:
+        return _print_graph_payload(graph_representation(_graph_config(args), mode=args.mode, dry_run=args.dry_run))
+    except (QAConfigError, GraphValidationError) as exc:
+        return _error_payload(exc)
+
+
+def cmd_graph_ontology(args: argparse.Namespace) -> int:
+    try:
+        return _print_graph_payload(graph_ontology(_graph_config(args), ontology_path=args.ontology, dry_run=args.dry_run))
+    except (QAConfigError, GraphValidationError) as exc:
+        return _error_payload(exc)
+
+
+def cmd_graph_extract(args: argparse.Namespace) -> int:
+    try:
+        return _print_graph_payload(graph_extract(_graph_config(args), input_paths=args.input, kind=args.kind, ontology_path=args.ontology, dry_run=args.dry_run))
+    except (QAConfigError, GraphValidationError) as exc:
+        return _error_payload(exc)
+
+
+def cmd_graph_quality_gate(args: argparse.Namespace) -> int:
+    try:
+        return _print_graph_payload(graph_quality_gate(_graph_config(args), gold_path=args.gold, threshold=args.threshold))
+    except (QAConfigError, GraphValidationError) as exc:
+        return _error_payload(exc)
+
+
+def cmd_graph_fuse(args: argparse.Namespace) -> int:
+    try:
+        return _print_graph_payload(graph_fuse(_graph_config(args), confirm=args.confirm, dry_run=args.dry_run))
+    except (QAConfigError, GraphValidationError) as exc:
+        return _error_payload(exc)
+
+
+def cmd_graph_evaluate(args: argparse.Namespace) -> int:
+    try:
+        return _print_graph_payload(graph_evaluate(_graph_config(args), gold_path=args.gold))
+    except (QAConfigError, GraphValidationError) as exc:
+        return _error_payload(exc)
+
+
+def cmd_graph_serve(args: argparse.Namespace) -> int:
+    try:
+        return _print_graph_payload(graph_serve(_graph_config(args), entity=args.entity, hops=args.hops))
+    except (QAConfigError, GraphValidationError) as exc:
+        return _error_payload(exc)
+
+
+def cmd_graph_run(args: argparse.Namespace) -> int:
+    try:
+        return _print_graph_payload(
+            run_graph_task_graph(
+                _graph_config(args),
+                questions=args.question,
+                source_paths=args.input,
+                from_qa=args.from_qa,
+                case_ids=args.case_id,
+                run_path=args.run_path,
+                review_path=args.review,
+                ontology_path=args.ontology,
+                gold_path=args.gold,
+                entity=args.entity,
+                confirm_fusion=args.confirm_fusion,
+                resume=args.resume,
+                repair_node=args.repair_node,
+                dry_run=args.dry_run,
+                max_workers=args.max_workers,
+            )
+        )
+    except (QAConfigError, GraphValidationError) as exc:
+        return _error_payload(exc)
+
+
 def cmd_issues_report(args: argparse.Namespace) -> int:
     try:
         config = load_project_config(Path(args.root), args.config)
@@ -990,6 +1184,43 @@ def cmd_cases_generate(args: argparse.Namespace) -> int:
     except (QAConfigError, CaseGenerationError, IssueSyncError, RedmineError) as exc:
         return _error_payload(exc)
     return print_json(payload, exit_code=0 if payload.get("status") != "error" else 2)
+
+
+def cmd_review_pr(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        snapshot_path = args.pr_json or pr_snapshot_path(config, args.repo, args.pr_number)
+        payload = review_pr(
+            config,
+            repo=args.repo,
+            pr_number=args.pr_number,
+            pr_json=args.pr_json,
+            checkout=args.checkout,
+            confirm=args.confirm,
+            dry_run=args.dry_run,
+            timeout_seconds=args.timeout,
+            comprehensive=not getattr(args, "diff_only", False),
+            prepare_dependencies=not getattr(args, "no_prepare_dependencies", False),
+            confirm_discovery=getattr(args, "confirm_discovery", False),
+        )
+        payload["snapshot_path"] = _relative_or_str(Path(snapshot_path), config.root)
+    except (QAConfigError, ReviewError) as exc:
+        return _error_payload(exc)
+    status = str(payload.get("status") or "")
+    return print_json(payload, exit_code=0 if status == "ok" else 4)
+
+
+def cmd_review_apply(args: argparse.Namespace) -> int:
+    try:
+        config = load_project_config(Path(args.root), args.config)
+        payload = complete_gitea_review_apply(
+            config,
+            request_json=args.request_json,
+            result_json=args.result_json,
+        )
+    except (QAConfigError, ReviewError) as exc:
+        return _error_payload(exc)
+    return print_json(payload, exit_code=0 if payload.get("status") in {"ok", "duplicate"} else 2)
 
 
 def cmd_cases_review(args: argparse.Namespace) -> int:
@@ -1274,8 +1505,34 @@ def cmd_close_loop_run_once(args: argparse.Namespace) -> int:
         config = load_project_config(Path(args.root), args.config)
     except QAConfigError as exc:
         return _error_payload(exc)
+    graph_flags = ("task_graph", "resume_task_graph", "repair_node", "confirm_publish")
+    if getattr(args, "legacy", False) and any(getattr(args, name, False) for name in graph_flags):
+        return print_json(
+            {
+                "status": "BLOCK",
+                "error": "legacy_task_graph_flags_conflict",
+                "message": "--legacy cannot be combined with Task Graph execution flags.",
+            },
+            exit_code=2,
+        )
+    use_task_graph = not getattr(args, "legacy", False)
+    if use_task_graph:
+        result = run_close_loop_task_graph(
+            config,
+            case_id=args.case_id,
+            dry_run=args.dry_run,
+            resume=getattr(args, "resume_task_graph", False),
+            repair_node=getattr(args, "repair_node", None),
+            confirm_publish=getattr(args, "confirm_publish", False),
+            max_workers=getattr(args, "max_workers", 4),
+        )
+        payload = result.payload
+        exit_code = 0 if result.status in {"PASS", "FAIL"} else 2
+        if args.fail_on_test_failure and payload.get("test_outcome") == "FAIL":
+            exit_code = 1
+        return print_json(payload, exit_code=exit_code)
     result = run_close_loop(config, case_id=args.case_id, dry_run=args.dry_run)
-    payload = result.payload
+    payload = {**result.payload, "execution_mode": "legacy"}
     if not args.dry_run and result.status in {"PASS", "FAIL", "BLOCK"}:
         payload = _with_auto_wiki(config, payload, event="test_result", latest_run=payload)
     exit_code = 0 if result.status in {"PASS", "FAIL"} else 2
@@ -1296,6 +1553,7 @@ def cmd_close_loop_heartbeat(args: argparse.Namespace) -> int:
             dry_run=args.dry_run,
             run_existing_if_no_growth=args.run_existing_if_no_growth,
             fail_on_test_failure=args.fail_on_test_failure,
+            legacy=args.legacy,
         )
     except QAConfigError as exc:
         return _error_payload(exc)
@@ -1455,7 +1713,7 @@ def _error_payload(exc: Exception) -> int:
         if exc.path:
             payload["path"] = exc.path
         return print_json(payload, exit_code=3)
-    if isinstance(exc, (IssueSyncError, GiteaError, CaseGenerationError, PublishError, FixIssueError, WikiPublishError, RedmineError, SubagentConfigError)):
+    if isinstance(exc, (IssueSyncError, GiteaError, CaseGenerationError, PublishError, FixIssueError, WikiPublishError, RedmineError, SubagentConfigError, ReviewError, TUIProbeError)):
         return print_json({"status": "error", "error": type(exc).__name__, "message": str(exc)}, exit_code=2)
     return print_json({"status": "error", "error": type(exc).__name__, "message": str(exc)}, exit_code=1)
 
@@ -1470,11 +1728,28 @@ def _relative_or_str(path: Path, root: Path) -> str:
 PUBLIC_COMMANDS = [
     "/quality-pilot help",
     "/quality-pilot setup",
+    "/quality-pilot setup --confirm-discovery",
     "/quality-pilot doctor",
     "/quality-pilot doctor --fix",
     "/quality-pilot environment status",
+    "/quality-pilot environment preflight",
+    "/quality-pilot environment tui-probe",
     "/quality-pilot environment configure --mode <local|remote>",
     "/quality-pilot audit state",
+    "/quality-pilot graph tutor",
+    "/quality-pilot graph status",
+    "/quality-pilot graph scope --question <question>",
+    "/quality-pilot graph representation",
+    "/quality-pilot graph ontology",
+    "/quality-pilot graph extract --input <candidate.json>",
+    "/quality-pilot graph quality-gate --gold <labels.json>",
+    "/quality-pilot graph fuse",
+    "/quality-pilot graph evaluate --gold <labels.json>",
+    "/quality-pilot graph serve --entity <id-or-name>",
+    "/quality-pilot graph run",
+    "/quality-pilot review pr --repo <owner/repo> --pr-number <number>",
+    "/quality-pilot review pr --repo <owner/repo> --pr-number <number> --confirm-discovery",
+    "/quality-pilot review apply",
     "/quality-pilot issues sync",
     "/quality-pilot issues sync --redmine-issues <redmine_issue_id> [<redmine_issue_id> ...]",
     "/quality-pilot issues status",
@@ -1500,7 +1775,9 @@ PUBLIC_COMMANDS = [
     "/quality-pilot publish wiki apply",
     "/quality-pilot close-loop status",
     "/quality-pilot close-loop run-once",
+    "/quality-pilot close-loop run-once --legacy",
     "/quality-pilot close-loop heartbeat",
+    "/quality-pilot close-loop heartbeat --legacy",
     "/quality-pilot report status",
     "/quality-pilot report json",
     "/quality-pilot tracker plan-write",
@@ -1528,6 +1805,8 @@ def cmd_help(args: argparse.Namespace) -> int:
                     "3. /quality-pilot environment configure --mode <local|remote>",
                     "4. /quality-pilot doctor",
                     "5. /quality-pilot issues sync",
+                    "5a. /quality-pilot review pr --repo <owner/repo> --pr-number <number>",
+                    "5b. /quality-pilot graph tutor 或 /quality-pilot graph status",
                     "6. /quality-pilot cases generate --init",
                     "7. /quality-pilot cases validate",
                     "8. /quality-pilot cases run",
@@ -1552,6 +1831,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     setup = sub.add_parser("setup", help="Initialize AI Quality Pilot project files for the current product repository")
     _add_root_workspace_force(setup)
+    setup.add_argument("--confirm-discovery", action="store_true", help="Persist the safe discovered product/browser contract after one explicit user confirmation")
     setup.set_defaults(func=cmd_setup)
 
     doctor = sub.add_parser("doctor", help="Check install, config, paths, and secret references")
@@ -1564,6 +1844,22 @@ def build_parser() -> argparse.ArgumentParser:
     environment_status_cmd = environment_sub.add_parser("status", help="Show redacted environment readiness and blockers")
     _add_root_config(environment_status_cmd)
     environment_status_cmd.set_defaults(func=cmd_environment_status)
+    environment_preflight_cmd = environment_sub.add_parser("preflight", help="Validate a configured remote target over SSH without storing secrets")
+    _add_root_config(environment_preflight_cmd)
+    environment_preflight_cmd.add_argument("--expected-head-sha", default=None, help="Expected remote source commit; normally supplied by pinned PR review")
+    environment_preflight_cmd.set_defaults(func=cmd_environment_preflight)
+    environment_probe_cmd = environment_sub.add_parser("tui-probe", help="Run a bounded PTY transcript probe for a confirmed product TUI")
+    _add_root_config(environment_probe_cmd)
+    environment_probe_cmd.add_argument("--entrypoint", default=None)
+    environment_probe_cmd.add_argument("--mode", choices=["local", "remote"], default=None, help="Compatibility display; mode comes from configured environment profile")
+    environment_probe_cmd.add_argument("--duration", type=float, default=5.0)
+    environment_probe_cmd.add_argument("--expect", action="append", default=None)
+    environment_probe_cmd.add_argument("--key", action="append", default=None)
+    environment_probe_cmd.add_argument("--width", type=int, default=120)
+    environment_probe_cmd.add_argument("--height", type=int, default=32)
+    environment_probe_cmd.add_argument("--confirm", action="store_true")
+    environment_probe_cmd.add_argument("--dry-run", action="store_true")
+    environment_probe_cmd.set_defaults(func=cmd_environment_tui_probe)
     environment_configure_cmd = environment_sub.add_parser("configure", help="Persist the grill-me-confirmed execution environment")
     _add_root_config(environment_configure_cmd)
     environment_configure_cmd.add_argument("--mode", required=True, choices=["local", "remote"], help="Execution target: local checkout or remote test target")
@@ -1573,6 +1869,11 @@ def build_parser() -> argparse.ArgumentParser:
     environment_configure_cmd.add_argument("--credential-env", action="append", default=None, help="Credential env var name; repeat for multiple names")
     environment_configure_cmd.add_argument("--side-effect-boundary", default=None, help="Explicit safe side-effect boundary")
     environment_configure_cmd.add_argument("--no-confirm", action="store_true", help="Keep the profile unconfirmed until the user finishes preparation")
+    environment_configure_cmd.add_argument("--ssh-host", default=None, help="Remote SSH host alias; value is not written as a credential")
+    environment_configure_cmd.add_argument("--remote-repo", default=None)
+    environment_configure_cmd.add_argument("--remote-python", default=None)
+    environment_configure_cmd.add_argument("--remote-fixture", action="append", default=None)
+    environment_configure_cmd.add_argument("--auth-method", choices=["ssh_agent", "env_credentials"], default=None)
     environment_configure_cmd.set_defaults(func=cmd_environment_configure)
 
     audit = sub.add_parser("audit", help="Audit local overlay state consistency")
@@ -1619,6 +1920,96 @@ def build_parser() -> argparse.ArgumentParser:
     issues_fix.add_argument("--push-pr", action="store_true", help="Push branch and create a PR after issue fix checks pass")
     issues_fix.set_defaults(func=cmd_issues_fix)
 
+    review = sub.add_parser("review", help="Review any readable Gitea Pull Request locally")
+    review_sub = review.add_subparsers(dest="review_command", required=True, parser_class=QualityPilotArgumentParser)
+    review_pr_cmd = review_sub.add_parser("pr", help="Review a pinned branch/PR, run regression and generated QA cases, and prepare a gated reply")
+    _add_root_config(review_pr_cmd)
+    review_pr_cmd.add_argument("--repo", required=True, help="Gitea owner/repository")
+    review_pr_cmd.add_argument("--pr-number", required=True, type=int)
+    review_pr_cmd.add_argument("--pr-json", default=None, help="Local Hermes Gitea PR snapshot JSON")
+    review_pr_cmd.add_argument("--checkout", default=None, help="Git checkout used as fetch source; defaults to project root")
+    review_pr_cmd.add_argument("--confirm", action="store_true", help="Confirm the displayed advisory COMMENT preview and write a gated Gitea review request; never approves")
+    review_pr_cmd.add_argument("--dry-run", action="store_true")
+    review_pr_cmd.add_argument("--timeout", type=int, default=120)
+    review_pr_cmd.add_argument("--diff-only", action="store_true", help="Skip case generation/run and perform only deterministic diff review plus regression tests")
+    review_pr_cmd.add_argument("--no-prepare-dependencies", action="store_true", help="Do not install declared local test dependencies or Playwright browser")
+    review_pr_cmd.add_argument("--confirm-discovery", action="store_true", help="Confirm and persist the discovered product/browser execution contract")
+    review_pr_cmd.set_defaults(func=cmd_review_pr)
+    review_apply_cmd = review_sub.add_parser("apply", help="Reconcile a Hermes Gitea MCP review result without issuing a second write")
+    _add_root_config(review_apply_cmd)
+    review_apply_cmd.add_argument("--request-json", default=None)
+    review_apply_cmd.add_argument("--result-json", default=None)
+    review_apply_cmd.set_defaults(func=cmd_review_apply)
+
+    graph = sub.add_parser("graph", help="Run modular Knowledge Graph and Task Graph engineering workflows")
+    graph_sub = graph.add_subparsers(dest="graph_command", required=True, parser_class=QualityPilotArgumentParser)
+    graph_status_cmd = graph_sub.add_parser("status", help="Show graph scope, ontology, SQLite store, stages, and provenance counts")
+    _add_root_config(graph_status_cmd)
+    graph_status_cmd.set_defaults(func=cmd_graph_status)
+    graph_tutor_cmd = graph_sub.add_parser("tutor", help="Teach the nine Graph Engineering stages one module at a time")
+    _add_root_config(graph_tutor_cmd)
+    graph_tutor_cmd.set_defaults(func=cmd_graph_tutor)
+    graph_scope_cmd = graph_sub.add_parser("scope", help="Record competency questions and source authority")
+    _add_root_config(graph_scope_cmd)
+    graph_scope_cmd.add_argument("--question", action="append", default=[])
+    graph_scope_cmd.add_argument("--source", action="append", default=[])
+    graph_scope_cmd.add_argument("--graph-id", default="quality-pilot-knowledge")
+    graph_scope_cmd.add_argument("--dry-run", action="store_true")
+    graph_scope_cmd.set_defaults(func=cmd_graph_scope)
+    graph_representation_cmd = graph_sub.add_parser("representation", help="Choose SQLite canonical storage and JSON portable export")
+    _add_root_config(graph_representation_cmd)
+    graph_representation_cmd.add_argument("--mode", choices=["sqlite_json", "sqlite", "json"], default="sqlite_json")
+    graph_representation_cmd.add_argument("--dry-run", action="store_true")
+    graph_representation_cmd.set_defaults(func=cmd_graph_representation)
+    graph_ontology_cmd = graph_sub.add_parser("ontology", help="Validate and persist a domain/range ontology")
+    _add_root_config(graph_ontology_cmd)
+    graph_ontology_cmd.add_argument("--ontology", default=None)
+    graph_ontology_cmd.add_argument("--dry-run", action="store_true")
+    graph_ontology_cmd.set_defaults(func=cmd_graph_ontology)
+    graph_extract_cmd = graph_sub.add_parser("extract", help="Validate provenance-backed entity/relation/event candidates")
+    _add_root_config(graph_extract_cmd)
+    graph_extract_cmd.add_argument("--input", action="append", default=[])
+    graph_extract_cmd.add_argument("--kind", choices=["all", "entities", "relations", "events"], default="all")
+    graph_extract_cmd.add_argument("--ontology", default=None)
+    graph_extract_cmd.add_argument("--dry-run", action="store_true")
+    graph_extract_cmd.set_defaults(func=cmd_graph_extract)
+    graph_gate_cmd = graph_sub.add_parser("quality-gate", help="Run structural/provenance checks and optional adjudicated metrics")
+    _add_root_config(graph_gate_cmd)
+    graph_gate_cmd.add_argument("--gold", default=None, help="Adjudicated JSON labels for precision/recall")
+    graph_gate_cmd.add_argument("--threshold", type=float, default=0.9)
+    graph_gate_cmd.set_defaults(func=cmd_graph_quality_gate)
+    graph_fuse_cmd = graph_sub.add_parser("fuse", help="Plan or apply reversible deterministic entity fusion")
+    _add_root_config(graph_fuse_cmd)
+    graph_fuse_cmd.add_argument("--confirm", action="store_true", help="Apply the reviewed fusion plan")
+    graph_fuse_cmd.add_argument("--dry-run", action="store_true")
+    graph_fuse_cmd.set_defaults(func=cmd_graph_fuse)
+    graph_evaluate_cmd = graph_sub.add_parser("evaluate", help="Evaluate graph claims against an adjudicated gold set")
+    _add_root_config(graph_evaluate_cmd)
+    graph_evaluate_cmd.add_argument("--gold", default=None)
+    graph_evaluate_cmd.set_defaults(func=cmd_graph_evaluate)
+    graph_serve_cmd = graph_sub.add_parser("serve", help="Read-only provenance-preserving local subgraph serving")
+    _add_root_config(graph_serve_cmd)
+    graph_serve_cmd.add_argument("--entity", required=True)
+    graph_serve_cmd.add_argument("--hops", type=int, default=1)
+    graph_serve_cmd.set_defaults(func=cmd_graph_serve)
+    graph_run_cmd = graph_sub.add_parser("run", help="Execute the nine-stage graph workflow through Task Graph checkpoints")
+    _add_root_config(graph_run_cmd)
+    graph_run_cmd.add_argument("--question", action="append", default=[])
+    graph_run_cmd.add_argument("--input", action="append", default=[], help="External candidate JSON/YAML adapter input")
+    graph_run_cmd.add_argument("--from-qa", action="store_true", help="Project existing cases/runs/evidence into graph candidates")
+    graph_run_cmd.add_argument("--case-id", action="append", default=[], help="Limit --from-qa to one or more existing case IDs")
+    graph_run_cmd.add_argument("--run-path", default=None, help="Existing latest-run JSON path for --from-qa")
+    graph_run_cmd.add_argument("--review", default=None, help="Pinned local PR review report for --from-qa")
+    graph_run_cmd.add_argument("--ontology", default=None)
+    graph_run_cmd.add_argument("--gold", default=None)
+    graph_run_cmd.add_argument("--entity", default=None)
+    graph_run_cmd.add_argument("--confirm-fusion", action="store_true")
+    graph_run_cmd.add_argument("--resume", action="store_true")
+    graph_run_cmd.add_argument("--repair-node", default=None)
+    graph_run_cmd.add_argument("--dry-run", action="store_true")
+    graph_run_cmd.add_argument("--max-workers", type=int, default=4)
+    graph_run_cmd.set_defaults(func=cmd_graph_run)
+
     cases = sub.add_parser("cases", help="Generate, review, and validate case contracts")
     cases_sub = cases.add_subparsers(dest="cases_command", required=True, parser_class=QualityPilotArgumentParser)
     cases_generate = cases_sub.add_parser("generate", help="Generate case contracts; requires --init, --growing, or --redmine-issues")
@@ -1654,11 +2045,17 @@ def build_parser() -> argparse.ArgumentParser:
     close_status = close_sub.add_parser("status", help="Show pipeline order and latest run")
     _add_root_config(close_status)
     close_status.set_defaults(func=cmd_close_loop_status)
-    run_once = close_sub.add_parser("run-once", help="Run the fixed deterministic pipeline once")
+    run_once = close_sub.add_parser("run-once", help="Run the deterministic close-loop once")
     _add_root_config(run_once)
     run_once.add_argument("--case-id", default=None)
     run_once.add_argument("--dry-run", action="store_true")
     run_once.add_argument("--fail-on-test-failure", action="store_true", help="Return exit code 1 when QA outcome is FAIL")
+    run_once.add_argument("--task-graph", action="store_true", help="Compatibility flag; Task Graph is now the default execution path")
+    run_once.add_argument("--legacy", action="store_true", help="Use the legacy fixed-sequence pipeline as an explicit fallback")
+    run_once.add_argument("--resume-task-graph", action="store_true", help="Resume the latest Task Graph checkpoint without rerunning passed nodes")
+    run_once.add_argument("--repair-node", default=None, help="Invalidate one Task Graph node and its descendants before resuming")
+    run_once.add_argument("--confirm-publish", action="store_true", help="Explicitly approve the local publication node; no remote write is performed")
+    run_once.add_argument("--max-workers", type=int, default=4, help="Maximum independent Task Graph workers (default: 4, hard limit: 16)")
     run_once.set_defaults(func=cmd_close_loop_run_once)
     heartbeat = close_sub.add_parser("heartbeat", help="Run sensor-driven close-loop growth and execute only new work")
     _add_root_config(heartbeat)
@@ -1668,6 +2065,7 @@ def build_parser() -> argparse.ArgumentParser:
     heartbeat.add_argument("--dry-run", action="store_true")
     heartbeat.add_argument("--fail-on-test-failure", action="store_true", help="Return exit code 1 when QA outcome is FAIL")
     heartbeat.add_argument("--run-existing-if-no-growth", action="store_true", help="Run existing cases when sensors produce no new growth")
+    heartbeat.add_argument("--legacy", action="store_true", help="Use the legacy fixed-sequence runner instead of Task Graph")
     heartbeat.set_defaults(func=cmd_close_loop_heartbeat)
 
     report = sub.add_parser("report", help="Report commands")
@@ -1834,6 +2232,19 @@ def _positional_args(argv: list[str]) -> list[str]:
         "--fixture",
         "--credential-env",
         "--side-effect-boundary",
+        "--repo",
+        "--pr-number",
+        "--pr-json",
+        "--checkout",
+        "--timeout",
+        "--limit",
+        "--duration",
+        "--expect",
+        "--key",
+        "--width",
+        "--height",
+        "--request-json",
+        "--result-json",
     }
     for arg in argv:
         if skip_next:

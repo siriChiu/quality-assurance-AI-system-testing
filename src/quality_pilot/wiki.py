@@ -275,40 +275,17 @@ def auto_sync_wiki(
             gitea_write_result=gitea_write_result,
         )
         payload = _wiki_payload_from_plan(plan, status="planned")
-        if plan.get("status") == "ready":
-            applied = apply_wiki_plan(config)
-            applied_status = str(applied.get("status") or "")
-            if applied_status == "ok":
-                auto_status = "applied"
-                reason = None
-            elif applied_status == "needs_mcp_apply":
-                auto_status = "needs_mcp_apply"
-                reason = "hermes_gitea_mcp_apply_required"
-            else:
-                auto_status = "blocked"
-                reason = applied.get("error") or ",".join(applied.get("blocked_reasons", [])) or "wiki_write_blocked"
-            payload["auto_sync"] = {
-                "status": auto_status,
-                "event": event,
-                "remote_apply": applied.get("status") == "ok",
-                "reason": reason,
-            }
-            payload["apply_result_path"] = applied.get("apply_result_path") or payload.get("apply_result_path")
-            if applied.get("mcp_write_request_path"):
-                payload["mcp_write_request_path"] = applied.get("mcp_write_request_path")
-            if applied.get("mcp_write_result_path"):
-                payload["mcp_write_result_path"] = applied.get("mcp_write_result_path")
-            if applied.get("mcp_write_ledger_path"):
-                payload["mcp_write_ledger_path"] = applied.get("mcp_write_ledger_path")
-            payload["blocked_by_gate"] = applied.get("blocked_by_gate", payload.get("blocked_by_gate"))
-            payload["next_action"] = "/quality-pilot publish wiki status"
-            return payload
+        # Automatic synchronization is deliberately local-only.  The plan and
+        # report may refresh after generation/run events, but no remote Wiki
+        # request is created and no remote write is attempted here.
         payload["auto_sync"] = {
-            "status": "blocked",
+            "status": "local_only",
             "event": event,
             "remote_apply": False,
-            "reason": ",".join(plan.get("blocked_reasons", [])) or "wiki_write_blocked",
+            "remote_request_created": False,
+            "reason": "explicit_publish_wiki_apply_required",
         }
+        payload["next_action"] = "/quality-pilot publish wiki apply"
         return payload
     except Exception as exc:  # Keep Wiki sync from hiding the primary command result.
         return {

@@ -32,6 +32,43 @@ set -euo pipefail
 python3 --version
 """
 
+GRAPH_ONTOLOGY_TEMPLATE = """# Optional Knowledge Graph ontology starter.
+# Keep source systems authoritative; replace this example with product-owned types.
+schema: quality-pilot.graph-ontology.v1
+ontology_id: quality-pilot-qa
+version: "1"
+competency_questions:
+  - "Which test run produced evidence for this case?"
+entities:
+  PullRequest:
+    description: "A source-controlled change proposal."
+    attributes: [repo, number, head_sha]
+  TestCase:
+    description: "A versioned executable QA contract."
+    attributes: [case_id, feature]
+  TestRun:
+    description: "One execution of a test case."
+    attributes: [run_id, outcome]
+  Evidence:
+    description: "An artifact produced by a run."
+    attributes: [path, artifact_type]
+relations:
+  - name: HAS_CASE
+    domain: PullRequest
+    range: TestCase
+  - name: PRODUCED_RUN
+    domain: TestCase
+    range: TestRun
+  - name: PRODUCED_EVIDENCE
+    domain: TestRun
+    range: Evidence
+events:
+  - name: TestExecution
+    trigger: "executed"
+    arguments: [case, run]
+"""
+
+
 WIKI_CATEGORIES_RULE = """# AI Quality Pilot Wiki category seed
 # Edit this file in the host project to map cases into your product domains.
 fallback: Uncategorized

@@ -152,6 +152,34 @@ def build_readiness(
     }
 
 
+def build_setup_readiness(
+    *,
+    issue_sync: dict[str, Any] | None = None,
+    wiki_sync: dict[str, Any] | None = None,
+    environment_profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return readiness for local setup, without conflating remote sync health.
+
+    ``setup`` creates a host-owned local overlay. A missing Gitea snapshot is a
+    remote-sync blocker, but it must not make successful local initialization
+    look like a failed setup. Keep the remote result visible in a separate
+    field so operators can act on it without turning it into a setup gate.
+    """
+    remote = build_readiness(issue_sync=issue_sync, wiki_sync=wiki_sync)
+    environment = environment_profile or {}
+    return {
+        "mode": "SETUP_READY",
+        "scope": "setup",
+        "issue_sync_ready": bool(remote.get("issue_sync_ready")),
+        "remote_write_ready": False,
+        "environment_ready": bool(environment.get("ready")),
+        "environment_blockers": list(environment.get("blockers") or []),
+        "blockers": [],
+        "remote_sync_mode": remote.get("mode"),
+        "remote_sync_blockers": list(remote.get("blockers") or []),
+    }
+
+
 def attach_readiness(payload: dict[str, Any], readiness: dict[str, Any] | None) -> dict[str, Any]:
     if not readiness:
         return payload
@@ -420,7 +448,7 @@ def _first_recovered_case(payload: dict[str, Any]) -> str | None:
 def _mcp_not_ready(payload: dict[str, Any]) -> bool:
     readiness = payload.get("readiness") if isinstance(payload.get("readiness"), dict) else {}
     mode = str(readiness.get("mode") or "").upper()
-    if mode == "WRITE_READY":
+    if mode in {"WRITE_READY", "SETUP_READY"}:
         return False
     if mode in {"WRITE_BLOCKED_MCP", "SYNC_BLOCKED"}:
         return True
@@ -429,7 +457,7 @@ def _mcp_not_ready(payload: dict[str, Any]) -> bool:
     if any(_is_mcp_readiness_blocker(item) for item in readiness_blockers):
         return True
 
-    for key in ("hermes_mcp", "issue_sync", "redmine_sync", "wiki_sync", "remote"):
+    for key in ("hermes_mcp", "issue_sync", "redmine_sync", "wiki_sync", "remote_sync_readiness", "remote"):
         section = payload.get(key)
         if not isinstance(section, dict):
             continue

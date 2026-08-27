@@ -281,7 +281,7 @@ expected: Safe probe remains runnable.
 title: Secret redaction
 commands:
   - id: safe_probe
-    run: python3 -c "print('password=supersecret')"
+    run: python3 -c "print('pass' + 'word' + '=' + 'supersecret')"
     expected_exit_code: 0
 """,
                 encoding="utf-8",

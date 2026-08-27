@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import parse_qs, urlsplit
 
 from . import config as config_module
@@ -23,10 +25,102 @@ SUBAGENT_TASKS = [
 ]
 USER_OWNED_PROFILE_FIELDS = ["endpoint", "model"]
 OPTIONAL_PROFILE_FIELDS = ["api_key_env", "api_base"]
+SUBAGENT_RECORD_GATE_SCHEMA = "quality-pilot.subagent-record-gate.v1"
 
 
 class SubagentConfigError(RuntimeError):
     pass
+
+
+def validate_mcp_subagent_results(
+    payload: Mapping[str, Any] | dict[str, Any],
+    requested_providers: list[str] | tuple[str, ...],
+    *,
+    excluded_providers: list[str] | tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Validate provider chat-record evidence without making a QA decision.
+
+    The MCP council is candidate-only. This helper is the Quality Pilot-side
+    handoff gate: an answer may be retained as ``candidate_unverified``, but it
+    cannot be treated as a verified consultation unless the driver reload proof,
+    prompt/answer matches, and both stable hashes are present. Excluded providers
+    are explicit scope, not implicit success.
+    """
+    requested = [str(provider) for provider in requested_providers if str(provider)]
+    excluded = {str(provider) for provider in excluded_providers if str(provider)}
+    active = [provider for provider in requested if provider not in excluded]
+    raw_results = payload.get("provider_results") if isinstance(payload, Mapping) else {}
+    if not isinstance(raw_results, Mapping):
+        raw_results = {}
+    providers: dict[str, Any] = {}
+    missing: list[str] = []
+    for provider in active:
+        raw = raw_results.get(provider)
+        if not isinstance(raw, Mapping):
+            missing.append(provider)
+            providers[provider] = {
+                "status": "candidate_unverified",
+                "reasons": ["provider_result_missing"],
+            }
+            continue
+        record = raw.get("chat_record") if isinstance(raw.get("chat_record"), Mapping) else {}
+        checks = {
+            "chat_record_verified": raw.get("chat_record_verified") is True,
+            "reloaded": record.get("reloaded") is True,
+            "prompt_match": record.get("prompt_match") is True,
+            "answer_match": record.get("answer_match") is True,
+            "prompt_hash": bool(str(record.get("prompt_sha256") or "").strip()),
+            "answer_hash": bool(str(record.get("answer_sha256") or "").strip()),
+        }
+        reasons = [name for name, passed in checks.items() if not passed]
+        item: dict[str, Any] = {
+            "status": "VERIFIED" if not reasons else "candidate_unverified",
+            "checks": checks,
+            "reasons": reasons,
+        }
+        if not reasons:
+            receipt = {
+                "schema": SUBAGENT_RECORD_GATE_SCHEMA,
+                "provider": provider,
+                "chat_url_sha256": hashlib.sha256(
+                    str(record.get("chat_url") or raw.get("chat_url") or "").encode("utf-8")
+                ).hexdigest(),
+                "prompt_sha256": str(record["prompt_sha256"]),
+                "answer_sha256": str(record["answer_sha256"]),
+                "reloaded": True,
+                "prompt_match": True,
+                "answer_match": True,
+                "attestation_strength": "deterministic_receipt_hash",
+            }
+            receipt["receipt_hash"] = hashlib.sha256(
+                json.dumps(receipt, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            item["receipt"] = receipt
+        providers[provider] = item
+
+    if not active:
+        gate_status = "BLOCK"
+        reason = "no_active_providers"
+    elif missing:
+        gate_status = "BLOCK"
+        reason = "provider_result_missing"
+    elif any(item.get("status") != "VERIFIED" for item in providers.values()):
+        gate_status = "BLOCK"
+        reason = "candidate_unverified"
+    else:
+        gate_status = "VERIFIED"
+        reason = None
+    return {
+        "schema": SUBAGENT_RECORD_GATE_SCHEMA,
+        "record_gate_status": gate_status,
+        "reason": reason,
+        "candidate_only": True,
+        "requested_providers": requested,
+        "active_providers": active,
+        "excluded_providers": sorted(excluded),
+        "missing_providers": missing,
+        "providers": providers,
+    }
 
 
 def default_subagent_config() -> dict[str, Any]:

@@ -642,7 +642,7 @@ Acceptance:
 | Subagent task results are persisted | missing task result store | Not ready |
 | Independent agent module state exists | no module result schema/session | Not ready |
 | Issues report agent exists | `issues report`, `reports/issues-report.md`, `state/issues-report.json`, evidence update lifecycle test | Partial |
-| Full close loop one-command flow exists | `close-loop run-once` is pipeline-like but not flowchart-module aware | Not ready |
+| Full close loop one-command flow exists | `close-loop run-once` now defaults to Task Graph with context/contracts, bounded workers, verifier, checkpoint, repair, and human gate; legacy fixed sequence remains `--legacy` | Partial; remaining work is flowchart-level module handoffs, retry supervision, and remote reconciliation |
 | SWQA bug-pattern PASS gate exists | structured assertions, partial-only HOLD, and four-axis truth are implemented; full issue-level risk/pattern gate is pending | Partial |
 | Docs/install/config conformance is regression-tested | docs are aligned manually; drift tests pending | Not ready |
 
