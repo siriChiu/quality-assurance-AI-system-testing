@@ -224,6 +224,12 @@ A `body`/`button` visibility probe is deliberately reported as `HOLD`, not
 produce confirmed-candidate semantic locators such as role-based tabs,
 tabpanels, headings, and labels. Mutating actions such as Run, fill, and press
 remain candidate-only until the user confirms the product-specific workflow.
+The confirmed Browser step vocabulary also includes `expect_value`,
+`expect_attribute`, `expect_focused`, `expect_checked`, `expect_enabled`,
+`expect_disabled`, and `expect_dialog`. Dialogs are captured and dismissed by
+the adapter, then verified by an explicit `expect_dialog` step; this permits a
+real client-side validation test while the interaction/network evidence proves
+whether a settings POST occurred.
 
 `doctor` exposes `runtime_profile.repo_analysis` before asking anything. Clarify prompts are bullet-listed and ask only for details the repo analysis could not infer, such as missing runner path, credential env names, target resources, fixture/config paths, or side-effect boundaries for non-parser tests.
 

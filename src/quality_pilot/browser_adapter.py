@@ -115,6 +115,7 @@ def run_browser_test(
     current_step: dict[str, Any] | None = None
     console_events: list[dict[str, Any]] = []
     network_events: list[dict[str, Any]] = []
+    dialog_events: list[dict[str, Any]] = []
     dom_path = evidence_dir / "dom.html"
     diagnostics_path = evidence_dir / "diagnostics.json"
     started = time.monotonic()
@@ -192,6 +193,22 @@ def run_browser_test(
             page.on("console", lambda message: console_events.append({"type": str(getattr(message, "type", "")), "text": _redact_url(str(getattr(message, "text", "")))}))
             page.on("request", lambda request: network_events.append({"kind": "request", "url": _redact_url(str(getattr(request, "url", ""))), "method": str(getattr(request, "method", ""))}))
             page.on("response", lambda response: network_events.append({"kind": "response", "url": _redact_url(str(getattr(response, "url", ""))), "status": int(getattr(response, "status", 0) or 0)}))
+
+            def capture_dialog(dialog: Any) -> None:
+                message, _ = redact_text(str(getattr(dialog, "message", "") or ""), path="browser.dialog.message")
+                event = {"type": str(getattr(dialog, "type", "")), "message": message}
+                try:
+                    # Product validation dialogs must be observed without
+                    # blocking the Playwright event loop.  The later
+                    # expect_dialog step verifies the actual message.
+                    dialog.accept()
+                    event["action"] = "accept"
+                except Exception as exc:
+                    event["action"] = "failed"
+                    event["error"] = type(exc).__name__
+                dialog_events.append(event)
+
+            page.on("dialog", capture_dialog)
             if not url and url_discovery == "stdout":
                 deadline = time.monotonic() + max(1, timeout_ms) / 1000
                 discovered = None
@@ -272,6 +289,77 @@ def run_browser_test(
                     expected = str(step.get("expected") or "")
                     if expected not in actual:
                         raise AssertionError(f"browser_text_mismatch:{selector}")
+                    item["actual"] = actual[:1000]
+                    item["expected"] = expected
+                    positive_assertions += 1
+                    state_assertions += 1
+                elif action == "expect_value":
+                    locator = _step_locator(page, step)
+                    if locator.count() != 1:
+                        raise AssertionError(f"browser_value_locator_count:{selector}")
+                    actual = locator.input_value(timeout=timeout)
+                    expected = _resolve_value(str(step.get("expected", step.get("value", ""))))
+                    if actual != expected:
+                        raise AssertionError(f"browser_value_mismatch:{selector}")
+                    item["actual"] = actual
+                    item["expected"] = expected
+                    positive_assertions += 1
+                    state_assertions += 1
+                elif action == "expect_attribute":
+                    locator = _step_locator(page, step)
+                    if locator.count() != 1:
+                        raise AssertionError(f"browser_attribute_locator_count:{selector}")
+                    attribute = str(step.get("attribute") or "").strip()
+                    expected = _resolve_value(str(step.get("expected", "")))
+                    actual = locator.get_attribute(attribute, timeout=timeout)
+                    if actual != expected:
+                        raise AssertionError(f"browser_attribute_mismatch:{attribute}")
+                    item["attribute"] = attribute
+                    item["actual"] = actual
+                    item["expected"] = expected
+                    positive_assertions += 1
+                    state_assertions += 1
+                elif action == "expect_focused":
+                    locator = _step_locator(page, step)
+                    if locator.count() != 1:
+                        raise AssertionError(f"browser_focus_locator_count:{selector}")
+                    focused = bool(locator.evaluate("(element) => element === document.activeElement"))
+                    if not focused:
+                        raise AssertionError(f"browser_focus_mismatch:{selector}")
+                    item["focused"] = True
+                    positive_assertions += 1
+                    state_assertions += 1
+                elif action == "expect_checked":
+                    locator = _step_locator(page, step)
+                    if locator.count() != 1:
+                        raise AssertionError(f"browser_checked_locator_count:{selector}")
+                    actual = locator.is_checked()
+                    expected = bool(step.get("expected", True))
+                    if actual != expected:
+                        raise AssertionError(f"browser_checked_mismatch:{selector}")
+                    item["actual"] = actual
+                    item["expected"] = expected
+                    positive_assertions += 1
+                    state_assertions += 1
+                elif action == "expect_enabled":
+                    locator = _step_locator(page, step)
+                    if locator.count() != 1 or not locator.is_enabled():
+                        raise AssertionError(f"browser_enabled_mismatch:{selector}")
+                    positive_assertions += 1
+                    state_assertions += 1
+                elif action == "expect_disabled":
+                    locator = _step_locator(page, step)
+                    if locator.count() != 1 or locator.is_enabled():
+                        raise AssertionError(f"browser_disabled_mismatch:{selector}")
+                    positive_assertions += 1
+                    state_assertions += 1
+                elif action == "expect_dialog":
+                    expected = _resolve_value(str(step.get("expected") or ""))
+                    messages = [str(event.get("message") or "") for event in dialog_events]
+                    if not any(expected in message for message in messages):
+                        raise AssertionError(f"browser_dialog_mismatch:{expected}")
+                    item["expected"] = expected
+                    item["dialogs"] = list(dialog_events)
                     positive_assertions += 1
                     state_assertions += 1
                 elif action == "expect_url":
@@ -325,6 +413,7 @@ def run_browser_test(
         _terminate_process(process)
 
     diagnostics = _collect_browser_diagnostics(page, current_step, console_events, network_events)
+    diagnostics["dialogs"] = list(dialog_events)
     diagnostics_path.write_text(json.dumps(diagnostics, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     if page is not None:
         try:
@@ -353,6 +442,7 @@ def run_browser_test(
             "positive_assertion_count": positive_assertions,
             "state_assertion_count": state_assertions,
             "failure_type": failure_type,
+            "dialogs": list(dialog_events),
             "evidence": {
                 "server_stdout": _relative_or_str(stdout_path, root),
                 "server_stderr": _relative_or_str(stderr_path, root),
