@@ -709,7 +709,7 @@ def _review_comment_body(report: dict[str, Any], inline: list[dict[str, Any]]) -
                 lines.append(f"  - Suite command: `{item.get('command')}`")
             if item.get("exit_code") is not None:
                 lines.append(f"  - Suite exit code: `{item.get('exit_code')}`")
-            if item.get("evidence"):
+            if item.get("command") or "local_playwright" in str(item.get("kind") or ""):
                 lines.append("  - Suite stdout/stderr: saved in the review evidence record")
             failure_details = item.get("failure_details") if isinstance(item.get("failure_details"), list) else []
             for detail in failure_details[:20]:
