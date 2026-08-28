@@ -169,7 +169,14 @@ environment and runs `python -m pytest tests -q`; otherwise it runs the bounded
 unittest discovery command. Missing test dependencies are `BLOCK`, not a product
 FAIL. In comprehensive mode the review also creates a PR-scoped temporary case
 overlay, calls case generation and case execution, and reports black-box, white-box,
-functional, boundary, stress, and documentation dimensions separately. It also
+functional, boundary, stress, and documentation dimensions separately. The durable
+`.quality-pilot-project/cases/` directory contains user-owned, confirmed contracts;
+PR-scoped generated contracts are intentionally written under
+`.quality-pilot-project/state/reviews/<repo>/pr-<head>/quality-pilot/cases/` so
+candidate contracts do not silently become project-wide authority. Generated cases
+are declarative contracts, not necessarily new files under the product `tests/`
+directory. A generated Browser case uses the real Playwright adapter only when its
+Browser steps are confirmed; discovered locators remain candidates until then. It also
 invokes the product-test adapter: a user-owned build recipe must produce a real
 artifact in a disposable writable copy of the pinned worktree, then at least one
 semantic product operation must pass. README commands are candidate input only and
