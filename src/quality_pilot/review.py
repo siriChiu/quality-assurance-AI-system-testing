@@ -678,17 +678,31 @@ def write_review_report(config: ProjectConfig, report: dict[str, Any]) -> dict[s
 
 def _review_comment_body(report: dict[str, Any], inline: list[dict[str, Any]]) -> str:
     recommendations = report.get("recommendations") if isinstance(report.get("recommendations"), list) else []
+    browser_records = _report_browser_records(report)
     lines = [
         "Quality Pilot advisory code review (COMMENT only; not approval).",
         f"Conclusion: {report.get('conclusion') or 'UNASSESSED'}",
+        f"Quality Pilot recommendation: {_quality_pilot_recommendation(report)}",
         f"Test outcome: {report.get('test_outcome') or 'NOT_RUN'}",
         f"QA outcome: {report.get('qa_outcome') or 'NOT_RUN'}",
         f"Product test outcome: {report.get('product_test_outcome') or 'NOT_RUN'}",
+        f"Browser UI outcome: {report.get('browser_ui_outcome') or 'NOT_RUN'}",
         f"Quality Pilot tooling outcome: {report.get('tooling_outcome') or 'NOT_RUN'}",
         f"Infrastructure preflight outcome: {report.get('infrastructure_outcome') or 'NOT_RUN'}",
         "",
-        "The final Gitea review decision remains user-owned.",
+        "PR merge decision remains USER_OWNED. Quality Pilot will not merge or change the PR gate.",
     ]
+    if browser_records:
+        lines.extend(["", "Browser/Playwright evidence:"])
+        for item in browser_records:
+            if not isinstance(item, dict):
+                continue
+            screenshot = item.get("screenshot") or ((item.get("evidence") or {}).get("screenshot") if isinstance(item.get("evidence"), dict) else None)
+            lines.append(
+                f"- {item.get('title', item.get('id'))}: status={item.get('status')}, reason={item.get('reason') or 'none'}, "
+                f"interactions={item.get('interaction_count', 'n/a')}, state_assertions={item.get('state_assertion_count', 'n/a')}, "
+                f"screenshot={'available' if screenshot else 'not available'}"
+            )
     if inline:
         lines.extend(["", f"Inline findings: {len(inline)}"])
     if recommendations:
@@ -806,6 +820,7 @@ def prepare_gitea_review_reply(
             "diff_targeted_oracle": report.get("diff_targeted_oracle", {}),
             "product_test_outcome": report.get("product_test_outcome"),
             "browser_ui_outcome": report.get("browser_ui_outcome"),
+            "browser_evidence": report.get("browser_evidence", []),
             "product_test": report.get("qa_review", {}).get("product_test", {}) if isinstance(report.get("qa_review"), dict) else {},
             "test_results": report.get("test_results", []),
             "snapshot_path": report.get("snapshot_path"),
@@ -1458,6 +1473,11 @@ def _run_browser_regression_case(
             "evidence": evidence,
             "result_path": str((evidence_dir / "result.json").relative_to(config.root)) if (evidence_dir / "result.json").is_relative_to(config.root) else str(evidence_dir / "result.json"),
             "reason": reason,
+            "timeout_seconds": existing.get("timeout_seconds"),
+            "failed_tests": existing.get("failed_tests", []),
+            "pytest_summary": existing.get("pytest_summary"),
+            "screenshot": existing.get("screenshot"),
+            "screenshot_sha256": existing.get("screenshot_sha256"),
             "source": "existing_targeted_test_result",
             "execution_target": "local_pinned_worktree",
             "evidence_origin": "local",
@@ -1479,6 +1499,7 @@ def _run_browser_regression_case(
     stderr_path = evidence_dir / "stderr.log"
     safe_stdout, _ = _redact_output(stdout)
     safe_stderr, _ = _redact_output(stderr)
+    pytest_summary = _pytest_result_summary(safe_stdout)
     stdout_path.write_text(safe_stdout, encoding="utf-8")
     stderr_path.write_text(safe_stderr, encoding="utf-8")
     result = {
@@ -1500,6 +1521,11 @@ def _run_browser_regression_case(
         "evidence": [_relative_or_str(stdout_path, config.root), _relative_or_str(stderr_path, config.root)],
         "result_path": str((evidence_dir / "result.json").relative_to(config.root)) if (evidence_dir / "result.json").is_relative_to(config.root) else str(evidence_dir / "result.json"),
         "reason": reason,
+        "timeout_seconds": command_timeout_seconds,
+        "failed_tests": pytest_summary.get("failed_tests", []),
+        "pytest_summary": pytest_summary.get("summary"),
+        "screenshot": None,
+        "screenshot_sha256": None,
     }
     (evidence_dir / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return result
@@ -2065,6 +2091,81 @@ def _build_developer_review_report(
     }
 
 
+def _browser_evidence_records(
+    qa_report: dict[str, Any] | None,
+    test_results: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Expose Browser/Playwright evidence as a first-class report section.
+
+    The canonical case/result files remain the evidence authority.  This list
+    is a redacted, report-facing index so engineers do not need to inspect the
+    JSON case lineage just to find a screenshot or trace.
+    """
+    qa = qa_report if isinstance(qa_report, dict) else {}
+    records: list[dict[str, Any]] = []
+    product = qa.get("product_test") if isinstance(qa.get("product_test"), dict) else {}
+    browser = product.get("browser") if isinstance(product.get("browser"), dict) else {}
+    if browser:
+        evidence = browser.get("evidence") if isinstance(browser.get("evidence"), dict) else {}
+        status = str(browser.get("status") or "NOT_RUN")
+        records.append(
+            {
+                "id": str(browser.get("case_id") or f"{product.get('case_id', 'PRODUCT')}-BROWSER-UI"),
+                "kind": "remote_product_browser",
+                "title": "Remote product semantic Browser flow",
+                "status": status,
+                "reason": browser.get("reason"),
+                "failure_type": browser.get("failure_type"),
+                "execution_target": browser.get("execution_target") or product.get("execution_target") or "remote_ssh",
+                "evidence_origin": browser.get("evidence_origin") or product.get("evidence_origin") or "remote",
+                "interaction_count": browser.get("interaction_count", 0),
+                "positive_assertion_count": browser.get("positive_assertion_count", 0),
+                "state_assertion_count": browser.get("state_assertion_count", 0),
+                "source_identity": browser.get("source_identity"),
+                "remote_cleanup": browser.get("remote_cleanup"),
+                "evidence": dict(evidence),
+                "screenshot": evidence.get("screenshot"),
+                "screenshot_sha256": evidence.get("screenshot_sha256"),
+                "failure_screenshot": evidence.get("screenshot") if status in {"FAIL", "BLOCK"} else None,
+            }
+        )
+    regression = qa.get("browser_regression_case") if isinstance(qa.get("browser_regression_case"), dict) else {}
+    if regression:
+        command = ((regression.get("commands") or [{}])[0] if isinstance(regression.get("commands"), list) else {})
+        existing = next(
+            (
+                item
+                for item in (test_results or [])
+                if isinstance(item, dict) and item.get("id") == "diff-targeted-pytest"
+            ),
+            {},
+        )
+        records.append(
+            {
+                "id": regression.get("case_id", "PR-BROWSER-UI-REGRESSION"),
+                "kind": "local_playwright_pytest_regression",
+                "title": regression.get("title", "Local Playwright Browser regression suite"),
+                "status": regression.get("status", "NOT_RUN"),
+                "reason": regression.get("reason"),
+                "failure_type": None,
+                "execution_target": regression.get("execution_target", "local_pinned_worktree"),
+                "evidence_origin": regression.get("evidence_origin", "local"),
+                "command": command.get("command") if isinstance(command, dict) else None,
+                "exit_code": command.get("exit_code") if isinstance(command, dict) else None,
+                "timeout_seconds": existing.get("timeout_seconds"),
+                "failed_tests": existing.get("failed_tests", []),
+                "pytest_summary": existing.get("pytest_summary"),
+                "evidence": {"stdout": (regression.get("evidence") or [None, None])[0] if isinstance(regression.get("evidence"), list) else None,
+                             "stderr": (regression.get("evidence") or [None, None])[1] if isinstance(regression.get("evidence"), list) and len(regression.get("evidence") or []) > 1 else None},
+                "screenshot": regression.get("screenshot"),
+                "screenshot_sha256": regression.get("screenshot_sha256"),
+                "failure_screenshot": regression.get("screenshot"),
+                "screenshot_note": "pytest regression does not expose a browser page screenshot unless a Browser adapter case also produced one.",
+            }
+        )
+    return records
+
+
 def _build_report(
     config: ProjectConfig,
     *,
@@ -2171,6 +2272,17 @@ def _build_report(
         matrix=matrix,
         test_results=test_results,
     )
+    browser_evidence = _browser_evidence_records(qa_report, test_results)
+    product_test_evidence = {
+        "status": product_test_outcome,
+        "reason": product_test.get("reason"),
+        "execution_target": product_test.get("execution_target"),
+        "evidence_origin": product_test.get("evidence_origin"),
+        "case_id": product_test.get("case_id"),
+        "result_path": product_test.get("result_path") or product_test.get("case_result_path"),
+        "build": product_test.get("build"),
+        "browser_status": browser_result.get("status") if isinstance(browser_result, dict) else None,
+    }
     return {
         "schema": REVIEW_SCHEMA,
         "status": "ok" if worktree.get("status") in {"ready", "planned"} else "blocked",
@@ -2197,6 +2309,8 @@ def _build_report(
         "test_outcome": test_outcome,
         "product_test_outcome": product_test_outcome,
         "browser_ui_outcome": browser_outcome,
+        "browser_evidence": browser_evidence,
+        "product_test_evidence": product_test_evidence,
         "tooling_outcome": tooling_outcome,
         "infrastructure_outcome": infrastructure_outcome,
         "product_evaluation_status": "NOT_EVALUATED" if tooling_outcome == "TOOLING_FAIL" or infrastructure_outcome != "NOT_RUN" else "EVALUATED",
@@ -2587,6 +2701,99 @@ def _engineer_reproduction_steps(item: dict[str, Any], report: dict[str, Any]) -
     ]
 
 
+def _quality_pilot_recommendation(report: dict[str, Any]) -> str:
+    test_outcome = str(report.get("test_outcome") or "NOT_RUN").upper()
+    qa_outcome = str(report.get("qa_outcome") or "NOT_RUN").upper()
+    product_outcome = str(report.get("product_test_outcome") or "NOT_RUN").upper()
+    browser_outcome = str(report.get("browser_ui_outcome") or "NOT_RUN").upper()
+    if test_outcome == "FAIL" or qa_outcome == "FAIL":
+        return "暫不建議合併：local regression/QA 有已執行但失敗的結果，先完成 triage。"
+    if product_outcome in {"FAIL", "BLOCK", "HOLD"} or browser_outcome in {"FAIL", "BLOCK", "HOLD"}:
+        return "暫不建議合併：產品或 Browser evidence 尚未形成完整 PASS。"
+    if test_outcome in {"BLOCK", "HOLD", "NOT_RUN"} or qa_outcome in {"BLOCK", "HOLD", "NOT_RUN"}:
+        return "暫不建議合併：測試證據尚未完整。"
+    return "可以考慮合併：目前檢查沒有 blocking failure；最終決定仍由 PR owner 做出。"
+
+
+def _report_browser_records(report: dict[str, Any]) -> list[dict[str, Any]]:
+    records = report.get("browser_evidence") if isinstance(report.get("browser_evidence"), list) else None
+    if records is None:
+        qa = report.get("qa_review") if isinstance(report.get("qa_review"), dict) else {}
+        records = _browser_evidence_records(qa, report.get("test_results") if isinstance(report.get("test_results"), list) else [])
+    else:
+        records = list(records)
+    supplemental = report.get("supplemental_browser_evidence") if isinstance(report.get("supplemental_browser_evidence"), list) else []
+    return [item for item in [*records, *supplemental] if isinstance(item, dict)]
+
+
+def _render_browser_evidence(report: dict[str, Any]) -> list[str]:
+    records = _report_browser_records(report)
+    lines = ["", "Playwright／產品測試執行證據", "-" * 80]
+    product_evidence = report.get("product_test_evidence") if isinstance(report.get("product_test_evidence"), dict) else {}
+    if product_evidence:
+        lines.extend([
+            "產品建置／操作 case：",
+            f"  結果：{_status_for_engineer(product_evidence.get('status'), reason=product_evidence.get('reason'))}",
+            f"  實際意思：{_engineer_reason(product_evidence.get('status'), product_evidence.get('reason'))}",
+            f"  執行位置：{product_evidence.get('execution_target', '未記錄')}；證據來源：{product_evidence.get('evidence_origin', '未記錄')}",
+            f"  build 結果：{(product_evidence.get('build') or {}).get('status', '未記錄')}；原因={(product_evidence.get('build') or {}).get('reason', '未記錄')}",
+            f"  case evidence：{product_evidence.get('result_path') or '未建立'}",
+            "",
+        ])
+    if not records:
+        lines.append("沒有 Browser/Playwright evidence record；不能由缺少 record 推定 PASS。")
+        return lines
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        status = record.get("status")
+        reason = str(record.get("reason") or "")
+        lines.extend([
+            f"Browser case：{record.get('id', '未命名')}（{record.get('title', record.get('kind', 'Browser'))}）",
+            f"  結果：{_status_for_engineer(status, reason=reason, exit_code=record.get('exit_code'))}",
+            f"  實際意思：{_engineer_reason(status, reason, record.get('exit_code'))}",
+            f"  執行位置：{record.get('execution_target', '未記錄')}；證據來源：{record.get('evidence_origin', '未記錄')}",
+        ])
+        if record.get("command"):
+            lines.append(f"  命令：{record.get('command')}")
+        if record.get("exit_code") is not None:
+            lines.append(f"  exit code：{record.get('exit_code')}")
+        if record.get("timeout_seconds") is not None:
+            lines.append(f"  timeout：{record.get('timeout_seconds')} 秒")
+        if record.get("interaction_count") is not None:
+            lines.append(
+                f"  interactions：{record.get('interaction_count')}；positive assertions：{record.get('positive_assertion_count', 0)}；state assertions：{record.get('state_assertion_count', 0)}"
+            )
+        if record.get("failure_type"):
+            lines.append(f"  failure type：{record.get('failure_type')}")
+        if record.get("pytest_summary"):
+            lines.append(f"  pytest 摘要：{record.get('pytest_summary')}")
+        failed_tests = record.get("failed_tests") if isinstance(record.get("failed_tests"), list) else []
+        if failed_tests:
+            lines.append(f"  失敗測試：{'; '.join(str(item) for item in failed_tests[:20])}")
+        source_identity = record.get("source_identity") if isinstance(record.get("source_identity"), dict) else {}
+        if source_identity:
+            lines.append(
+                f"  remote source：{source_identity.get('status', '未記錄')}；HEAD={source_identity.get('observed_head_sha', '未記錄')}；clean={source_identity.get('dirty', '未記錄')}"
+            )
+        evidence = record.get("evidence") if isinstance(record.get("evidence"), dict) else {}
+        screenshot = record.get("screenshot") or evidence.get("screenshot")
+        if screenshot:
+            lines.append(f"  screenshot：{screenshot}{'（失敗截圖）' if record.get('failure_screenshot') else ''}")
+            if record.get("screenshot_sha256"):
+                lines.append(f"  screenshot SHA-256：{record.get('screenshot_sha256')}")
+        elif str(status or "").upper() in {"FAIL", "BLOCK"}:
+            lines.append(f"  失敗截圖：未建立；{record.get('screenshot_note') or '執行在建立 Browser page 前已失敗，不能偽造截圖。'}")
+        for key in ("trace", "dom", "interaction", "diagnostics", "console", "network", "server_stdout", "server_stderr", "remote_server_stdout", "remote_server_stderr"):
+            value = evidence.get(key)
+            if value and key != "screenshot":
+                lines.append(f"  {key} evidence：{value}")
+        if record.get("remote_cleanup"):
+            lines.append(f"  remote cleanup：{record.get('remote_cleanup')}")
+        lines.append("")
+    return lines
+
+
 def _render_engineer_execution_summary(report: dict[str, Any]) -> list[str]:
     """Render the first-screen, action-oriented review explanation."""
     lines = ["", "工程師快速判讀（先看這裡）", "-" * 80]
@@ -2594,7 +2801,8 @@ def _render_engineer_execution_summary(report: dict[str, Any]) -> list[str]:
     conclusion = str(report.get("conclusion") or "UNKNOWN")
     lines.extend([
         f"結論：{conclusion}",
-        f"目前能否繼續／合併：{'否，Quality Pilot 已阻擋' if gate.get('status') == 'BLOCKED' else '否，仍需人工決策'}",
+        f"Quality Pilot 建議：{_quality_pilot_recommendation(report)}",
+        "PR merge decision：USER_OWNED；Quality Pilot 只提供建議與留言，不執行 merge，也不代替你的 gate。",
         "重要規則：PASS 只代表該項命令和 oracle 實際通過；BLOCK/HOLD/逾時都不能當成 PASS。",
         "分類規則：測試 FAIL 是已執行的失敗；BLOCK 是未完成或前置／工具阻擋；HOLD 是證據不足，不直接指控產品有缺陷。",
         "",
@@ -2683,6 +2891,7 @@ def _render_detailed_text(report: dict[str, Any]) -> str:
         "所有建議的重現步驟都會標示是否實際執行；沒有證據的步驟不宣稱為測試結果。",
         "",
         *_render_engineer_execution_summary(report),
+        *_render_browser_evidence(report),
         "整體審查狀態",
         f"建議決定：{_zh_value(developer.get('decision', 'COMMENT'))}",
         f"測試結果：{_zh_value(report.get('test_outcome'))}",
@@ -2707,7 +2916,7 @@ def _render_detailed_text(report: dict[str, Any]) -> str:
         f"- product target：{(report.get('execution_targets') or {}).get('product_target', '未確認') if isinstance(report.get('execution_targets'), dict) else '未確認'}",
         f"- Playwright target：{(report.get('execution_targets') or {}).get('playwright_target', '未確認') if isinstance(report.get('execution_targets'), dict) else '未確認'}",
         f"- remote preflight：{((report.get('remote_preflight') or {}).get('status', 'NOT_RUN')) if isinstance(report.get('remote_preflight'), dict) else 'NOT_RUN'}",
-        f"- review gate：{((report.get('review_gate') or {}).get('status', 'BLOCKED')) if isinstance(report.get('review_gate'), dict) else 'BLOCKED'}；原因={((report.get('review_gate') or {}).get('reason', '未建立 gate')) if isinstance(report.get('review_gate'), dict) else '未建立 gate'}",
+        f"- Quality Pilot automation recommendation gate：{((report.get('review_gate') or {}).get('status', 'BLOCKED')) if isinstance(report.get('review_gate'), dict) else 'BLOCKED'}；原因={((report.get('review_gate') or {}).get('reason', '未建立 gate')) if isinstance(report.get('review_gate'), dict) else '未建立 gate'}；這不是 Gitea merge gate",
         "- 每個 case 必須明確標示 execution target 與 evidence origin；local 與 remote 證據不得混寫。",
         "",
         "證據規則",

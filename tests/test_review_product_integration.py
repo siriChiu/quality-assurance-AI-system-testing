@@ -61,6 +61,7 @@ class ReviewProductIntegrationTest(unittest.TestCase):
             )
             self.assertEqual(report["product_test_outcome"], "BLOCK")
             self.assertEqual(report["conclusion"], "HOLD_FOR_PRODUCT_TEST_COVERAGE")
+            self.assertEqual(report["browser_evidence"], [])
             developer = report["developer_review"]
             self.assertEqual(developer["schema"], "quality-pilot.developer-code-review.v1")
             self.assertEqual(developer["decision"], "COMMENT")
@@ -76,6 +77,62 @@ class ReviewProductIntegrationTest(unittest.TestCase):
             self.assertTrue(request["advisory_only"])
             self.assertIn("not approval", request["body"])
             self.assertIn("product-test-contract", {item["id"] for item in request["recommendations"]})
+
+    def test_detailed_text_includes_browser_evidence_and_user_owned_merge_decision(self) -> None:
+        report = {
+            "repo": "owner/repo",
+            "pr_number": 1,
+            "test_outcome": "FAIL",
+            "product_test_outcome": "HOLD",
+            "browser_ui_outcome": "FAIL",
+            "qa_outcome": "FAIL",
+            "conclusion": "TEST_FAILURE_REQUIRES_TRIAGE",
+            "qa_review": {
+                "product_test": {
+                    "case_id": "PR-1-PRODUCT",
+                    "status": "HOLD",
+                    "reason": "browser_probe_only_no_semantic_state_assertion",
+                    "execution_target": "remote_ssh",
+                    "evidence_origin": "remote",
+                    "browser": {
+                        "case_id": "PR-1-PRODUCT-BROWSER-UI",
+                        "status": "FAIL",
+                        "reason": "browser_interaction_timeout:PRODUCT_UI_FAILURE",
+                        "execution_target": "remote_ssh",
+                        "evidence_origin": "remote",
+                        "interaction_count": 1,
+                        "positive_assertion_count": 1,
+                        "state_assertion_count": 1,
+                        "evidence": {"screenshot": "browser/failure.png", "trace": "browser/failure.trace.zip"},
+                    },
+                },
+                "browser_regression_case": {
+                    "case_id": "PR-BROWSER-UI-REGRESSION",
+                    "status": "FAIL",
+                    "reason": "test_command_failed",
+                    "execution_target": "local_pinned_worktree",
+                    "evidence_origin": "local",
+                    "commands": [{"command": "pytest tests/browser_ui -q", "exit_code": 1}],
+                    "evidence": ["browser/stdout.log", "browser/stderr.log"],
+                },
+                "matrix": {},
+            },
+            "test_results": [{
+                "id": "diff-targeted-pytest", "status": "FAIL", "reason": "test_command_failed",
+                "exit_code": 1, "failed_tests": ["tests/browser_ui/test_settings.py::test_run"],
+                "pytest_summary": "1 failed, 2 passed",
+            }],
+            "findings": [],
+            "developer_review": {"summary": {}, "sections": {}, "evidence": {"test_results": []}},
+        }
+        text = _render_detailed_text(report)
+        self.assertIn("Playwright／產品測試執行證據", text)
+        self.assertIn("screenshot：browser/failure.png（失敗截圖）", text)
+        self.assertIn("PR merge decision：USER_OWNED", text)
+        self.assertIn("tests/browser_ui/test_settings.py::test_run", text)
+        comment = __import__("quality_pilot.review", fromlist=["_review_comment_body"])._review_comment_body(report, [])
+        self.assertIn("PR merge decision remains USER_OWNED", comment)
+        self.assertIn("screenshot=available", comment)
 
     def test_detailed_text_report_contains_reproduction_and_redacted_context(self) -> None:
         report = {
