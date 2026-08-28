@@ -682,50 +682,71 @@ def _review_comment_body(report: dict[str, Any], inline: list[dict[str, Any]]) -
     recommendations = report.get("recommendations") if isinstance(report.get("recommendations"), list) else []
     browser_records = _report_browser_records(report)
     lines = [
-        "Quality Pilot advisory code review (COMMENT only; not approval).",
-        f"Conclusion: {report.get('conclusion') or 'UNASSESSED'}",
-        f"Quality Pilot recommendation: {_quality_pilot_recommendation(report)}",
-        f"Test outcome: {report.get('test_outcome') or 'NOT_RUN'}",
-        f"QA outcome: {report.get('qa_outcome') or 'NOT_RUN'}",
-        f"Product test outcome: {report.get('product_test_outcome') or 'NOT_RUN'}",
-        f"Browser UI outcome: {report.get('browser_ui_outcome') or 'NOT_RUN'}",
-        f"Quality Pilot tooling outcome: {report.get('tooling_outcome') or 'NOT_RUN'}",
-        f"Infrastructure preflight outcome: {report.get('infrastructure_outcome') or 'NOT_RUN'}",
+        "Quality Pilot 程式碼審查建議（僅 COMMENT；不是核准）。",
+        f"審查結論：`{report.get('conclusion') or 'UNASSESSED'}`",
+        f"Quality Pilot 建議：{_quality_pilot_recommendation(report)}",
+        f"測試結果：{_status_for_engineer(report.get('test_outcome'))}",
+        f"品質保證結果：{_status_for_engineer(report.get('qa_outcome'))}",
+        f"產品測試結果：{_status_for_engineer(report.get('product_test_outcome'))}",
+        f"Browser UI 結果：{_status_for_engineer(report.get('browser_ui_outcome'))}",
+        f"Quality Pilot 工具結果：{_zh_value(report.get('tooling_outcome'))}",
+        f"基礎環境前置檢查：{_zh_value(report.get('infrastructure_outcome'))}",
         "",
-        "PR merge decision remains USER_OWNED. Quality Pilot will not merge or change the PR gate.",
+        "PR 合併決定仍由 PR 擁有者負責。Quality Pilot 不執行合併，也不修改你的 merge gate。",
     ]
     if browser_records:
-        lines.extend(["", "Browser/Playwright evidence:"])
+        lines.extend(["", "Browser／Playwright 證據："])
         if any(item.get("kind") == "supplemental_manual_playwright" and item.get("status") == "PASS" for item in browser_records) and any(item.get("kind") == "remote_product_browser" and item.get("status") == "HOLD" for item in browser_records):
-            lines.append("- 判讀：formal smoke run=HOLD；supplemental confirmed semantic run=PASS；這是兩個不同 run，不是矛盾結果。")
+            lines.append("- 判讀：正式 smoke 執行是暫緩；補充的已確認語意執行是通過；這是兩個不同執行，不是矛盾結果。")
         if any(item.get("kind") == "supplemental_manual_local_playwright_regression" for item in browser_records) and any(item.get("kind") == "local_playwright_pytest_regression" and item.get("status") == "BLOCK" for item in browser_records):
-            lines.append("- 判讀：formal run=BLOCK(timeout)；supplemental exact rerun=FAIL(exit 1)；以下 failure details 以 supplemental rerun 為準。")
+            lines.append("- 判讀：正式執行是逾時阻擋；補充的完整重跑是失敗（exit 1）；以下失敗診斷以補充重跑為準。")
         for item in browser_records:
             if not isinstance(item, dict):
                 continue
             screenshot = item.get("screenshot") or ((item.get("evidence") or {}).get("screenshot") if isinstance(item.get("evidence"), dict) else None)
             lines.append(
-                f"- {item.get('title', item.get('id'))}: status={item.get('status')}, reason={item.get('reason') or 'none'}, "
-                f"interactions={item.get('interaction_count', 'n/a')}, state_assertions={item.get('state_assertion_count', 'n/a')}, "
-                f"screenshot={'available' if screenshot else 'not available'}"
+                f"- {_browser_record_title(item)}：{_status_for_engineer(item.get('status'), reason=item.get('reason'), exit_code=item.get('exit_code'))}；"
+                f"原因={item.get('reason') or '未記錄'}；互動={item.get('interaction_count', '不適用')}；"
+                f"狀態斷言={item.get('state_assertion_count', '不適用')}；"
+                f"截圖={'有' if screenshot else '無'}"
             )
             if item.get("command"):
-                lines.append(f"  - Suite command: `{item.get('command')}`")
+                lines.append(f"  - 套件命令：`{item.get('command')}`")
             if item.get("exit_code") is not None:
-                lines.append(f"  - Suite exit code: `{item.get('exit_code')}`")
+                lines.append(f"  - 套件結束代碼：`{item.get('exit_code')}`")
             if item.get("command") or "local_playwright" in str(item.get("kind") or ""):
-                lines.append("  - Suite stdout/stderr: saved in the review evidence record")
+                lines.append("  - 套件 stdout/stderr：已保存於審查證據")
             failure_details = item.get("failure_details") if isinstance(item.get("failure_details"), list) else []
             for detail in failure_details[:20]:
                 if not isinstance(detail, dict):
                     continue
                 lines.extend([
-                    f"  - Failure: {detail.get('test', 'unknown')}",
-                    f"    Classification: {detail.get('category', 'unknown')}",
-                    f"    Observed: {detail.get('observed', 'unknown')}",
-                    f"    Error: {detail.get('error', 'unknown')}",
-                    f"    Reproduce: `{detail.get('reproduce', 'unknown')}`",
+                    f"  - 失敗測試：{detail.get('test', '未知')}",
+                    f"    分類：{detail.get('category', '未知')}",
+                    f"    觀察：{detail.get('observed', '未知')}",
+                    f"    實際錯誤：{detail.get('error', '未知')}",
+                    f"    重現命令：`{detail.get('reproduce', '未知')}`",
                 ])
+    product_evidence = report.get("product_test_evidence") if isinstance(report.get("product_test_evidence"), dict) else {}
+    if product_evidence:
+        build = product_evidence.get("build") if isinstance(product_evidence.get("build"), dict) else {}
+        lines.extend([
+            "",
+            "產品建置／操作判讀：",
+            f"- 結果：{_status_for_engineer(product_evidence.get('status'), reason=product_evidence.get('reason'))}",
+            f"- 建置結果：{_zh_value(build.get('status', 'NOT_RUN'))}；原因代碼=`{build.get('reason', '未記錄')}`",
+            "- `remote_product_build_adapter_not_supported` 代表尚未實作 remote build adapter，不是產品 build 已 FAIL。",
+            "- 在 adapter 完成前，不能把 remote product build 描述為 PASS。",
+        ])
+    manual_pass = next((item for item in browser_records if item.get("kind") == "supplemental_manual_playwright" and item.get("status") == "PASS"), None)
+    if manual_pass:
+        lines.extend([
+            "",
+            "補充的遠端語意 Playwright 結果：",
+            "- 已實際驗證 PID Settings／Fan Zone tab 與 panel、CPU0-TMP 欄位、無效 set point、validation dialog、focus recovery、Zone 0 checkbox 與 PWM ids。",
+            "- 互動次數=4；正向斷言=11；狀態斷言=11；遠端來源已驗證且工作樹乾淨。",
+            "- diagnostics network 沒有 `/api/settings` POST，因此沒有保存正式環境設定。",
+        ])
     suite_command = next(
         (str(item.get("command")) for item in browser_records if isinstance(item, dict) and item.get("command")),
         None,
@@ -733,27 +754,34 @@ def _review_comment_body(report: dict[str, Any], inline: list[dict[str, Any]]) -
     if suite_command:
         lines.extend([
             "",
-            "Copyable local reproduction:",
-            "Replace `$REVIEW_WORKTREE` with the pinned review worktree path recorded in the report.",
+            "可直接複製的本地重現命令：",
+            "將 `$REVIEW_WORKTREE` 替換成 report 記錄的 pinned review worktree 路徑。",
             "```bash",
             "cd \"$REVIEW_WORKTREE\"",
             suite_command,
             "```",
-            "Each failure detail above also contains a single-test command for reproducing only that test.",
+            "上方每一筆失敗診斷都包含只重現該測試的單測試命令。",
         ])
     if inline:
-        lines.extend(["", f"Inline findings: {len(inline)}"])
+        lines.extend(["", f"行內程式碼問題：{len(inline)}"])
     if recommendations:
-        lines.extend(["", "Suggested follow-up:"])
+        lines.extend(["", "建議後續處理："])
         for item in recommendations[:12]:
             if not isinstance(item, dict):
                 continue
             lines.append(
-                f"- [{item.get('severity', 'INFO')}] {item.get('recommendation', '')} "
-                f"(verify: {item.get('verification', '')})"
+                f"- [{_zh_value(item.get('severity', 'INFO'))}] {item.get('recommendation', '')} "
+                f"（驗證方式：{item.get('verification', '未記錄')}）"
             )
     else:
-        lines.extend(["", "No additional deterministic follow-up was generated."])
+        lines.extend(["", "沒有額外的確定性後續處理建議。"])
+    lines.extend([
+        "",
+        "最後結果：",
+        f"- Quality Pilot 建議：{_quality_pilot_recommendation(report)}",
+        "- PR 合併決定：由 PR 擁有者決定；Quality Pilot 不執行 merge。",
+        "- 只有實際命令、oracle 與 evidence 同時存在時，才能支持通過；HOLD、BLOCK、逾時與未評估都不是 PASS。",
+    ])
     return "\n".join(lines)
 
 
@@ -2330,6 +2358,7 @@ def _build_report(
     }
     return {
         "schema": REVIEW_SCHEMA,
+        "report_locale": "zh-TW",
         "status": "ok" if worktree.get("status") in {"ready", "planned"} else "blocked",
         "repo": repo,
         "pr_number": pr_number,
@@ -2619,6 +2648,13 @@ def _zh_value(value: Any) -> str:
         "BLOCK": "阻擋",
         "HOLD": "暫緩",
         "NOT_RUN": "未執行",
+        "NOT_EVALUATED": "未評估",
+        "PLANNED": "已規劃但未執行",
+        "UNKNOWN": "未知",
+        "READY": "就緒",
+        "TOOLING_FAIL": "工具失敗",
+        "HUMAN_GATE_REQUIRED": "等待使用者決定",
+        "BLOCKED": "Quality Pilot 建議阻擋（不是 Gitea merge gate）",
         "ADVISORY": "建議",
         "security": "安全性",
         "test-execution": "測試執行",
@@ -2636,6 +2672,8 @@ def _zh_value(value: Any) -> str:
         "HOLD": "暫緩",
         "NOT_RUN": "未執行",
     }
+    if value is None:
+        return "未記錄"
     text = str(value)
     return mapping.get(text, text)
 
@@ -2674,29 +2712,41 @@ def _engineer_reason(status: Any, reason: Any, exit_code: Any = None) -> str:
     value = str(status or "UNKNOWN").upper()
     detail = str(reason or "").strip()
     if detail == "test_command_timeout" or exit_code == 124:
-        return "測試程序已啟動，但在時間上限內沒有完成；這不是 dependency missing，也不能直接當成產品缺陷。"
+        return "測試程序已啟動，但在時間上限內沒有完成；這不是缺少依賴，也不能直接當成產品缺陷。"
     if detail == "test_command_failed":
-        return "pytest 已實際執行並回報失敗；請先看失敗測試名稱與 stdout/stderr，再修復產品或測試。"
+        return "pytest 已實際執行並回報失敗；請先看失敗測試名稱與標準輸出／錯誤輸出，再修復產品或測試。"
     if detail == "browser_probe_only_no_semantic_state_assertion":
         return "Browser 只驗證頁面／元素可見，沒有使用者互動與狀態斷言；因此只能 HOLD，不能宣稱 UI/UX PASS。"
     if detail == "remote_product_build_adapter_not_supported":
-        return "remote product build adapter 尚未實作；這是產品建置未評估，不是產品建置 FAIL。"
+        return "遠端產品建置 adapter 尚未實作；這是產品建置尚未評估，不是產品建置失敗。"
     if detail == "browser_prerequisites_absent":
-        return "Browser client 缺少 Python Playwright 或 Chromium；這是 Quality Pilot/環境阻擋，不是產品 FAIL。"
+        return "Browser client 缺少 Python Playwright 或 Chromium；這是 Quality Pilot／環境阻擋，不是產品失敗。"
     if detail == "dependency_install_failed":
-        return "依賴安裝失敗；先修復 review worktree venv，再重跑測試。"
+        return "依賴安裝失敗；先修復審查工作樹的 venv，再重跑測試。"
     if detail == "diff_targeted_product_test_oracle_failed":
-        return "changed-file 對應的 targeted pytest 已執行但失敗；functional 不能判定通過。"
+        return "變更檔案對應的 targeted pytest 已執行但失敗；功能維度不能判定通過。"
     if detail == "regression_test_outcome":
-        return "local regression 沒有通過；white-box 結果不能判定通過。"
+        return "本地回歸沒有通過；白箱結果不能判定通過。"
     if detail == "missing_or_incomplete_oracle":
-        return "有執行候選檢查，但缺少足夠的產品專屬 oracle；不能用 generic probe 代替。"
+        return "有執行候選檢查，但缺少足夠的產品專屬 oracle；不能用通用探針代替。"
     if detail == "product_black_box_adapter_not_proven":
-        return "尚未用產品入口完成可追溯的 black-box adapter；不能用 unit/regression PASS 代替。"
+        return "尚未用產品入口完成可追溯的黑箱 adapter；不能用單元／回歸通過代替。"
     if detail == "no_boundary_case":
-        return "目前沒有 boundary/invalid case；這是覆蓋缺口，不是產品通過。"
+        return "目前沒有邊界／無效輸入案例；這是覆蓋缺口，不是產品通過。"
     if detail == "no_stress_case":
-        return "目前沒有 bounded stress/timeout case；這是覆蓋缺口，不是產品通過。"
+        return "目前沒有受限時間與資源的壓力案例；這是覆蓋缺口，不是產品通過。"
+    if detail == "changed_documentation_read_and_parsed":
+        return "已實際讀取並解析變更文件；這只能代表文件檢查通過，不代表產品行為全部通過。"
+    if detail == "diff_targeted_product_test_oracle_passed":
+        return "changed-file 對應的 targeted pytest 已完成且 oracle 通過。"
+    if detail == "browser_semantic_interaction_passed":
+        return "真實 Playwright 互動與語意狀態斷言都通過。"
+    if detail == "playwright_actionability_timeout":
+        return "Playwright 找到元素，但元素在測試 timeout 內沒有達到可安全互動的穩定狀態。"
+    if detail == "browser_server_startup_or_url_timeout":
+        return "產品 Browser server 在 startup deadline 內沒有輸出可連線 URL。"
+    if detail == "review_worktree_path_assumption":
+        return "測試把 checkout 目錄名稱寫死為產品名稱；pinned review worktree 應使用 PR 專屬目錄，測試應改用 repo root/config，而不是 basename。"
     if value == "NOT_EVALUATED":
         return "上游 tooling 或 infrastructure gate 阻擋，因此本項沒有形成產品結論。"
     if detail:
@@ -2752,12 +2802,12 @@ def _quality_pilot_recommendation(report: dict[str, Any]) -> str:
     product_outcome = str(report.get("product_test_outcome") or "NOT_RUN").upper()
     browser_outcome = str(report.get("browser_ui_outcome") or "NOT_RUN").upper()
     if test_outcome == "FAIL" or qa_outcome == "FAIL":
-        return "暫不建議合併：local regression/QA 有已執行但失敗的結果，先完成 triage。"
+        return "暫不建議合併：本地回歸或品質保證檢查有已執行但失敗的結果，請先完成分類與修復。"
     if product_outcome in {"FAIL", "BLOCK", "HOLD"} or browser_outcome in {"FAIL", "BLOCK", "HOLD"}:
-        return "暫不建議合併：產品或 Browser evidence 尚未形成完整 PASS。"
+        return "暫不建議合併：產品或 Browser 證據尚未形成完整通過結果。"
     if test_outcome in {"BLOCK", "HOLD", "NOT_RUN"} or qa_outcome in {"BLOCK", "HOLD", "NOT_RUN"}:
         return "暫不建議合併：測試證據尚未完整。"
-    return "可以考慮合併：目前檢查沒有 blocking failure；最終決定仍由 PR owner 做出。"
+    return "可以考慮合併：目前沒有發現阻擋性失敗；最終決定仍由 PR 擁有者做出。"
 
 
 def _report_browser_records(report: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2771,28 +2821,41 @@ def _report_browser_records(report: dict[str, Any]) -> list[dict[str, Any]]:
     return [item for item in [*records, *supplemental] if isinstance(item, dict)]
 
 
+def _browser_record_title(record: dict[str, Any]) -> str:
+    kind = str(record.get("kind") or "")
+    if kind == "remote_product_browser":
+        return "遠端產品語意 Browser 流程"
+    if kind == "local_playwright_pytest_regression":
+        return "本地 Playwright pytest 回歸套件"
+    if kind == "supplemental_manual_playwright":
+        return "補充的遠端人工 Playwright 驗證"
+    if kind == "supplemental_manual_local_playwright_regression":
+        return "補充的本地 Playwright 回歸重跑"
+    return str(record.get("title") or record.get("kind") or "Browser 測試")
+
+
 def _render_browser_evidence(report: dict[str, Any]) -> list[str]:
     records = _report_browser_records(report)
     lines = ["", "Playwright／產品測試執行證據", "-" * 80]
     if any(item.get("kind") == "supplemental_manual_playwright" and item.get("status") == "PASS" for item in records) and any(item.get("kind") == "remote_product_browser" and item.get("status") == "HOLD" for item in records):
         lines.extend([
-            "判讀說明：正式 review 的 Browser case 使用原始 smoke contract，因此是 HOLD；supplemental manual case 使用已確認的 semantic workflow，因此是獨立 PASS，兩者不是同一次 run。",
+            "判讀說明：正式審查的 Browser case 使用原始 smoke contract，因此是暫緩；補充的人工執行 case 使用已確認的語意 workflow，因此是獨立通過，兩者不是同一次執行。",
             "",
         ])
     if any(item.get("kind") == "supplemental_manual_local_playwright_regression" for item in records) and any(item.get("kind") == "local_playwright_pytest_regression" and item.get("status") == "BLOCK" for item in records):
         lines.extend([
-            "判讀說明：正式 review 的 local Browser command 在舊 timeout 邊界回 BLOCK；後續 supplemental exact rerun 已完成並回報 FAIL，應以 supplemental rerun 的 failure details 進行 triage。",
+            "判讀說明：正式審查的本地 Browser 命令在舊 timeout 邊界回報阻擋；後續補充的完整重跑已完成並回報失敗，應以補充重跑的失敗診斷進行分類與修復。",
             "",
         ])
     product_evidence = report.get("product_test_evidence") if isinstance(report.get("product_test_evidence"), dict) else {}
     if product_evidence:
         lines.extend([
-            "產品建置／操作 case：",
+            "產品建置／操作案例：",
             f"  結果：{_status_for_engineer(product_evidence.get('status'), reason=product_evidence.get('reason'))}",
             f"  實際意思：{_engineer_reason(product_evidence.get('status'), product_evidence.get('reason'))}",
             f"  執行位置：{product_evidence.get('execution_target', '未記錄')}；證據來源：{product_evidence.get('evidence_origin', '未記錄')}",
-            f"  build 結果：{(product_evidence.get('build') or {}).get('status', '未記錄')}；原因={(product_evidence.get('build') or {}).get('reason', '未記錄')}",
-            f"  case evidence：{product_evidence.get('result_path') or '未建立'}",
+            f"  建置結果：{_zh_value((product_evidence.get('build') or {}).get('status', '未記錄'))}；原因代碼={(product_evidence.get('build') or {}).get('reason', '未記錄')}",
+            f"  案例證據：{product_evidence.get('result_path') or '未建立'}",
             "",
         ])
     if not records:
@@ -2804,7 +2867,7 @@ def _render_browser_evidence(report: dict[str, Any]) -> list[str]:
         status = record.get("status")
         reason = str(record.get("reason") or "")
         lines.extend([
-            f"Browser case：{record.get('id', '未命名')}（{record.get('title', record.get('kind', 'Browser'))}）",
+            f"Browser 案例：{record.get('id', '未命名')}（{_browser_record_title(record)}）",
             f"  結果：{_status_for_engineer(status, reason=reason, exit_code=record.get('exit_code'))}",
             f"  實際意思：{_engineer_reason(status, reason, record.get('exit_code'))}",
             f"  執行位置：{record.get('execution_target', '未記錄')}；證據來源：{record.get('evidence_origin', '未記錄')}",
@@ -2817,10 +2880,10 @@ def _render_browser_evidence(report: dict[str, Any]) -> list[str]:
             lines.append(f"  timeout：{record.get('timeout_seconds')} 秒")
         if record.get("interaction_count") is not None:
             lines.append(
-                f"  interactions：{record.get('interaction_count')}；positive assertions：{record.get('positive_assertion_count', 0)}；state assertions：{record.get('state_assertion_count', 0)}"
+                f"  互動次數：{record.get('interaction_count')}；正向斷言：{record.get('positive_assertion_count', 0)}；狀態斷言：{record.get('state_assertion_count', 0)}"
             )
         if record.get("failure_type"):
-            lines.append(f"  failure type：{record.get('failure_type')}")
+            lines.append(f"  失敗類型：{record.get('failure_type')}")
         if record.get("pytest_summary"):
             lines.append(f"  pytest 摘要：{record.get('pytest_summary')}")
         failed_tests = record.get("failed_tests") if isinstance(record.get("failed_tests"), list) else []
@@ -2875,7 +2938,7 @@ def _render_engineer_execution_summary(report: dict[str, Any]) -> list[str]:
         "重要規則：PASS 只代表該項命令和 oracle 實際通過；BLOCK/HOLD/逾時都不能當成 PASS。",
         "分類規則：測試 FAIL 是已執行的失敗；BLOCK 是未完成或前置／工具阻擋；HOLD 是證據不足，不直接指控產品有缺陷。",
         "",
-        "檢查結果",
+        "實際執行的檢查結果",
         "-" * 80,
     ])
     test_results = report.get("test_results") if isinstance(report.get("test_results"), list) else []
@@ -2908,7 +2971,7 @@ def _render_engineer_execution_summary(report: dict[str, Any]) -> list[str]:
     preflight = report.get("remote_preflight") if isinstance(report.get("remote_preflight"), dict) else {}
     identity = preflight.get("source_identity") if isinstance(preflight.get("source_identity"), dict) else {}
     lines.extend([
-        "Remote source / environment",
+        "遠端來源／執行環境",
         f"  preflight：{preflight.get('status', 'NOT_RUN')}",
         f"  expected HEAD：{identity.get('expected_head_sha', '未記錄')}",
         f"  observed HEAD：{identity.get('observed_head_sha', '未記錄')}",
@@ -2922,7 +2985,7 @@ def _render_engineer_execution_summary(report: dict[str, Any]) -> list[str]:
     browser = product.get("browser") if isinstance(product.get("browser"), dict) else {}
     if product or browser:
         lines.extend([
-            "Product / Browser",
+            "產品／Browser",
             f"  product build/operation：{_status_for_engineer(product.get('status'), reason=product.get('reason'))}",
             f"  product 判讀：{_engineer_reason(product.get('status'), product.get('reason'))}",
             f"  Browser：{_status_for_engineer(browser.get('status'), reason=browser.get('reason'))}",
@@ -2934,13 +2997,222 @@ def _render_engineer_execution_summary(report: dict[str, Any]) -> list[str]:
 
     matrix = qa.get("matrix") if isinstance(qa.get("matrix"), dict) else {}
     if matrix:
-        lines.extend(["QA matrix（每一列都是獨立判定）", "-" * 80])
+        lines.extend(["品質保證矩陣（每一列都是獨立判定）", "-" * 80])
         for dimension, item in matrix.items():
             if not isinstance(item, dict):
                 continue
             lines.append(f"- {dimension}: {_status_for_engineer(item.get('status'), reason=item.get('reason'))}；{_engineer_reason(item.get('status'), item.get('reason'))}")
         lines.append("")
     return lines
+
+
+def _case_title_zh(case: dict[str, Any]) -> str:
+    case_type = str(case.get("case_type") or "")
+    if case_type in {"product", "product_build_and_semantic_operation"}:
+        return "產品建置與語意操作"
+    if case_type in {"playwright_ui", "playwright_ui_regression"}:
+        return "Browser UI／UX Playwright 回歸"
+    return str(case.get("title") or "未命名測試案例")
+
+
+def _qa_dimension_label(dimension: str) -> str:
+    return {
+        "black_box": "黑箱／產品入口",
+        "white_box": "白箱／程式與回歸",
+        "functional": "功能行為",
+        "boundary": "邊界與無效輸入",
+        "stress": "壓力、逾時與資源",
+        "documentation": "文件與契約",
+        "product_binary": "產品建置與產物",
+        "browser_ui": "Browser UI",
+        "ui": "UI 互動",
+        "ux": "UX／可用性",
+    }.get(dimension, dimension)
+
+
+def _qa_matrix_command(report: dict[str, Any], dimension: str, item: dict[str, Any]) -> str:
+    test_results = report.get("test_results") if isinstance(report.get("test_results"), list) else []
+    wanted = "regression-pytest" if dimension == "white_box" else "diff-targeted-pytest" if dimension == "functional" else None
+    if dimension in {"ui", "ux"}:
+        wanted = "diff-targeted-pytest"
+    if wanted:
+        result = next((value for value in test_results if isinstance(value, dict) and value.get("id") == wanted), None)
+        if isinstance(result, dict) and result.get("command"):
+            return str(result.get("command"))
+    if dimension == "product_binary":
+        product = (report.get("qa_review") or {}).get("product_test", {}) if isinstance(report.get("qa_review"), dict) else {}
+        plan = product.get("plan") if isinstance(product, dict) and isinstance(product.get("plan"), dict) else {}
+        recipe = plan.get("build_recipe") if isinstance(plan.get("build_recipe"), list) else []
+        return "；".join(str(value) for value in recipe) if recipe else "未配置產品建置命令"
+    if dimension == "documentation":
+        files = item.get("files") if isinstance(item.get("files"), list) else []
+        return "讀取並解析變更文件：" + ", ".join(str(value) for value in files) if files else "讀取變更文件"
+    return "未建立可執行命令"
+
+
+def _qa_matrix_evidence(item: dict[str, Any]) -> list[str]:
+    evidence = item.get("evidence")
+    if isinstance(evidence, list):
+        return [str(value) for value in evidence if value]
+    if isinstance(evidence, dict):
+        return [f"{key}={value}" for key, value in evidence.items() if value]
+    return []
+
+
+def _render_complete_qa_matrix(report: dict[str, Any]) -> list[str]:
+    qa = report.get("qa_review") if isinstance(report.get("qa_review"), dict) else {}
+    matrix = qa.get("matrix") if isinstance(qa.get("matrix"), dict) else {}
+    lines = ["", "完整品質保證矩陣（包含非 UI／UX 測試）", "=" * 80]
+    lines.extend([
+        "這一節是 code review 的完整驗證範圍；UI／UX 只是其中兩個維度。",
+        "未執行、證據不足或 adapter 尚未支援的維度，不會被描述為通過。",
+        "",
+    ])
+    order = ("white_box", "functional", "black_box", "boundary", "stress", "documentation", "product_binary", "browser_ui", "ui", "ux")
+    for dimension in order:
+        item = matrix.get(dimension) if isinstance(matrix.get(dimension), dict) else {}
+        status = item.get("status", "NOT_RUN")
+        reason = str(item.get("reason") or "")
+        status_text = _status_for_engineer(status, reason=reason)
+        executed = "是" if str(status).upper() in {"PASS", "FAIL"} else "否／未形成完整結果"
+        evidence = _qa_matrix_evidence(item)
+        command = _qa_matrix_command(report, dimension, item)
+        lines.extend([
+            "",
+            f"維度：{_qa_dimension_label(dimension)}（`{dimension}`）",
+            f"  結果：{status_text}",
+            f"  本次是否實際執行：{executed}",
+            f"  判讀：{_engineer_reason(status, reason)}",
+            f"  原因代碼：`{reason or '未記錄'}`",
+            f"  可複製命令／方法：{command}",
+            f"  證據：{'; '.join(evidence) if evidence else '未建立；不能由缺少證據推定通過'}",
+            f"  case 數量：{item.get('case_count', '未記錄')}",
+        ])
+        if item.get("test_files"):
+            lines.append(f"  涉及測試檔案：{', '.join(str(value) for value in item.get('test_files', []))}")
+        if dimension in {"boundary", "stress", "black_box"} and str(status).upper() in {"HOLD", "BLOCK", "NOT_RUN"}:
+            lines.append("  補足方式：建立產品專屬 case、expected/actual、failure oracle 與 evidence，再單獨重跑此維度。")
+    cases = qa.get("cases") if isinstance(qa.get("cases"), list) else []
+    lines.extend(["", "生成／執行的 case 清單", "-" * 80])
+    if not cases:
+        lines.append("沒有生成 case；這不是 PASS。")
+    for case in cases:
+        if not isinstance(case, dict):
+            continue
+        lines.extend([
+            f"- `{case.get('case_id', '未命名')}`：{_case_title_zh(case)}",
+            f"  - 結果：{_status_for_engineer(case.get('status'), reason=case.get('reason'))}",
+            f"  - 維度：{', '.join(str(value) for value in case.get('dimensions', [])) or '未記錄'}",
+            f"  - 執行位置：{case.get('execution_target', '未記錄')}；證據來源：{case.get('evidence_origin', '未記錄')}",
+            f"  - result：{case.get('result_path', '未建立')}",
+            f"  - evidence：{', '.join(str(value) for value in case.get('evidence', []) if value) or '未建立'}",
+        ])
+    return lines
+
+
+def _render_reproduction_playbook(report: dict[str, Any]) -> list[str]:
+    worktree = (report.get("worktree") or {}).get("path") if isinstance(report.get("worktree"), dict) else None
+    worktree = str(worktree or "$REVIEW_WORKTREE")
+    test_results = report.get("test_results") if isinstance(report.get("test_results"), list) else []
+    lines = ["", "工程師可直接複製的重現手冊", "=" * 80]
+    lines.extend([
+        "以下命令使用 pinned review worktree 的 `.venv/bin/python`；不要改用 Quality Pilot checkout、產品主 repo venv 或 `/usr/bin/python3`。",
+        "",
+        "### 0. 進入正確的審查工作樹",
+        "```bash",
+        f"cd \"{worktree}\"",
+        "test -x .venv/bin/python",
+        "```",
+    ])
+    if test_results:
+        lines.extend(["", "### 1. 執行本次 review 選取的測試", ""])
+        for item in test_results:
+            if not isinstance(item, dict) or not item.get("command"):
+                continue
+            lines.extend([
+                f"#### {item.get('id', 'test')}",
+                f"目前結果：{_status_for_engineer(item.get('status'), reason=item.get('reason'), exit_code=item.get('exit_code'))}",
+                "```bash",
+                str(item.get("command")),
+                "```",
+                f"預期：exit code 0。實際：exit code {item.get('exit_code', '未記錄')}；原因={item.get('reason', '未記錄')}。",
+            ])
+            details = item.get("failure_details") if isinstance(item.get("failure_details"), list) else []
+            for detail in details[:20]:
+                if isinstance(detail, dict):
+                    lines.extend([
+                        f"- 失敗：`{detail.get('test')}`",
+                        f"  - 分類：{detail.get('category')}",
+                        f"  - 觀察：{detail.get('observed')}",
+                        f"  - 錯誤：{detail.get('error')}",
+                        f"  - 單測試命令：`{detail.get('reproduce')}`",
+                    ])
+    lines.extend([
+        "",
+        "### 2. 遠端語意 Browser 流程（不保存正式環境設定）",
+        "",
+        "此流程需要先有 READY 遠端前置檢查，並由 SSH tunnel 將動態 URL 交給本地 Playwright。",
+        "它使用真實 locator；不要把 body/button smoke 改回正式 oracle。",
+        "```yaml",
+        "steps:",
+        "  - action: expect_visible",
+        "    locator: {type: role, role: tab, name: PID Settings}",
+        "  - action: expect_visible",
+        "    locator: {type: role, role: tabpanel, name: PID Settings}",
+        "  - action: expect_visible",
+        "    locator: {type: label, name: CPU0-TMP throttle}",
+        "  - action: expect_visible",
+        "    locator: {type: label, name: CPU0-TMP set point}",
+        "  - action: fill",
+        "    locator: {type: label, name: CPU0-TMP set point}",
+        "    value: '120'",
+        "  - action: click",
+        "    locator: {type: role, role: button, name: Run auto_PID_tool}",
+        "  - action: expect_dialog",
+        "    expected: CPU0-TMP set point must be lower than throttle",
+        "  - action: expect_focused",
+        "    locator: {type: label, name: CPU0-TMP set point}",
+        "  - action: click",
+        "    locator: {type: role, role: tab, name: Fan Zone}",
+        "  - action: expect_visible",
+        "    locator: {type: role, role: tabpanel, name: Fan Zone}",
+        "  - action: expect_checked",
+        "    selector: 'section[aria-label=\"Zone 0\"] label.choice:has-text(\"CPU0-TMP\") input[type=\"checkbox\"]'",
+        "    expected: true",
+        "```",
+        "預期：validation dialog 出現、focus 回到錯誤欄位，且 diagnostics network 不包含 `/api/settings` POST。",
+        "",
+        "### 3. 非 UI／UX 維度的補測方式",
+        "- 黑箱：使用產品實際 CLI/TUI/API/UI 入口，保存 command、stdout/stderr、expected/actual 與 oracle。",
+        "- 功能：依 changed files 執行 targeted tests，並保存第一個失敗測試與完整輸出。",
+        "- 白箱：執行完整 regression，確認沒有把未完成 suite 當成 PASS。",
+        "- 邊界／無效輸入：建立空值、型別錯誤、範圍錯誤與硬體前置條件 case。",
+        "- 壓力／逾時：先定義 bounded duration、timeout、resource limit 與 baseline，再執行。",
+        "- 文件：重新讀取變更文件與 contract，確認命令、欄位與 workflow 描述一致。",
+        "- 產品建置：remote adapter 完成前，只能標示尚未評估，不能標示 PASS。",
+    ])
+    return lines
+
+
+def _render_final_result(report: dict[str, Any]) -> list[str]:
+    records = _report_browser_records(report)
+    passed = [item for item in records if str(item.get("status") or "").upper() == "PASS"]
+    failed = [item for item in records if str(item.get("status") or "").upper() == "FAIL"]
+    product = report.get("product_test_evidence") if isinstance(report.get("product_test_evidence"), dict) else {}
+    return [
+        "",
+        "最終結果（請以本節作為摘要）",
+        "=" * 80,
+        f"Quality Pilot 建議：{_quality_pilot_recommendation(report)}",
+        "PR merge decision：由 PR 擁有者決定；Quality Pilot 沒有執行 merge，也沒有修改 merge gate。",
+        f"實際通過的 Browser／Playwright case：{len(passed)} 個。",
+        f"實際失敗的 Browser／Playwright case：{len(failed)} 個。",
+        f"產品建置／產物：{_status_for_engineer(product.get('status'), reason=product.get('reason')) if product else '未建立'}；{_engineer_reason(product.get('status'), product.get('reason')) if product else '沒有產品建置結果。'}",
+        f"完整 QA 結果：{_status_for_engineer(report.get('qa_outcome'))}。",
+        "只有具備實際命令、oracle 與 evidence 的 case 才能支持通過；HOLD、BLOCK、逾時與未評估都不是 PASS。",
+        "",
+        "工程師下一步：依上方『工程師可直接複製的重現手冊』先重現失敗，再逐項修復或提供可追溯的風險接受理由。",
+    ]
 
 
 def _render_detailed_text(report: dict[str, Any]) -> str:
@@ -2954,9 +3226,10 @@ def _render_detailed_text(report: dict[str, Any]) -> str:
         f"合併請求：第 {report.get('pr_number')} 號",
         f"基準：{report.get('base_ref') or report.get('base_sha')}",
         f"目前版本：{report.get('head_ref') or report.get('head_sha')}",
+        "報告語言：繁體中文（zh-TW）",
         "",
-        "本報告用於協助開發人員理解、重現與修復問題，不是自動批准或合併決定。",
-        "最終的 COMMENT／REQUEST_CHANGES／APPROVED 由使用者決定。",
+        "本報告用於協助開發人員理解、重現與修復問題，不是自動核准或合併決定。",
+        "最終的留言、要求修改或核准由 PR 擁有者決定。",
         "所有建議的重現步驟都會標示是否實際執行；沒有證據的步驟不宣稱為測試結果。",
         "",
         *_render_engineer_execution_summary(report),
@@ -2966,8 +3239,8 @@ def _render_detailed_text(report: dict[str, Any]) -> str:
         f"測試結果：{_zh_value(report.get('test_outcome'))}",
         f"產品測試結果：{_zh_value(report.get('product_test_outcome'))}",
         f"Browser UI 結果：{_zh_value(report.get('browser_ui_outcome'))}",
-        f"Quality Pilot tooling 結果：{_zh_value(report.get('tooling_outcome'))}",
-        f"Infrastructure preflight 結果：{_zh_value(report.get('infrastructure_outcome'))}",
+        f"Quality Pilot 工具結果：{_zh_value(report.get('tooling_outcome'))}",
+        f"基礎環境前置檢查結果：{_zh_value(report.get('infrastructure_outcome'))}",
         f"產品評估狀態：{_zh_value(report.get('product_evaluation_status'))}",
         f"品質保證結果：{_zh_value(report.get('qa_outcome'))}",
         f"結論：{report.get('conclusion')}",
@@ -2977,19 +3250,19 @@ def _render_detailed_text(report: dict[str, Any]) -> str:
         f"可改善項目：{summary.get('nice_to_have', 0)}",
         "",
         "執行分層與證據來源",
-        f"- local review worktree：{_zh_value(report.get('execution_targets', {}).get('local_review_worktree')) if isinstance(report.get('execution_targets'), dict) else '未確認'}",
-        f"- local pytest：{_zh_value(report.get('execution_targets', {}).get('local_pytest')) if isinstance(report.get('execution_targets'), dict) else '未確認'}",
-        f"- local Python：{(report.get('execution_targets') or {}).get('local_python', '未確認') if isinstance(report.get('execution_targets'), dict) else '未確認'}",
-        f"- local evidence origin：{(report.get('execution_targets') or {}).get('local_evidence_origin', '未確認') if isinstance(report.get('execution_targets'), dict) else '未確認'}",
-        f"- remote pytest：{(report.get('execution_targets') or {}).get('remote_pytest', 'NOT_RUN') if isinstance(report.get('execution_targets'), dict) else 'NOT_RUN'}（remote product checkout，與 local regression 分開）",
-        f"- product target：{(report.get('execution_targets') or {}).get('product_target', '未確認') if isinstance(report.get('execution_targets'), dict) else '未確認'}",
-        f"- Playwright target：{(report.get('execution_targets') or {}).get('playwright_target', '未確認') if isinstance(report.get('execution_targets'), dict) else '未確認'}",
-        f"- remote preflight：{((report.get('remote_preflight') or {}).get('status', 'NOT_RUN')) if isinstance(report.get('remote_preflight'), dict) else 'NOT_RUN'}",
-        f"- Quality Pilot automation recommendation gate：{((report.get('review_gate') or {}).get('status', 'BLOCKED')) if isinstance(report.get('review_gate'), dict) else 'BLOCKED'}；原因={((report.get('review_gate') or {}).get('reason', '未建立 gate')) if isinstance(report.get('review_gate'), dict) else '未建立 gate'}；這不是 Gitea merge gate",
-        "- 每個 case 必須明確標示 execution target 與 evidence origin；local 與 remote 證據不得混寫。",
+        f"- 本地審查工作樹：{_zh_value(report.get('execution_targets', {}).get('local_review_worktree')) if isinstance(report.get('execution_targets'), dict) else '未確認'}",
+        f"- 本地 pytest：{_zh_value(report.get('execution_targets', {}).get('local_pytest')) if isinstance(report.get('execution_targets'), dict) else '未確認'}",
+        f"- 本地 Python：{(report.get('execution_targets') or {}).get('local_python', '未確認') if isinstance(report.get('execution_targets'), dict) else '未確認'}",
+        f"- 本地證據來源：{(report.get('execution_targets') or {}).get('local_evidence_origin', '未確認') if isinstance(report.get('execution_targets'), dict) else '未確認'}",
+        f"- 遠端 pytest：{_zh_value((report.get('execution_targets') or {}).get('remote_pytest', 'NOT_RUN')) if isinstance(report.get('execution_targets'), dict) else '未執行'}（與本地回歸分開記錄）",
+        f"- 產品執行目標：{(report.get('execution_targets') or {}).get('product_target', '未確認') if isinstance(report.get('execution_targets'), dict) else '未確認'}",
+        f"- Playwright 執行目標：{(report.get('execution_targets') or {}).get('playwright_target', '未確認') if isinstance(report.get('execution_targets'), dict) else '未確認'}",
+        f"- 遠端前置檢查：{_zh_value(((report.get('remote_preflight') or {}).get('status', 'NOT_RUN')) if isinstance(report.get('remote_preflight'), dict) else 'NOT_RUN')}",
+        f"- Quality Pilot 建議閘門：{_zh_value(((report.get('review_gate') or {}).get('status', 'BLOCKED')) if isinstance(report.get('review_gate'), dict) else 'BLOCKED')}；原因={((report.get('review_gate') or {}).get('reason', '未建立')) if isinstance(report.get('review_gate'), dict) else '未建立'}；這不是 Gitea merge gate",
+        "- 每個案例都必須明確標示執行位置與證據來源；本地與遠端證據不得混寫。",
         "",
         "證據規則",
-        "- 確定性問題來自 pinned diff、實際執行命令、產品測試介面或 generated case 證據。",
+        "- 確定性問題來自 pinned diff、實際執行命令、產品測試介面或生成案例證據。",
         "- 疑似機密值會完整遮蔽，但在安全範圍內保留程式碼上下文。",
         "- 建議的重現步驟只有在附有執行狀態與證據時，才會被描述為已執行結果。",
         "",
@@ -3065,15 +3338,19 @@ def _render_detailed_text(report: dict[str, Any]) -> str:
             "",
             f"測試：{item.get('id')}",
             f"命令：{item.get('command')}",
-            f"狀態：{_zh_value(item.get('status'))}／原因={_zh_value(item.get('reason'))}",
+            f"狀態：{_status_for_engineer(item.get('status'), reason=item.get('reason'), exit_code=item.get('exit_code'))}",
+            f"原因代碼：`{item.get('reason') or '未記錄'}`",
             f"結束代碼：{item.get('exit_code')}",
-            f"覆蓋狀態：{item.get('coverage_status', 'FULL')}",
-            f"是否嘗試替代測試：{item.get('fallback_attempted', False)}",
-            f"替代測試詳情：狀態={((item.get('fallback') or {}).get('status', '未執行'))}；原因={((item.get('fallback') or {}).get('reason', '無'))}；跳過範圍={', '.join(str(value) for value in ((item.get('fallback') or {}).get('skipped_scope') or [])) or '無'}",
+            f"覆蓋狀態：{_zh_value(item.get('coverage_status', 'FULL'))}",
+            f"是否嘗試替代測試：{'是' if item.get('fallback_attempted', False) else '否'}",
+            f"替代測試詳情：狀態={_zh_value((item.get('fallback') or {}).get('status', 'NOT_RUN'))}；原因={(item.get('fallback') or {}).get('reason', '無')}；跳過範圍={', '.join(str(value) for value in ((item.get('fallback') or {}).get('skipped_scope') or [])) or '無'}",
             f"預期結果：{repro.get('expected', '結束代碼為 0')}",
-            f"實際結果：{repro.get('actual', _zh_value(item.get('reason')))}",
-            f"證據：{', '.join(str(path) for path in repro.get('evidence', []) if path)}",
+            f"實際結果：{repro.get('actual', _engineer_reason(item.get('status'), item.get('reason'), item.get('exit_code')))}",
+            f"證據：{', '.join(str(path) for path in repro.get('evidence', []) if path) or '未建立'}",
         ])
+    lines.extend(_render_complete_qa_matrix(report))
+    lines.extend(_render_reproduction_playbook(report))
+    lines.extend(_render_final_result(report))
     return "\n".join(lines) + "\n"
 
 
