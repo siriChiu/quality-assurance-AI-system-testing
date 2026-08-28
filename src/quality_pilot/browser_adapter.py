@@ -12,6 +12,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import time
 import re
 import tempfile
@@ -38,6 +39,7 @@ def run_browser_test(
     timeout_ms: int = 60_000,
     dry_run: bool = False,
     root: Path | None = None,
+    playwright_python: str | Path | None = None,
     case_id: str | None = None,
     run_id: str | None = None,
     prestarted: bool = False,
@@ -82,6 +84,7 @@ def run_browser_test(
         return case_result(_result("BLOCK", "environment_profile_required", contract_identity_hash))
 
     try:
+        _add_playwright_site_packages(playwright_python, cwd=cwd)
         from playwright.sync_api import Error as PlaywrightError
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         from playwright.sync_api import sync_playwright
@@ -108,6 +111,7 @@ def run_browser_test(
     status = "BLOCK"
     reason = "browser_launch_failed"
     failure_type = None
+    error_detail: str | None = None
     current_step: dict[str, Any] | None = None
     console_events: list[dict[str, Any]] = []
     network_events: list[dict[str, Any]] = []
@@ -245,7 +249,18 @@ def run_browser_test(
                     page.locator(selector).select_option(str(step.get("value") or ""), timeout=timeout)
                     interaction_count += 1
                 elif action == "expect_visible":
-                    page.locator(selector).wait_for(state="visible", timeout=timeout)
+                    locator = page.locator(selector)
+                    count = locator.count()
+                    if count == 0:
+                        # Preserve Playwright's normal timeout/oracle
+                        # classification for a selector that is absent.
+                        locator.wait_for(state="visible", timeout=timeout)
+                    else:
+                        visible_count = sum(1 for item_index in range(count) if locator.nth(item_index).is_visible())
+                        if visible_count == 0:
+                            raise AssertionError(f"browser_selector_not_visible:{selector}")
+                        item["matching_count"] = count
+                        item["visible_count"] = visible_count
                     positive_assertions += 1
                 elif action == "expect_text":
                     page.locator(selector).wait_for(state="visible", timeout=timeout)
@@ -285,6 +300,7 @@ def run_browser_test(
         failure_type = "BROWSER_STARTUP_BLOCK" if page is None else "HARNESS_INTERACTION_FAILURE"
         status = "BLOCK"
         reason = "browser_runtime_failed"
+        error_detail, _ = redact_text(str(exc), path="browser.playwright.error")
         _capture_browser_artifacts(page, screenshot_path, context, trace_path)
     except (OSError, ValueError, RuntimeError) as exc:
         failure_type = "BROWSER_STARTUP_BLOCK" if page is None else "TIMEOUT_UNCLASSIFIED"
@@ -322,7 +338,8 @@ def run_browser_test(
     if trace_path.exists():
         _sanitize_trace(trace_path, _url_sensitive_values(url))
     interaction_path.write_text(json.dumps(interactions, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    result = case_result(_result(status, reason, contract_identity_hash))
+    result_details = {"error": error_detail} if error_detail else {}
+    result = case_result(_result(status, reason, contract_identity_hash, **result_details))
     result.update(
         {
             "url": _redact_url(url),
@@ -412,11 +429,14 @@ def _collect_browser_diagnostics(
     if selector:
         try:
             locator = page.locator(selector)
+            count = locator.count()
+            visible_count = sum(1 for item_index in range(count) if locator.nth(item_index).is_visible())
             diagnostics["locator"] = {
-                "count": locator.count(),
-                "visible": locator.is_visible() if locator.count() else False,
-                "enabled": locator.is_enabled() if locator.count() else False,
-                "aria_disabled": locator.get_attribute("aria-disabled") if locator.count() else None,
+                "count": count,
+                "visible": visible_count > 0,
+                "visible_count": visible_count,
+                "enabled": locator.nth(0).is_enabled() if count else False,
+                "aria_disabled": locator.nth(0).get_attribute("aria-disabled") if count else None,
             }
         except Exception:
             diagnostics["locator"] = {"status": "unavailable"}
@@ -434,6 +454,32 @@ def _capture_browser_artifacts(page: Any, screenshot: Path, context: Any, trace:
             context.tracing.stop(path=str(trace))
         except Exception:
             pass
+
+
+def _add_playwright_site_packages(
+    python_executable: str | Path | None,
+    *,
+    cwd: Path,
+) -> None:
+    """Make the selected review venv's Python packages available to this process.
+
+    The Hermes/Quality Pilot dispatcher may itself run under system Python,
+    while the disposable review venv owns Playwright.  Browser execution is
+    still local to this process and uses the selected venv's package set; no
+    pip install is attempted here and no product/remote interpreter is used.
+    """
+    if not python_executable:
+        return
+    candidate = Path(str(python_executable))
+    if not candidate.is_absolute():
+        candidate = cwd / candidate
+    if candidate.name not in {"python", "python3"} or candidate.parent.name != "bin":
+        return
+    venv_root = candidate.parent.parent
+    site_roots = sorted(venv_root.glob("lib/python*/site-packages"))
+    for site_root in reversed(site_roots):
+        if site_root.is_dir() and str(site_root) not in sys.path:
+            sys.path.insert(0, str(site_root))
 
 
 def _terminate_process(process: subprocess.Popen[bytes] | None) -> None:

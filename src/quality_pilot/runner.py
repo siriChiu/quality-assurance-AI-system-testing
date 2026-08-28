@@ -54,6 +54,7 @@ class RunContext:
     adapter_snapshot: dict[str, Any] | None = None
     adapter_review_id: str | None = None
     product_python: Path | None = None
+    review_python: str | None = None
 
 
 def utc_now() -> str:

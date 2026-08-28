@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
-from quality_pilot.browser_adapter import _extract_discovered_url, _sanitize_trace, run_browser_test
+from quality_pilot.browser_adapter import _add_playwright_site_packages, _extract_discovered_url, _sanitize_trace, run_browser_test
 
 
 class BrowserAdapterTest(unittest.TestCase):
@@ -18,6 +20,15 @@ class BrowserAdapterTest(unittest.TestCase):
         }
         value.update(overrides)
         return value
+
+    def test_review_venv_site_packages_are_selected_for_browser_client(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            site = root / ".venv" / "lib" / "python3.12" / "site-packages"
+            site.mkdir(parents=True)
+            with patch.object(sys, "path", []):
+                _add_playwright_site_packages(".venv/bin/python", cwd=root)
+                self.assertEqual(sys.path[0], str(site))
 
     def test_missing_browser_contract_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

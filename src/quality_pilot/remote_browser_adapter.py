@@ -33,6 +33,7 @@ def run_remote_browser_test(
     root: Path,
     case_id: str,
     run_id: str,
+    playwright_python: str | Path | None = None,
     timeout_ms: int = 60_000,
     dry_run: bool = False,
 ) -> dict[str, Any]:
@@ -150,6 +151,7 @@ def run_remote_browser_test(
             environment_profile={"ready": True, "configured": {}},
             timeout_ms=timeout_ms,
             root=root,
+            playwright_python=playwright_python,
             case_id=case_id,
             run_id=run_id,
             prestarted=True,
@@ -224,7 +226,15 @@ def _cleanup_remote_process(host: str, remote_pid: int | None) -> dict[str, str]
         return {"status": "UNVERIFIED", "reason": "remote_pid_not_observed"}
     try:
         completed = subprocess.run(
-            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, f"kill -TERM -- -{remote_pid}"],
+            [
+                "ssh",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                host,
+                f"kill -TERM -- -{remote_pid} 2>/dev/null || true; sleep 0.2; if kill -0 -- -{remote_pid} 2>/dev/null; then exit 1; fi",
+            ],
             text=True,
             capture_output=True,
             timeout=15,

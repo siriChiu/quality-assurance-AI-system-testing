@@ -54,9 +54,10 @@ class ProductTestingTest(unittest.TestCase):
                 root=root,
                 evidence_dir=root / "evidence",
                 environment_profile=self._profile(),
+                review_python=".venv/bin/python",
             )
             browser = {"case_id": "PR-32-PRODUCT-BROWSER-UI", "status": "BLOCK", "evidence": {}}
-            with patch("quality_pilot.product_case_adapter.run_product_tests", return_value={"status": "BLOCK", "browser": browser}):
+            with patch("quality_pilot.product_case_adapter.run_product_tests", return_value={"status": "BLOCK", "browser": browser}) as run_product:
                 result = execute_product_case(
                     contract,
                     context,
@@ -65,6 +66,7 @@ class ProductTestingTest(unittest.TestCase):
                     review_id="review-32",
                 )
             self.assertEqual(result["run_id"], "review-32")
+            self.assertEqual(run_product.call_args.kwargs["playwright_python"], str(root / ".venv/bin/python"))
             self.assertEqual(result["browser_case_result"]["run_id"], "review-32")
             self.assertEqual(result["browser_case_result"]["parent_case_id"], "PR-32-PRODUCT")
 

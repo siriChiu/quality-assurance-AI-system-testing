@@ -87,6 +87,7 @@ def run_product_tests(
     run_id: str | None = None,
     contract_hash: str | None = None,
     product_python: Path | None = None,
+    playwright_python: str | Path | None = None,
     product_settings: Mapping[str, Any] | None = None,
     execution_contract: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -247,6 +248,7 @@ def run_product_tests(
                         evidence_dir=evidence_dir / "browser",
                         contract_identity_hash=contract_hash,
                         root=report_root,
+                        playwright_python=playwright_python,
                         case_id=f"{case_id}-BROWSER-UI",
                         run_id=run_id,
                         timeout_ms=int(web_ui.get("timeout_ms") or settings.get("run_timeout_ms", 60_000)),
@@ -264,6 +266,7 @@ def run_product_tests(
                     timeout_ms=int(web_ui.get("timeout_ms") or settings.get("run_timeout_ms", 60_000)),
                     dry_run=False,
                     root=report_root,
+                    playwright_python=playwright_python,
                     case_id=f"{case_id}-BROWSER-UI",
                     run_id=run_id,
                 )

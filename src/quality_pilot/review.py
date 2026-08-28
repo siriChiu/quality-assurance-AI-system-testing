@@ -1182,6 +1182,7 @@ def _run_comprehensive_review_qa(
     review_config = _build_review_project_config(config, worktree_path, review_workspace)
     profile = environment_profile_status(review_config)
     run_id = f"review-{_repo_slug(repo)}-pr-{pr_number}-{head_sha[:12]}"
+    review_python_command = python_executable or _review_python_executable(config, worktree_path)
     product_contract = build_product_case_contract(
         review_config,
         case_id=f"PR-{pr_number}-PRODUCT",
@@ -1199,10 +1200,10 @@ def _run_comprehensive_review_qa(
             adapter_snapshot=snapshot,
             adapter_review_id=run_id,
             product_python=_resolve_review_product_python(config, worktree_path),
+            review_python=review_python_command,
         ),
         dry_run=dry_run,
     )
-    review_python_command = python_executable or _review_python_executable(config, worktree_path)
     browser_regression_case_result = _run_browser_regression_case(
         review_config,
         worktree=worktree_path,
@@ -1272,10 +1273,21 @@ def _run_comprehensive_review_qa(
                     json.dumps(browser_contract_raw, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
                     encoding="utf-8",
                 )
-        contracts = [
-            contract for contract in load_contracts(review_config.paths.cases)
-            if contract.case_id not in {product_contract.case_id, str((browser_contract_raw or {}).get("case_id") or "")}
+        excluded_case_ids = {product_contract.case_id, str((browser_contract_raw or {}).get("case_id") or "")}
+        generated_paths = [
+            path for path in sorted(review_config.paths.cases.glob("*.yaml"))
+            if path.stem not in excluded_case_ids
         ]
+        if generated_paths:
+            # Validate only generated contracts here.  The canonical product
+            # contract carries review lineage metadata such as review_id; it
+            # is already executed and must not be revalidated as a generated
+            # test contract or mistaken for opaque secret material.
+            contracts = [contract for path in generated_paths for contract in load_contracts(path)]
+        else:
+            # Keep direct-library and mocked generation callers compatible
+            # when no generated files were materialized.
+            contracts = [contract for contract in load_contracts(review_config.paths.cases) if contract.case_id not in excluded_case_ids]
     except (CaseGenerationError, OSError, ValueError) as exc:
         generation = {"status": "BLOCK", "reason": "case_generation_failed", "error": type(exc).__name__}
 
@@ -1287,6 +1299,7 @@ def _run_comprehensive_review_qa(
                     root=worktree_path,
                     evidence_dir=review_config.paths.evidence / run_id,
                     environment_profile=profile,
+                    review_python=review_python_command,
                 ),
                 dry_run=False,
             )

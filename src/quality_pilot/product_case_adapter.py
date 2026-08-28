@@ -54,6 +54,12 @@ def execute_product_case(contract: CaseContract, context: RunContext, *, config:
     started = utc_now()
     quality = contract.raw.get("quality_pilot") if isinstance(contract.raw.get("quality_pilot"), dict) else {}
     execution_contract = quality.get("execution_contract") if isinstance(quality.get("execution_contract"), dict) else {}
+    review_python = context.review_python
+    if review_python and not Path(review_python).is_absolute():
+        # Keep the venv path lexically intact. ``Path.resolve()`` follows the
+        # usual venv/bin/python symlink back to /usr/bin/python3 and would make
+        # the Browser client lose the review venv's site-packages boundary.
+        review_python = str(context.root / review_python)
     product = run_product_tests(
         config,
         worktree=context.root,
@@ -67,6 +73,7 @@ def execute_product_case(contract: CaseContract, context: RunContext, *, config:
         run_id=review_id,
         contract_hash=contract.contract_hash,
         product_python=context.product_python,
+        playwright_python=review_python,
         product_settings=quality.get("product_testing") if isinstance(quality.get("product_testing"), dict) else None,
         execution_contract=execution_contract,
     )
