@@ -117,10 +117,11 @@ def normalize_execution_contract(
         "start_command": _target_command(candidate_runner, product_target=product_target, remote_python=remote_python, remote_repo=remote_repo, root=worktree or config.root),
         "url_discovery": "stdout",
         "url_pattern": r"https?://[^\s]+",
-        # Only deterministic smoke steps are promoted automatically.  The
-        # detailed source-derived actions remain candidate metadata until a
-        # future selector confirmation flow can validate them.
-        "steps": _smoke_steps() if discovery.get("browser_test_files") else [],
+        # Safe role-based navigation and visibility assertions are promoted
+        # only as a confirmation candidate.  Mutating actions such as Run,
+        # fill, and press remain excluded until the user explicitly confirms
+        # a product-specific workflow.
+        "steps": discovery.get("browser_semantic_steps") or _smoke_steps(),
         "candidate_steps": discovery.get("browser_step_candidates", []),
     } if candidate_runner and discovery.get("browser_test_files") else None
 
@@ -262,12 +263,14 @@ def _discover(config: ProjectConfig, root: Path) -> dict[str, Any]:
     runner_candidates = browser_candidates or candidates[:8]
     browser_test_files = _browser_test_files(root)
     all_browser_steps = _browser_step_candidates(root)
+    semantic_steps = _safe_semantic_steps(root)
     return {
         "runner_candidates": runner_candidates,
         "browser_test_files": browser_test_files,
         "browser_test_count": len(browser_test_files),
         "browser_step_candidates": all_browser_steps[:40],
         "browser_step_candidate_count": len(all_browser_steps),
+        "browser_semantic_steps": semantic_steps,
         "browser_smoke_steps": _smoke_steps() if browser_test_files else [],
         "source": ["README", "--help/source analysis", "runtime profile", "existing browser tests"],
     }
@@ -294,6 +297,54 @@ def _target_command(command: str, *, product_target: str, remote_python: str, re
         except (OSError, ValueError):
             pass
     return " ".join(shlex.quote(token) for token in tokens)
+
+
+def _safe_semantic_steps(root: Path) -> list[dict[str, Any]]:
+    """Extract only read-only role navigation/visibility candidates.
+
+    Existing Browser tests are discovery evidence, not authority.  This
+    extractor deliberately excludes fill/press/run/clear actions and only
+    returns literal role/name locators that can be reviewed once before being
+    persisted as the product Browser contract.
+    """
+    role_pattern = re.compile(
+        r"""get_by_role\(\s*['\"](?P<role>[^'\"]+)['\"]\s*,\s*name\s*=\s*['\"](?P<name>[^'\"]+)['\"]"""
+    )
+    label_pattern = re.compile(r"""get_by_label\(\s*['\"](?P<label>[^'\"]+)['\"]\s*\)""")
+    allowed_roles = {"tab", "tabpanel", "heading", "button", "link"}
+    steps: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for relative in _browser_test_files(root):
+        path = root / relative
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            stripped = line.strip()
+            action = "click" if ".click(" in stripped else ("expect_visible" if "to_be_visible" in stripped else None)
+            if action is None:
+                continue
+            role_match = role_pattern.search(stripped)
+            if role_match:
+                role = role_match.group("role")
+                name = role_match.group("name")
+                if role not in allowed_roles or (action == "click" and role != "tab"):
+                    continue
+                locator = {"type": "role", "role": role, "name": name}
+            else:
+                label_match = label_pattern.search(stripped)
+                if not label_match or action != "expect_visible":
+                    continue
+                locator = {"type": "label", "name": label_match.group("label")}
+            key = json.dumps([action, locator], ensure_ascii=False, sort_keys=True)
+            if key in seen:
+                continue
+            seen.add(key)
+            steps.append({"action": action, "locator": locator})
+            if len(steps) >= 16:
+                return steps
+    return steps
 
 
 def _smoke_steps() -> list[dict[str, str]]:

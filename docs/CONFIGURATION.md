@@ -219,6 +219,12 @@ interactions, and requires at least one positive interaction and semantic UI
 assertion. It records redacted server logs, interaction JSON, screenshot/hash,
 and trace. It never falls back to curl/API/mock DOM.
 
+A `body`/`button` visibility probe is deliberately reported as `HOLD`, not
+`PASS`, because it has no user interaction or state assertion. Discovery can
+produce confirmed-candidate semantic locators such as role-based tabs,
+tabpanels, headings, and labels. Mutating actions such as Run, fill, and press
+remain candidate-only until the user confirms the product-specific workflow.
+
 `doctor` exposes `runtime_profile.repo_analysis` before asking anything. Clarify prompts are bullet-listed and ask only for details the repo analysis could not infer, such as missing runner path, credential env names, target resources, fixture/config paths, or side-effect boundaries for non-parser tests.
 
 Generated testcase commands must use this product entrypoint or a user-confirmed runner. Repo-only metadata checks, static repo checks, `python3 -c`, `compileall`, synthetic invalid commands, `go test`, and `go run` are readiness or implementation hints, not testcase `commands[].run`, unless the user explicitly configured one of them as the product runner.

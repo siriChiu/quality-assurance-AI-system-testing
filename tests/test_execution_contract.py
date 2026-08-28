@@ -30,6 +30,25 @@ class ExecutionContractTest(unittest.TestCase):
             self.assertEqual(contract["candidate_contract"]["url_discovery"], "stdout")
             self.assertEqual(contract["candidate_contract"]["steps"][0]["selector"], "body")
 
+    def test_discovery_extracts_safe_role_workflow_candidates_without_mutating_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._setup(root)
+            (root / "main.py").write_text("# --browser\n", encoding="utf-8")
+            browser_dir = root / "tests" / "browser_ui"
+            browser_dir.mkdir(parents=True)
+            (browser_dir / "test_ui.py").write_text(
+                "page.get_by_role('tab', name='Fan Zone').click()\n"
+                "expect(page.get_by_role('tabpanel', name='Fan Zone')).to_be_visible()\n"
+                "page.get_by_role('button', name='Run auto_PID_tool').click()\n",
+                encoding="utf-8",
+            )
+            contract = normalize_execution_contract(load_project_config(root))
+            steps = contract["discovery"]["browser_semantic_steps"]
+            self.assertIn({"action": "click", "locator": {"type": "role", "role": "tab", "name": "Fan Zone"}}, steps)
+            self.assertIn({"action": "expect_visible", "locator": {"type": "role", "role": "tabpanel", "name": "Fan Zone"}}, steps)
+            self.assertNotIn({"action": "click", "locator": {"type": "role", "role": "button", "name": "Run auto_PID_tool"}}, steps)
+
     def test_legacy_web_ui_is_normalized_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

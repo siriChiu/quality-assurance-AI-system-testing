@@ -1199,6 +1199,7 @@ def cmd_review_pr(args: argparse.Namespace) -> int:
             confirm=args.confirm,
             dry_run=args.dry_run,
             timeout_seconds=args.timeout,
+            test_timeout_seconds=getattr(args, "test_timeout", None),
             comprehensive=not getattr(args, "diff_only", False),
             prepare_dependencies=not getattr(args, "no_prepare_dependencies", False),
             confirm_discovery=getattr(args, "confirm_discovery", False),
@@ -1933,7 +1934,8 @@ def build_parser() -> argparse.ArgumentParser:
     review_pr_cmd.add_argument("--checkout", default=None, help="Git checkout used as fetch source; defaults to project root")
     review_pr_cmd.add_argument("--confirm", action="store_true", help="Confirm the displayed advisory COMMENT preview and write a gated Gitea review request; never approves")
     review_pr_cmd.add_argument("--dry-run", action="store_true")
-    review_pr_cmd.add_argument("--timeout", type=int, default=120)
+    review_pr_cmd.add_argument("--timeout", type=int, default=120, help="General product/transport timeout in seconds")
+    review_pr_cmd.add_argument("--test-timeout", type=int, default=None, help="Per-regression pytest timeout; defaults to 600s targeted and 900s full-suite")
     review_pr_cmd.add_argument("--diff-only", action="store_true", help="Skip case generation/run and perform only deterministic diff review plus regression tests")
     review_pr_cmd.add_argument("--no-prepare-dependencies", action="store_true", help="Do not install declared local test dependencies or Playwright browser")
     review_pr_cmd.add_argument("--confirm-discovery", action="store_true", help="Confirm and persist the discovered product/browser execution contract")

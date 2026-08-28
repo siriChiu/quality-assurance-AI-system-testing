@@ -218,13 +218,14 @@ def run_browser_test(
                     raise ValueError("browser_step_invalid")
                 action = str(step.get("action") or "").strip().lower()
                 selector = str(step.get("selector") or "").strip()
-                current_step = {"index": index, "action": action, "selector": selector}
+                locator_spec = step.get("locator") if isinstance(step.get("locator"), Mapping) else None
+                current_step = {"index": index, "action": action, "selector": selector, "locator": dict(locator_spec or {})}
                 timeout = int(step.get("timeout_ms") or timeout_ms)
-                item: dict[str, Any] = {"index": index, "action": action, "selector": selector}
+                item: dict[str, Any] = {"index": index, "action": action, "selector": selector, "locator": dict(locator_spec or {})}
                 if action == "goto":
                     page.goto(str(step.get("url") or url), wait_until="domcontentloaded", timeout=timeout)
                 elif action == "click":
-                    locator = page.locator(selector)
+                    locator = _step_locator(page, step)
                     try:
                         locator.click(timeout=timeout)
                     except PlaywrightTimeoutError:
@@ -234,22 +235,22 @@ def run_browser_test(
                         # after deterministic locator, visibility, enabled,
                         # and overlay checks; it is still a real Playwright
                         # interaction and is recorded explicitly.
-                        if not _safe_force_click(page, selector):
+                        if not _safe_force_click(page, selector, locator=locator):
                             raise
                         locator.click(timeout=min(timeout, 1_000), force=True)
                         item["interaction_mode"] = "force_after_stability_timeout"
                     interaction_count += 1
                 elif action == "fill":
-                    page.locator(selector).fill(_resolve_value(str(step.get("value") or "")), timeout=timeout)
+                    _step_locator(page, step).fill(_resolve_value(str(step.get("value") or "")), timeout=timeout)
                     interaction_count += 1
                 elif action == "press":
-                    page.locator(selector).press(str(step.get("key") or "Enter"), timeout=timeout)
+                    _step_locator(page, step).press(str(step.get("key") or "Enter"), timeout=timeout)
                     interaction_count += 1
                 elif action == "select_option":
-                    page.locator(selector).select_option(str(step.get("value") or ""), timeout=timeout)
+                    _step_locator(page, step).select_option(str(step.get("value") or ""), timeout=timeout)
                     interaction_count += 1
                 elif action == "expect_visible":
-                    locator = page.locator(selector)
+                    locator = _step_locator(page, step)
                     count = locator.count()
                     if count == 0:
                         # Preserve Playwright's normal timeout/oracle
@@ -262,9 +263,12 @@ def run_browser_test(
                         item["matching_count"] = count
                         item["visible_count"] = visible_count
                     positive_assertions += 1
+                    if locator_spec or selector not in {"", "body", "button"}:
+                        state_assertions += 1
                 elif action == "expect_text":
-                    page.locator(selector).wait_for(state="visible", timeout=timeout)
-                    actual = page.locator(selector).inner_text(timeout=timeout)
+                    locator = _step_locator(page, step)
+                    locator.wait_for(state="visible", timeout=timeout)
+                    actual = locator.inner_text(timeout=timeout)
                     expected = str(step.get("expected") or "")
                     if expected not in actual:
                         raise AssertionError(f"browser_text_mismatch:{selector}")
@@ -367,15 +371,39 @@ def run_browser_test(
     return result
 
 
-def _safe_force_click(page: Any, selector: str) -> bool:
+def _step_locator(page: Any, step: Mapping[str, Any]) -> Any:
+    locator = step.get("locator") if isinstance(step.get("locator"), Mapping) else {}
+    locator_type = str(locator.get("type") or "").strip().lower()
+    if locator_type == "role":
+        role = str(locator.get("role") or "").strip()
+        name = str(locator.get("name") or "").strip()
+        return page.get_by_role(role, name=name) if name else page.get_by_role(role)
+    if locator_type == "label":
+        return page.get_by_label(str(locator.get("name") or ""))
+    if locator_type == "text":
+        return page.get_by_text(str(locator.get("text") or ""), exact=bool(locator.get("exact", False)))
+    return page.locator(str(step.get("selector") or "").strip())
+
+
+def _safe_force_click(page: Any, selector: str, *, locator: Any | None = None) -> bool:
     try:
-        locator = page.locator(selector)
-        if locator.count() != 1 or not locator.is_visible() or not locator.is_enabled() or locator.bounding_box() is None:
+        locator = locator or page.locator(selector)
+        if locator.count() != 1 or not locator.is_visible() or not locator.is_enabled():
             return False
-        overlay = page.evaluate(
-            """(selector) => { const el = document.querySelector(selector); if (!el) return null; const r = el.getBoundingClientRect(); const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return top && top !== el && !el.contains(top) ? {tag: top.tagName, id: top.id || '', className: top.className || ''} : null; }""",
-            selector,
-        )
+        box = locator.bounding_box()
+        if box is None:
+            return False
+        point = {"x": box["x"] + box["width"] / 2, "y": box["y"] + box["height"] / 2}
+        if selector:
+            overlay = page.evaluate(
+                """(selector) => { const el = document.querySelector(selector); if (!el) return null; const r = el.getBoundingClientRect(); const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return top && top !== el && !el.contains(top) ? {tag: top.tagName, id: top.id || '', className: top.className || ''} : null; }""",
+                selector,
+            )
+        else:
+            overlay = locator.evaluate(
+                """(el, point) => { const top = document.elementFromPoint(point.x, point.y); return top && top !== el && !el.contains(top) ? {tag: top.tagName, id: top.id || '', className: top.className || ''} : null; }""",
+                point,
+            )
         return not overlay
     except Exception:
         return False
@@ -386,16 +414,13 @@ def _classify_timeout(page: Any, step: Mapping[str, Any] | None) -> str:
         return "ORACLE_MISSING"
     selector = str(step.get("selector") or "")
     try:
-        locator = page.locator(selector)
-        if locator.count() == 0:
+        locator = _step_locator(page, step)
+        count = locator.count()
+        if count == 0:
             return "ORACLE_MISSING"
-        if not locator.is_visible() or not locator.is_enabled():
+        if not any(locator.nth(index).is_visible() for index in range(count)) or not locator.nth(0).is_enabled():
             return "PRODUCT_UI_FAILURE"
-        overlay = page.evaluate(
-            """(selector) => { const el = document.querySelector(selector); if (!el) return null; const r = el.getBoundingClientRect(); const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return top && top !== el && !el.contains(top) ? {tag: top.tagName, id: top.id || '', className: top.className || ''} : null; }""",
-            selector,
-        )
-        if overlay:
+        if not _safe_force_click(page, selector, locator=locator):
             return "HARNESS_INTERACTION_FAILURE"
         return "TIMEOUT_UNCLASSIFIED"
     except Exception:
@@ -425,10 +450,12 @@ def _collect_browser_diagnostics(
     except Exception:
         pass
     selector = str((step or {}).get("selector") or "")
+    locator_spec = (step or {}).get("locator") if isinstance((step or {}).get("locator"), Mapping) else {}
     diagnostics["selector"] = selector or None
-    if selector:
+    diagnostics["locator_spec"] = dict(locator_spec)
+    if selector or locator_spec:
         try:
-            locator = page.locator(selector)
+            locator = _step_locator(page, step or {})
             count = locator.count()
             visible_count = sum(1 for item_index in range(count) if locator.nth(item_index).is_visible())
             diagnostics["locator"] = {

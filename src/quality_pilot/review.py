@@ -71,6 +71,7 @@ def review_pr(
     confirm: bool = False,
     dry_run: bool = False,
     timeout_seconds: int = 120,
+    test_timeout_seconds: int | None = None,
     comprehensive: bool = True,
     prepare_dependencies: bool = True,
     confirm_discovery: bool = False,
@@ -114,6 +115,7 @@ def review_pr(
     diff_hash = _sha256(str(snapshot.get("diff") or ""))
     review_worktree_path = Path(str(worktree.get("path"))) if worktree.get("path") else None
     review_python_command = _review_python_executable(config, review_worktree_path)
+    test_timeout_base = max(1, int(test_timeout_seconds or 900))
     dependency_preparation = prepare_review_dependencies(
         config,
         worktree=review_worktree_path,
@@ -135,7 +137,7 @@ def review_pr(
         repo=repo,
         pr_number=pr_number,
         head_sha=head_sha,
-        timeout_seconds=timeout_seconds,
+        timeout_seconds=test_timeout_base,
         dry_run=dry_run,
     )
     findings = analyze_diff(snapshot)
@@ -147,7 +149,7 @@ def review_pr(
             repo=repo,
             pr_number=pr_number,
             head_sha=head_sha,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=test_timeout_base,
             dry_run=dry_run,
             test_selection=test_selection,
             test_results=test_results,
@@ -291,6 +293,7 @@ def select_applicable_tests(
                         "id": "diff-targeted-pytest",
                         "command": targeted_command,
                         "reason": "changed-file-driven product test oracle",
+                        "timeout_seconds": 600,
                         "oracle": targeted_oracle,
                     }
                 )
@@ -304,7 +307,7 @@ def select_applicable_tests(
             targeted_oracle["reason"] = "targeted_test_runner_not_detected"
             command = f"{shlex.quote(python_executable)} -m unittest discover -s tests"
             test_id = "regression-unittest"
-        selected.append({"id": test_id, "command": command, "reason": "repository regression suite"})
+        selected.append({"id": test_id, "command": command, "reason": "repository regression suite", "timeout_seconds": 900})
         matching = _matching_test_files(tests_dir, changed_paths)
         signals.extend(f"changed_test:{path}" for path in matching)
     if (root / "pytest.ini").exists() or (root / "pyproject.toml").exists() and _contains_pytest_config(root / "pyproject.toml"):
@@ -496,6 +499,7 @@ def run_selected_tests(
     results: list[dict[str, Any]] = []
     for item in selected:
         command = str(item.get("command") or "")
+        command_timeout_seconds = max(int(timeout_seconds), int(item.get("timeout_seconds") or 0))
         try:
             argv = _safe_test_argv(command, worktree=Path(worktree))
             if argv is None:
@@ -517,7 +521,7 @@ def run_selected_tests(
                 shell=False,
                 text=True,
                 capture_output=True,
-                timeout=max(1, timeout_seconds),
+                timeout=max(1, command_timeout_seconds),
                 check=False,
             )
             stdout = completed.stdout or ""
@@ -566,7 +570,7 @@ def run_selected_tests(
                     shell=False,
                     text=True,
                     capture_output=True,
-                    timeout=max(1, timeout_seconds),
+                    timeout=max(1, command_timeout_seconds),
                     check=False,
                 )
                 fallback_stdout = fallback_run.stdout or ""
@@ -594,6 +598,7 @@ def run_selected_tests(
                 }
         safe_stdout, _ = _redact_output(stdout)
         safe_stderr, _ = _redact_output(stderr)
+        pytest_summary = _pytest_result_summary(safe_stdout) if "pytest" in command else {"failed_tests": [], "summary": None}
         stdout_path = evidence_dir / f"{item.get('id', 'test')}.stdout.log"
         stderr_path = evidence_dir / f"{item.get('id', 'test')}.stderr.log"
         stdout_path.write_text(safe_stdout, encoding="utf-8")
@@ -611,6 +616,9 @@ def run_selected_tests(
                 "execution_target": "local_disposable_review_worktree",
                 "evidence_origin": "local",
                 "python_executable": argv[0],
+                "timeout_seconds": command_timeout_seconds,
+                "failed_tests": pytest_summary.get("failed_tests", []),
+                "pytest_summary": pytest_summary.get("summary"),
                 "stdout": _relative_or_str(stdout_path, config.root),
                 "stderr": _relative_or_str(stderr_path, config.root),
                 "reproduction": {
@@ -1416,6 +1424,7 @@ def _run_browser_regression_case(
     if not browser_items:
         return None
     item = browser_items[0]
+    command_timeout_seconds = max(int(timeout_seconds), int(item.get("timeout_seconds") or 0))
     command = str(item.get("command") or "")
     try:
         command_argv = shlex.split(command)
@@ -1461,7 +1470,7 @@ def _run_browser_regression_case(
     elif argv is None:
         status, reason, exit_code, stdout, stderr = "BLOCK", "unsafe_review_test_command", 2, "", ""
     else:
-        completed = subprocess.run(argv, cwd=worktree, shell=False, text=True, capture_output=True, timeout=max(1, timeout_seconds), check=False)
+        completed = subprocess.run(argv, cwd=worktree, shell=False, text=True, capture_output=True, timeout=max(1, command_timeout_seconds), check=False)
         stdout, stderr = completed.stdout or "", completed.stderr or ""
         exit_code = completed.returncode
         status = "PASS" if exit_code == 0 else ("BLOCK" if _review_test_infrastructure_reason(stdout, stderr) else "FAIL")
@@ -1987,6 +1996,9 @@ def _build_developer_review_report(
                     "status": item.get("status"),
                     "reason": item.get("reason"),
                     "exit_code": item.get("exit_code"),
+                    "timeout_seconds": item.get("timeout_seconds"),
+                    "failed_tests": item.get("failed_tests", []),
+                    "pytest_summary": item.get("pytest_summary"),
                     "stdout": item.get("stdout"),
                     "stderr": item.get("stderr"),
                     "reproduction": {
@@ -2482,6 +2494,178 @@ def _detailed_reason(item: dict[str, Any]) -> str:
     return reasons.get(str(item.get("id") or ""), "此缺口會降低 code review 的可驗證性或增加產品風險。")
 
 
+def _status_for_engineer(status: Any, *, reason: str = "", exit_code: Any = None) -> str:
+    value = str(status or "UNKNOWN").upper()
+    if value == "PASS":
+        return "通過（已實際執行）"
+    if value == "FAIL":
+        return "失敗（已實際執行，請修復後重跑）"
+    if value == "BLOCK" and (reason == "test_command_timeout" or exit_code == 124):
+        return "逾時（已開始但未完成，不能判定 PASS）"
+    if value == "BLOCK":
+        return "阻擋（前置條件、工具或命令未完成）"
+    if value == "HOLD":
+        return "暫緩（證據或 oracle 不足）"
+    if value in {"NOT_RUN", "NOT_EVALUATED"}:
+        return "未執行／未評估"
+    return value
+
+
+def _engineer_reason(status: Any, reason: Any, exit_code: Any = None) -> str:
+    value = str(status or "UNKNOWN").upper()
+    detail = str(reason or "").strip()
+    if detail == "test_command_timeout" or exit_code == 124:
+        return "測試程序已啟動，但在時間上限內沒有完成；這不是 dependency missing，也不能直接當成產品缺陷。"
+    if detail == "test_command_failed":
+        return "pytest 已實際執行並回報失敗；請先看失敗測試名稱與 stdout/stderr，再修復產品或測試。"
+    if detail == "browser_probe_only_no_semantic_state_assertion":
+        return "Browser 只驗證頁面／元素可見，沒有使用者互動與狀態斷言；因此只能 HOLD，不能宣稱 UI/UX PASS。"
+    if detail == "remote_product_build_adapter_not_supported":
+        return "remote product build adapter 尚未實作；這是產品建置未評估，不是產品建置 FAIL。"
+    if detail == "browser_prerequisites_absent":
+        return "Browser client 缺少 Python Playwright 或 Chromium；這是 Quality Pilot/環境阻擋，不是產品 FAIL。"
+    if detail == "dependency_install_failed":
+        return "依賴安裝失敗；先修復 review worktree venv，再重跑測試。"
+    if detail == "diff_targeted_product_test_oracle_failed":
+        return "changed-file 對應的 targeted pytest 已執行但失敗；functional 不能判定通過。"
+    if detail == "regression_test_outcome":
+        return "local regression 沒有通過；white-box 結果不能判定通過。"
+    if detail == "missing_or_incomplete_oracle":
+        return "有執行候選檢查，但缺少足夠的產品專屬 oracle；不能用 generic probe 代替。"
+    if detail == "product_black_box_adapter_not_proven":
+        return "尚未用產品入口完成可追溯的 black-box adapter；不能用 unit/regression PASS 代替。"
+    if detail == "no_boundary_case":
+        return "目前沒有 boundary/invalid case；這是覆蓋缺口，不是產品通過。"
+    if detail == "no_stress_case":
+        return "目前沒有 bounded stress/timeout case；這是覆蓋缺口，不是產品通過。"
+    if value == "NOT_EVALUATED":
+        return "上游 tooling 或 infrastructure gate 阻擋，因此本項沒有形成產品結論。"
+    if detail:
+        return detail
+    if value == "PASS":
+        return "命令完成且 oracle 通過。"
+    if value == "FAIL":
+        return "命令完成但 oracle 或測試斷言失敗。"
+    if value == "HOLD":
+        return "目前證據不足以支持通過或產品缺陷結論。"
+    return "需要查看執行證據後才能決定下一步。"
+
+
+def _engineer_reproduction_steps(item: dict[str, Any], report: dict[str, Any]) -> list[str]:
+    item_id = str(item.get("id") or "")
+    if item_id == "regression-test-follow-up":
+        results = report.get("test_results") if isinstance(report.get("test_results"), list) else []
+        steps = [
+            "在同一個 local disposable review worktree 執行下方測試命令，不要改用 host repo 或 /usr/bin/python3。",
+        ]
+        for result in results:
+            if isinstance(result, dict) and result.get("command"):
+                steps.append(f"執行 `{result.get('command')}`；目前結果={result.get('status')}，exit={result.get('exit_code', '未記錄')}。")
+        steps.append("先修復第一個失敗測試或增加 test timeout，再用相同命令重跑；不要以未完成的 full suite 推定 PASS。")
+        return steps
+    if item_id == "product-test-contract":
+        qa = report.get("qa_review") if isinstance(report.get("qa_review"), dict) else {}
+        product = qa.get("product_test") if isinstance(qa.get("product_test"), dict) else {}
+        browser = product.get("browser") if isinstance(product.get("browser"), dict) else {}
+        return [
+            "確認 product build/operation 與 Browser UI 是兩個獨立 case。",
+            f"目前 Browser 結果={browser.get('status', '未記錄')}；原因={browser.get('reason', '未記錄')}。",
+            "以產品專屬 semantic workflow 執行 tab、欄位、validation 或 workflow state assertion；body/button visibility 只能是前置 probe。",
+        ]
+    if item_id.endswith("-coverage"):
+        dimension = item_id.removesuffix("-coverage")
+        matrix = (report.get("qa_review") or {}).get("matrix", {}) if isinstance(report.get("qa_review"), dict) else {}
+        observation = matrix.get(dimension) if isinstance(matrix, dict) and isinstance(matrix.get(dimension), dict) else {}
+        return [
+            f"查看 QA matrix 的 `{dimension}` row；目前狀態={observation.get('status', item.get('status', '未記錄'))}，原因={observation.get('reason', '未記錄')}。",
+            f"補上 `{dimension}` 專屬 case、oracle 與 evidence，不要用其他維度的 PASS 代替。",
+            "修補後只重跑這個維度及其受影響的 regression，確認 result/case/evidence lineage 完整。",
+        ]
+    return [
+        "查看本報告的 QA matrix 與該項 evidence。",
+        "執行建議的產品專屬 case，確認 expected/actual/oracle 都有明確結果。",
+    ]
+
+
+def _render_engineer_execution_summary(report: dict[str, Any]) -> list[str]:
+    """Render the first-screen, action-oriented review explanation."""
+    lines = ["", "工程師快速判讀（先看這裡）", "-" * 80]
+    gate = report.get("review_gate") if isinstance(report.get("review_gate"), dict) else {}
+    conclusion = str(report.get("conclusion") or "UNKNOWN")
+    lines.extend([
+        f"結論：{conclusion}",
+        f"目前能否繼續／合併：{'否，Quality Pilot 已阻擋' if gate.get('status') == 'BLOCKED' else '否，仍需人工決策'}",
+        "重要規則：PASS 只代表該項命令和 oracle 實際通過；BLOCK/HOLD/逾時都不能當成 PASS。",
+        "分類規則：測試 FAIL 是已執行的失敗；BLOCK 是未完成或前置／工具阻擋；HOLD 是證據不足，不直接指控產品有缺陷。",
+        "",
+        "檢查結果",
+        "-" * 80,
+    ])
+    test_results = report.get("test_results") if isinstance(report.get("test_results"), list) else []
+    if test_results:
+        for item in test_results:
+            if not isinstance(item, dict):
+                continue
+            reason = str(item.get("reason") or "")
+            status = item.get("status")
+            command = str(item.get("command") or "未記錄")
+            if len(command) > 420:
+                command = command[:420] + " …"
+            evidence = [str(item.get(key)) for key in ("stdout", "stderr") if item.get(key)]
+            lines.extend([
+                f"測試：{item.get('id', '未命名')}",
+                f"  結果：{_status_for_engineer(status, reason=reason, exit_code=item.get('exit_code'))}",
+                f"  命令：{command}",
+                f"  執行位置：{item.get('execution_target', 'local_disposable_review_worktree')}；證據來源：{item.get('evidence_origin', 'local')}",
+                f"  時間上限：{item.get('timeout_seconds', '未記錄')}{' 秒' if item.get('timeout_seconds') is not None else ''}；exit code：{item.get('exit_code', '未記錄')}",
+                f"  實際意思：{_engineer_reason(status, reason, item.get('exit_code'))}",
+                f"  pytest 摘要：{item.get('pytest_summary') or '未擷取'}",
+                f"  失敗測試：{'; '.join(str(value) for value in (item.get('failed_tests') or [])[:12]) or '未擷取'}",
+                f"  證據：{', '.join(evidence) if evidence else '未建立'}",
+                f"  下一步：{'增加 --test-timeout 或拆分 targeted/full suite 後重跑' if reason == 'test_command_timeout' else '查看失敗測試與 stdout/stderr，修復後用相同命令重跑' if str(status).upper() == 'FAIL' else '先解除阻擋條件，再重跑本項'}",
+                "",
+            ])
+    else:
+        lines.extend(["沒有 local regression result；不能由沒有結果推定通過。", ""])
+
+    preflight = report.get("remote_preflight") if isinstance(report.get("remote_preflight"), dict) else {}
+    identity = preflight.get("source_identity") if isinstance(preflight.get("source_identity"), dict) else {}
+    lines.extend([
+        "Remote source / environment",
+        f"  preflight：{preflight.get('status', 'NOT_RUN')}",
+        f"  expected HEAD：{identity.get('expected_head_sha', '未記錄')}",
+        f"  observed HEAD：{identity.get('observed_head_sha', '未記錄')}",
+        f"  worktree clean：{identity.get('dirty', '未記錄')}",
+        f"  判讀：{'remote source identity 已驗證，可看產品／Browser 結果' if preflight.get('status') == 'READY' and identity.get('status') == 'VERIFIED' else 'remote source 或環境尚未達到 official evidence 條件'}",
+        "",
+    ])
+
+    qa = report.get("qa_review") if isinstance(report.get("qa_review"), dict) else {}
+    product = qa.get("product_test") if isinstance(qa.get("product_test"), dict) else {}
+    browser = product.get("browser") if isinstance(product.get("browser"), dict) else {}
+    if product or browser:
+        lines.extend([
+            "Product / Browser",
+            f"  product build/operation：{_status_for_engineer(product.get('status'), reason=product.get('reason'))}",
+            f"  product 判讀：{_engineer_reason(product.get('status'), product.get('reason'))}",
+            f"  Browser：{_status_for_engineer(browser.get('status'), reason=browser.get('reason'))}",
+            f"  Browser 判讀：{_engineer_reason(browser.get('status'), browser.get('reason'))}",
+            f"  Browser 執行位置：{browser.get('execution_target', product.get('execution_target', '未記錄'))}；證據來源：{browser.get('evidence_origin', product.get('evidence_origin', '未記錄'))}",
+            "  下一步：將已確認的產品專屬 semantic workflow（tab、欄位、validation、workflow state）加入 contract，再重新執行；body/button probe 不能當成 UI/UX PASS。",
+            "",
+        ])
+
+    matrix = qa.get("matrix") if isinstance(qa.get("matrix"), dict) else {}
+    if matrix:
+        lines.extend(["QA matrix（每一列都是獨立判定）", "-" * 80])
+        for dimension, item in matrix.items():
+            if not isinstance(item, dict):
+                continue
+            lines.append(f"- {dimension}: {_status_for_engineer(item.get('status'), reason=item.get('reason'))}；{_engineer_reason(item.get('status'), item.get('reason'))}")
+        lines.append("")
+    return lines
+
+
 def _render_detailed_text(report: dict[str, Any]) -> str:
     """Render the complete developer-facing plain-text report."""
     developer = report.get("developer_review") if isinstance(report.get("developer_review"), dict) else {}
@@ -2498,6 +2682,7 @@ def _render_detailed_text(report: dict[str, Any]) -> str:
         "最終的 COMMENT／REQUEST_CHANGES／APPROVED 由使用者決定。",
         "所有建議的重現步驟都會標示是否實際執行；沒有證據的步驟不宣稱為測試結果。",
         "",
+        *_render_engineer_execution_summary(report),
         "整體審查狀態",
         f"建議決定：{_zh_value(developer.get('decision', 'COMMENT'))}",
         f"測試結果：{_zh_value(report.get('test_outcome'))}",
@@ -2582,9 +2767,7 @@ def _render_detailed_text(report: dict[str, Any]) -> str:
                 "為什麼應該處理：",
                 f"  {_detailed_reason(item)}",
                 "調查／重現步驟：",
-                "  1. 使用 pinned review worktree，以及下方記錄的確切命令／證據。",
-                "  2. 檢查 stdout／stderr 或 case 證據中的實際狀態。",
-                "  3. 如果是覆蓋缺口，請執行建議的產品層級情境；不能因為沒有測試就推定 PASS。",
+                *[f"  {step}" for step in _engineer_reproduction_steps(item, report)],
                 "修補後預期結果：",
                 f"  {item.get('verification') or '具備確定性的產品或測試 oracle，且驗證通過。'}",
                 "目前實際狀態：",
@@ -2614,6 +2797,15 @@ def _render_detailed_text(report: dict[str, Any]) -> str:
             f"證據：{', '.join(str(path) for path in repro.get('evidence', []) if path)}",
         ])
     return "\n".join(lines) + "\n"
+
+
+def _pytest_result_summary(stdout: str) -> dict[str, Any]:
+    failed_tests = [line.strip()[7:] for line in str(stdout or "").splitlines() if line.strip().startswith("FAILED ")]
+    summary_lines = [line.strip() for line in str(stdout or "").splitlines() if re.search(r"\b(?:passed|failed|error|skipped)\b", line, re.IGNORECASE)]
+    return {
+        "failed_tests": failed_tests[:40],
+        "summary": summary_lines[-1] if summary_lines else None,
+    }
 
 
 def _review_test_infrastructure_reason(stdout: str, stderr: str) -> str | None:

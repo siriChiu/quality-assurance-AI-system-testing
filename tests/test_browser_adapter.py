@@ -7,7 +7,7 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
-from quality_pilot.browser_adapter import _add_playwright_site_packages, _extract_discovered_url, _sanitize_trace, run_browser_test
+from quality_pilot.browser_adapter import _add_playwright_site_packages, _extract_discovered_url, _sanitize_trace, _step_locator, run_browser_test
 
 
 class BrowserAdapterTest(unittest.TestCase):
@@ -20,6 +20,23 @@ class BrowserAdapterTest(unittest.TestCase):
         }
         value.update(overrides)
         return value
+
+    def test_role_locator_contract_uses_semantic_playwright_locator(self) -> None:
+        class FakePage:
+            def get_by_role(self, role, **kwargs):
+                return ("role", role, kwargs)
+
+            def get_by_label(self, name):
+                return ("label", name)
+
+        self.assertEqual(
+            _step_locator(FakePage(), {"locator": {"type": "role", "role": "tab", "name": "Fan Zone"}}),
+            ("role", "tab", {"name": "Fan Zone"}),
+        )
+        self.assertEqual(
+            _step_locator(FakePage(), {"locator": {"type": "label", "name": "CPU0-TMP"}}),
+            ("label", "CPU0-TMP"),
+        )
 
     def test_review_venv_site_packages_are_selected_for_browser_client(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -104,7 +104,10 @@ pytest interpreter。`python3 -m venv .venv` 只負責建立隔離環境；pip�
 product checkout evidence，不得混入 local disposable regression evidence；否則使用 bounded unittest
 discovery。預設也會透過 case-generation/case-run 模組建立 PR-scoped QA matrix，
 涵蓋 black-box、white-box、functional、boundary、stress、documentation；
-`--diff-only` 才跳過這個 comprehensive path。Comprehensive review 會依 changed files
+`--diff-only` 才跳過這個 comprehensive path。Regression pytest 有獨立 timeout boundary：
+預設 targeted suite 最多 600 秒、full suite 最多 900 秒；可用 `--test-timeout <seconds>`
+提高共同上限。這不會把 timeout 當成 dependency missing，仍會回 `BLOCK`/`FAIL` 並保存
+exit code 124 或實際測試結果。Comprehensive review 會依 changed files
 建立 `diff_targeted_oracle`；只有實際對應的 product test command 成功執行才會成為
 functional evidence，找不到對應測試仍是 HOLD，不會自動產生黑箱結論。Comprehensive
 mode 會先分析 README、`--help`、CLI parser、既有 Browser tests、目前 config 與 SSH aliases，
