@@ -7,12 +7,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from quality_pilot.config import ProjectConfig, project_paths
+from quality_pilot.product_case_adapter import build_product_case_contract, execute_product_case
 from quality_pilot.product_testing import (
     extract_readme_commands,
     resolve_product_test_plan,
     run_product_tests,
     validate_product_command,
 )
+from quality_pilot.runner import RunContext
 
 
 class ProductTestingTest(unittest.TestCase):
@@ -36,6 +38,35 @@ class ProductTestingTest(unittest.TestCase):
 
     def _profile(self) -> dict[str, object]:
         return {"ready": True, "configured": {"credential_envs": []}, "blockers": []}
+
+    def test_browser_child_case_uses_review_id_for_run_lineage(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = self._config(root, {"enabled": True})
+            contract = build_product_case_contract(
+                config,
+                case_id="PR-32-PRODUCT",
+                title="Product",
+                review_id="review-32",
+                snapshot={"head_sha": "head"},
+            )
+            context = RunContext(
+                root=root,
+                evidence_dir=root / "evidence",
+                environment_profile=self._profile(),
+            )
+            browser = {"case_id": "PR-32-PRODUCT-BROWSER-UI", "status": "BLOCK", "evidence": {}}
+            with patch("quality_pilot.product_case_adapter.run_product_tests", return_value={"status": "BLOCK", "browser": browser}):
+                result = execute_product_case(
+                    contract,
+                    context,
+                    config=config,
+                    snapshot={"head_sha": "head"},
+                    review_id="review-32",
+                )
+            self.assertEqual(result["run_id"], "review-32")
+            self.assertEqual(result["browser_case_result"]["run_id"], "review-32")
+            self.assertEqual(result["browser_case_result"]["parent_case_id"], "PR-32-PRODUCT")
 
     def test_real_build_and_semantic_operation_pass_in_disposable_sandbox(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

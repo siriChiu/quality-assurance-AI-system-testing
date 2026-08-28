@@ -131,7 +131,7 @@ def execute_product_case(contract: CaseContract, context: RunContext, *, config:
             "oracle": {"type": "playwright_ui", "interaction_count": browser.get("interaction_count", 0), "state_assertion_count": browser.get("state_assertion_count", 0)},
             "evidence": [str(value) for key, value in (browser.get("evidence") or {}).items() if value and not str(key).endswith("sha256")],
             "contract_hash": browser_contract_hash,
-            "run_id": run_id,
+            "run_id": review_id,
             "parent_case_id": contract.case_id,
             "started_at": started,
             "ended_at": utc_now(),
