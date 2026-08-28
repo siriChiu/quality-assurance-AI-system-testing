@@ -263,8 +263,17 @@ def ready_mocked_review_worktree(bdd_context: dict[str, Any]) -> None:
 def comprehensive_review_runs(bdd_context: dict[str, Any]) -> None:
     generation = {"status": "ok", "generated": [{"case_id": "PR-FUNCTIONAL-1"}], "generated_count": 1}
     result = {"case_id": "PR-FUNCTIONAL-1", "status": "PASS", "truth_status": "PASS", "partial_probe": False, "evidence": []}
-    with patch("quality_pilot.review.generate_cases_init", return_value=generation) as generator, patch(
-        "quality_pilot.review.load_contracts", return_value=[bdd_context["mock_contract"]]
+
+    def materialize_generated_case(review_config: ProjectConfig, **_: Any) -> dict[str, Any]:
+        review_config.paths.cases.mkdir(parents=True, exist_ok=True)
+        (review_config.paths.cases / "PR-FUNCTIONAL-1.yaml").write_text(
+            "case_id: PR-FUNCTIONAL-1\ntitle: generated\ncommands:\n  - id: probe\n    run: true\n    expected_exit_code: 0\n",
+            encoding="utf-8",
+        )
+        return generation
+
+    with patch("quality_pilot.review.generate_cases_init", side_effect=materialize_generated_case) as generator, patch(
+        "quality_pilot.review.load_contract", return_value=bdd_context["mock_contract"]
     ), patch("quality_pilot.review.run_case", return_value=result) as runner:
         bdd_context["review_qa"] = _run_comprehensive_review_qa(
             bdd_context["review_config"],

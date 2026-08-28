@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from quality_pilot.config import ProjectConfig, project_paths
-from quality_pilot.review import _browser_result_case, _build_report, _product_result_case, _pytest_failure_details, _render_detailed_text, _render_markdown, _render_reproduction_playbook, _run_comprehensive_review_qa, prepare_gitea_review_reply, review_gate
+from quality_pilot.review import _browser_result_case, _build_report, _product_result_case, _pytest_failure_details, _render_detailed_text, _render_markdown, _render_reproduction_playbook, _review_case_dimension_result, _run_comprehensive_review_qa, prepare_gitea_review_reply, review_gate
 
 
 class ReviewProductIntegrationTest(unittest.TestCase):
@@ -141,6 +141,13 @@ class ReviewProductIntegrationTest(unittest.TestCase):
         self.assertEqual(comment, _render_markdown(report))
         self.assertIn("PR 合併決定：由 PR 擁有者決定", comment)
         self.assertIn("screenshot：browser/failure.png（失敗截圖）", comment)
+
+    def test_case_dimension_uses_truth_status_for_partial_probe(self) -> None:
+        result = _review_case_dimension_result(
+            [{"status": "PASS", "truth_status": "HOLD", "partial_probe": True, "black_box_capable": False}],
+            reason_if_empty="no_case",
+        )
+        self.assertEqual(result["status"], "HOLD")
 
     def test_reproduction_playbook_uses_confirmed_or_candidate_data_not_product_specific_steps(self) -> None:
         candidate_report = {

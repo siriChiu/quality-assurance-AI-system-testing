@@ -22,7 +22,7 @@ from typing import Any
 
 from .case_generation import CaseGenerationError, generate_cases_init
 from .config import ProjectConfig, json_dumps, load_project_config, project_paths
-from .contracts import load_contracts
+from .contracts import load_contract, load_contracts
 from .environment import environment_profile_status, remote_preflight
 from .execution_contract import apply_discovered_contract, normalize_execution_contract
 from .hermes_mcp import configured_mcp_json_path, mcp_server_is_available
@@ -1275,7 +1275,10 @@ def _run_comprehensive_review_qa(
             # contract carries review lineage metadata such as review_id; it
             # is already executed and must not be revalidated as a generated
             # test contract or mistaken for opaque secret material.
-            contracts = [contract for path in generated_paths for contract in load_contracts(path)]
+            # ``generated_paths`` contains individual contract files.  Load
+            # each file directly; passing a file to ``load_contracts`` silently
+            # returns an empty list because that API expects a directory.
+            contracts = [load_contract(path) for path in generated_paths]
         else:
             # Keep direct-library and mocked generation callers compatible
             # when no generated files were materialized.
@@ -1633,7 +1636,10 @@ def _review_case_dimension_result(
             "case_count": len(cases),
             "case_ids": [item.get("case_id") for item in cases],
         }
-    statuses = {str(item.get("status") or "BLOCK").upper() for item in cases}
+    # ``status`` is the command/process result; ``truth_status`` is the
+    # case-level oracle result.  A partial probe may have exit code 0 while
+    # still being HOLD, so dimension aggregation must use truth_status.
+    statuses = {str(item.get("truth_status") or item.get("status") or "BLOCK").upper() for item in cases}
     if "BLOCK" in statuses:
         outcome = "BLOCK"
     elif "FAIL" in statuses:
@@ -2845,9 +2851,11 @@ def _render_complete_qa_matrix(report: dict[str, Any]) -> list[str]:
     for case in cases:
         if not isinstance(case, dict):
             continue
+        case_status = case.get("truth_status") or case.get("status")
         lines.extend([
             f"- `{case.get('case_id', '未命名')}`：{_case_title_zh(case)}",
-            f"  - 結果：{_status_for_engineer(case.get('status'), reason=case.get('reason'))}",
+            f"  - 結果：{_status_for_engineer(case_status, reason=case.get('reason'))}",
+            f"  - 原始命令結果：{_status_for_engineer(case.get('status'), reason=case.get('reason'))}",
             f"  - 維度：{', '.join(str(value) for value in case.get('dimensions', [])) or '未記錄'}",
             f"  - 執行位置：{case.get('execution_target', '未記錄')}；證據來源：{case.get('evidence_origin', '未記錄')}",
             f"  - result：{case.get('result_path', '未建立')}",
