@@ -75,7 +75,7 @@ class ReviewProductIntegrationTest(unittest.TestCase):
             request = json.loads((root / reply["request_path"]).read_text(encoding="utf-8"))
             self.assertEqual(request["state"], "COMMENT")
             self.assertTrue(request["advisory_only"])
-            self.assertIn("不是核准", request["body"])
+            self.assertIn("advisory COMMENT，不是核准", request["body"])
             self.assertIn("product-test-contract", {item["id"] for item in request["recommendations"]})
 
     def test_pytest_failure_details_are_single_test_reproducible(self) -> None:
@@ -138,8 +138,9 @@ class ReviewProductIntegrationTest(unittest.TestCase):
         self.assertIn("PR 合併決定：由 PR 擁有者決定", text)
         self.assertIn("tests/browser_ui/test_settings.py::test_run", text)
         comment = __import__("quality_pilot.review", fromlist=["_review_comment_body"])._review_comment_body(report, [])
-        self.assertIn("PR 合併決定仍由 PR 擁有者負責", comment)
-        self.assertIn("截圖=有", comment)
+        self.assertEqual(comment, _render_markdown(report))
+        self.assertIn("PR 合併決定：由 PR 擁有者決定", comment)
+        self.assertIn("screenshot：browser/failure.png（失敗截圖）", comment)
 
     def test_reproduction_playbook_uses_confirmed_or_candidate_data_not_product_specific_steps(self) -> None:
         candidate_report = {

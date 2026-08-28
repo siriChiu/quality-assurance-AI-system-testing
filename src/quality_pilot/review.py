@@ -201,7 +201,7 @@ def review_pr(
     safe_report["report_paths"] = report["report_paths"]
     report_paths["json_path_obj"].write_text(json_dumps(safe_report) + "\n", encoding="utf-8")
     markdown_path = config.root / str(report_paths["markdown_path"])
-    markdown_path.write_text(_render_detailed_text(safe_report), encoding="utf-8")
+    markdown_path.write_text(_render_markdown(safe_report), encoding="utf-8")
     return report
 
 
@@ -668,7 +668,7 @@ def write_review_report(config: ProjectConfig, report: dict[str, Any]) -> dict[s
     legacy_text_path = directory / f"{stem}.txt"
     safe_report, _ = redact_structure(report, prefix="review_report")
     json_path.write_text(json_dumps(safe_report) + "\n", encoding="utf-8")
-    markdown_path.write_text(_render_detailed_text(safe_report), encoding="utf-8")
+    markdown_path.write_text(_render_markdown(safe_report), encoding="utf-8")
     # The detailed human-readable report is now Markdown, not a third .txt file.
     legacy_text_path.unlink(missing_ok=True)
     return {
@@ -679,111 +679,14 @@ def write_review_report(config: ProjectConfig, report: dict[str, Any]) -> dict[s
 
 
 def _review_comment_body(report: dict[str, Any], inline: list[dict[str, Any]]) -> str:
-    recommendations = report.get("recommendations") if isinstance(report.get("recommendations"), list) else []
-    browser_records = _report_browser_records(report)
-    lines = [
-        "Quality Pilot 程式碼審查建議（僅 COMMENT；不是核准）。",
-        f"審查結論：`{report.get('conclusion') or 'UNASSESSED'}`",
-        f"Quality Pilot 建議：{_quality_pilot_recommendation(report)}",
-        f"測試結果：{_status_for_engineer(report.get('test_outcome'))}",
-        f"品質保證結果：{_status_for_engineer(report.get('qa_outcome'))}",
-        f"產品測試結果：{_status_for_engineer(report.get('product_test_outcome'))}",
-        f"Browser UI 結果：{_status_for_engineer(report.get('browser_ui_outcome'))}",
-        f"Quality Pilot 工具結果：{_zh_value(report.get('tooling_outcome'))}",
-        f"基礎環境前置檢查：{_zh_value(report.get('infrastructure_outcome'))}",
-        "",
-        "PR 合併決定仍由 PR 擁有者負責。Quality Pilot 不執行合併，也不修改你的 merge gate。",
-    ]
-    if browser_records:
-        lines.extend(["", "Browser／Playwright 證據："])
-        if any(item.get("kind") == "supplemental_manual_playwright" and item.get("status") == "PASS" for item in browser_records) and any(item.get("kind") == "remote_product_browser" and item.get("status") == "HOLD" for item in browser_records):
-            lines.append("- 判讀：正式 smoke 執行是暫緩；補充的已確認語意執行是通過；這是兩個不同執行，不是矛盾結果。")
-        if any(item.get("kind") == "supplemental_manual_local_playwright_regression" for item in browser_records) and any(item.get("kind") == "local_playwright_pytest_regression" and item.get("status") == "BLOCK" for item in browser_records):
-            lines.append("- 判讀：正式執行是逾時阻擋；補充的完整重跑是失敗（exit 1）；以下失敗診斷以補充重跑為準。")
-        for item in browser_records:
-            if not isinstance(item, dict):
-                continue
-            screenshot = item.get("screenshot") or ((item.get("evidence") or {}).get("screenshot") if isinstance(item.get("evidence"), dict) else None)
-            lines.append(
-                f"- {_browser_record_title(item)}：{_status_for_engineer(item.get('status'), reason=item.get('reason'), exit_code=item.get('exit_code'))}；"
-                f"原因={item.get('reason') or '未記錄'}；互動={item.get('interaction_count', '不適用')}；"
-                f"狀態斷言={item.get('state_assertion_count', '不適用')}；"
-                f"截圖={'有' if screenshot else '無'}"
-            )
-            if item.get("command"):
-                lines.append(f"  - 套件命令：`{item.get('command')}`")
-            if item.get("exit_code") is not None:
-                lines.append(f"  - 套件結束代碼：`{item.get('exit_code')}`")
-            if item.get("command") or "local_playwright" in str(item.get("kind") or ""):
-                lines.append("  - 套件 stdout/stderr：已保存於審查證據")
-            failure_details = item.get("failure_details") if isinstance(item.get("failure_details"), list) else []
-            for detail in failure_details[:20]:
-                if not isinstance(detail, dict):
-                    continue
-                lines.extend([
-                    f"  - 失敗測試：{detail.get('test', '未知')}",
-                    f"    分類：{detail.get('category', '未知')}",
-                    f"    觀察：{detail.get('observed', '未知')}",
-                    f"    實際錯誤：{detail.get('error', '未知')}",
-                    f"    重現命令：`{detail.get('reproduce', '未知')}`",
-                ])
-    product_evidence = report.get("product_test_evidence") if isinstance(report.get("product_test_evidence"), dict) else {}
-    if product_evidence:
-        build = product_evidence.get("build") if isinstance(product_evidence.get("build"), dict) else {}
-        lines.extend([
-            "",
-            "產品建置／操作判讀：",
-            f"- 結果：{_status_for_engineer(product_evidence.get('status'), reason=product_evidence.get('reason'))}",
-            f"- 建置結果：{_zh_value(build.get('status', 'NOT_RUN'))}；原因代碼=`{build.get('reason', '未記錄')}`",
-            "- `remote_product_build_adapter_not_supported` 代表尚未實作 remote build adapter，不是產品 build 已 FAIL。",
-            "- 在 adapter 完成前，不能把 remote product build 描述為 PASS。",
-        ])
-    manual_pass = next((item for item in browser_records if item.get("kind") == "supplemental_manual_playwright" and item.get("status") == "PASS"), None)
-    if manual_pass:
-        lines.extend([
-            "",
-            "補充的遠端語意 Playwright 結果：",
-            "- 已實際驗證 PID Settings／Fan Zone tab 與 panel、CPU0-TMP 欄位、無效 set point、validation dialog、focus recovery、Zone 0 checkbox 與 PWM ids。",
-            "- 互動次數=4；正向斷言=11；狀態斷言=11；遠端來源已驗證且工作樹乾淨。",
-            "- diagnostics network 沒有 `/api/settings` POST，因此沒有保存正式環境設定。",
-        ])
-    suite_command = next(
-        (str(item.get("command")) for item in browser_records if isinstance(item, dict) and item.get("command")),
-        None,
-    )
-    if suite_command:
-        lines.extend([
-            "",
-            "可直接複製的本地重現命令：",
-            "將 `$REVIEW_WORKTREE` 替換成 report 記錄的 pinned review worktree 路徑。",
-            "```bash",
-            "cd \"$REVIEW_WORKTREE\"",
-            suite_command,
-            "```",
-            "上方每一筆失敗診斷都包含只重現該測試的單測試命令。",
-        ])
-    if inline:
-        lines.extend(["", f"行內程式碼問題：{len(inline)}"])
-    if recommendations:
-        lines.extend(["", "建議後續處理："])
-        for item in recommendations[:12]:
-            if not isinstance(item, dict):
-                continue
-            lines.append(
-                f"- [{_zh_value(item.get('severity', 'INFO'))}] {item.get('recommendation', '')} "
-                f"（驗證方式：{item.get('verification', '未記錄')}）"
-            )
-    else:
-        lines.extend(["", "沒有額外的確定性後續處理建議。"])
-    lines.extend([
-        "",
-        "最後結果：",
-        f"- Quality Pilot 建議：{_quality_pilot_recommendation(report)}",
-        "- PR 合併決定：由 PR 擁有者決定；Quality Pilot 不執行 merge。",
-        "- 只有實際命令、oracle 與 evidence 同時存在時，才能支持通過；HOLD、BLOCK、逾時與未評估都不是 PASS。",
-    ])
-    return "\n".join(lines)
+    """Return the exact canonical Markdown report used for the PR message.
 
+    Inline findings remain separate Gitea review comments.  The main PR body
+    deliberately has one source of truth: the same deterministic Markdown
+    written to ``<repo>/.quality-pilot-project/reports/reviews/*.md``.
+    """
+    _ = inline
+    return _render_markdown(report)
 
 def _gitea_review_comments(inline: list[dict[str, Any]]) -> list[dict[str, Any]]:
     comments: list[dict[str, Any]] = []
@@ -2466,175 +2369,18 @@ def _redact_output(text: str) -> tuple[str, list[dict[str, str]]]:
 
 
 def _render_markdown(report: dict[str, Any]) -> str:
-    """Render the complete Chinese developer report for a Gitea comment.
+    """Render the one canonical Markdown report for disk and the PR body.
 
-    Machine-readable JSON and local filesystem paths stay local; this output is
-    intentionally self-contained for direct PR discussion.
+    The report is redacted before rendering, but it is not summarized or
+    reformatted for Gitea.  This guarantees that the local ``.md`` report and
+    the main PR message are byte-for-byte equivalent for the same report
+    snapshot.  Inline review comments are separate annotations, not a second
+    report.
     """
-    detailed = _render_detailed_text(report)
-    safe_lines: list[str] = []
-    for line in detailed.splitlines():
-        if "report_path" in line or ".quality-pilot-project/" in line or "/root/" in line:
-            continue
-        if line.startswith("證據：") and ("/" in line or "\\" in line):
-            safe_lines.append("證據：已保存於本地證據區；遠端留言不顯示本機路徑。")
-        else:
-            safe_lines.append(line)
-    return "\n".join(safe_lines) + "\n"
-
-    lines = [
-        f"# Code Review: {report.get('repo')} PR #{report.get('pr_number')}",
-        "",
-        f"- Base: `{report.get('base_ref') or report.get('base_sha')}`",
-        f"- Head: `{report.get('head_ref') or report.get('head_sha')}` (`{report.get('head_sha')}`)",
-        f"- Diff hash: `{report.get('diff_hash')}`",
-        f"- Diff source: **{report.get('diff_source')}**",
-        f"- Test outcome: **{report.get('test_outcome')}**",
-        f"- Product test outcome: **{report.get('product_test_outcome')}**",
-        f"- Browser UI outcome: **{report.get('browser_ui_outcome')}**",
-        f"- Comprehensive QA outcome: **{report.get('qa_outcome')}**",
-        f"- Conclusion: **{report.get('conclusion')}**",
-        "",
-        "## Summary",
-        "",
-        "This report was generated from a pinned PR snapshot and local review workflow.",
-        "",
-        "## Tests",
-        "",
-    ]
-    for item in report.get("test_results", []):
-        lines.append(f"- `{item.get('id')}`: **{item.get('status')}** — `{item.get('command')}`")
-    if not report.get("test_results"):
-        lines.append("- No applicable test was executed.")
-    developer = report.get("developer_review") if isinstance(report.get("developer_review"), dict) else {}
-    test_evidence = developer.get("evidence", {}).get("test_results", []) if isinstance(developer.get("evidence"), dict) else []
-    if test_evidence:
-        lines.extend(["", "## Test Reproduction Evidence", ""])
-        for item in test_evidence:
-            if not isinstance(item, dict):
-                continue
-            reproduction = item.get("reproduction") if isinstance(item.get("reproduction"), dict) else {}
-            lines.extend(
-                [
-                    f"- `{item.get('id')}`: **{item.get('status')}** — {item.get('reason') or 'no error'}",
-                    f"  - Command: `{item.get('command')}`",
-                    f"  - Steps: {'; '.join(str(step) for step in reproduction.get('steps', []))}",
-                    f"  - Expected: {reproduction.get('expected', '-')}",
-                    f"  - Actual: {reproduction.get('actual', '-')}",
-                    f"  - Evidence: {', '.join(str(path) for path in reproduction.get('evidence', []) if path)}",
-                ]
-            )
-    targeted = report.get("diff_targeted_oracle") if isinstance(report.get("diff_targeted_oracle"), dict) else {}
-    if targeted:
-        lines.extend(
-            [
-                "",
-                "## Diff-targeted Product Oracle",
-                "",
-                f"- Status: **{targeted.get('status')}** — {targeted.get('reason', '')}",
-                f"- Test files: `{', '.join(str(item) for item in targeted.get('test_files', [])) or 'none'}`",
-            ]
-        )
-    developer = report.get("developer_review") if isinstance(report.get("developer_review"), dict) else {}
-    lines.extend(["", "## Comprehensive QA Matrix", ""])
-    qa_review = report.get("qa_review") if isinstance(report.get("qa_review"), dict) else {}
-    matrix = qa_review.get("matrix") if isinstance(qa_review.get("matrix"), dict) else {}
-    for dimension in ("black_box", "white_box", "functional", "boundary", "stress", "documentation", "product_binary", "browser_ui"):
-        item = matrix.get(dimension)
-        if not isinstance(item, dict):
-            continue
-        lines.append(f"- `{dimension}`: **{item.get('status')}** — {item.get('reason', '')}")
-    cases = qa_review.get("cases") if isinstance(qa_review.get("cases"), list) else []
-    if cases:
-        lines.extend(["", "## Generated Case Runs", ""])
-        for case in cases:
-            if isinstance(case, dict):
-                lines.append(f"- `{case.get('case_id')}`: **{case.get('status')}** — {case.get('result_path')}")
-    lines.extend(["", "## Findings", ""])
-    findings = report.get("findings", [])
-    if not findings:
-        lines.append("No deterministic blocking code findings were detected.")
-    for item in findings:
-        reproduction = item.get("reproducibility") if isinstance(item.get("reproducibility"), dict) else {}
-        lines.extend(
-            [
-                f"- **{item.get('severity')}** `{item.get('path')}:{item.get('line')}` — {item.get('message')}",
-                f"  - Recommendation: {item.get('recommendation')}",
-                f"  - Reproducibility: {reproduction.get('status', 'REVIEW_REQUIRED')}",
-                f"  - Steps: {'; '.join(str(step) for step in reproduction.get('steps', []))}",
-                f"  - Expected: {reproduction.get('expected', '-')}",
-                f"  - Actual: {reproduction.get('actual', '-')}",
-            ]
-        )
-    recommendations = report.get("recommendations") if isinstance(report.get("recommendations"), list) else []
-    developer = report.get("developer_review") if isinstance(report.get("developer_review"), dict) else {}
-    summary = developer.get("summary") if isinstance(developer.get("summary"), dict) else {}
-    lines.extend(
-        [
-            "",
-            "## Developer Code Review Summary",
-            "",
-            f"- Decision: **{developer.get('decision', 'COMMENT')}** (user-owned; not approval)",
-            f"- Total issues: **{summary.get('total_issues', 0)}**",
-            f"- Must Fix: **{summary.get('must_fix', 0)}**",
-            f"- Should Fix: **{summary.get('should_fix', 0)}**",
-            f"- Nice to Have: **{summary.get('nice_to_have', 0)}**",
-            "",
-            "### Review Sources",
-            "",
-            "- Deterministic diff, test execution, product-test, and case evidence are reported below.",
-            "- No external analyzer result is used in this report.",
-        ]
-    )
-    lines.extend(["", "## Remediation Recommendations", ""])
-    sections = developer.get("sections") if isinstance(developer.get("sections"), dict) else {}
-    for key, title in (("must_fix", "Must Fix"), ("should_fix", "Should Fix"), ("nice_to_have", "Nice to Have")):
-        lines.extend([f"### {title}", ""])
-        items = sections.get(key) if isinstance(sections.get(key), list) else []
-        if not items:
-            lines.append("- None.")
-            continue
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            lines.extend(
-                [
-                    f"- **{item.get('severity', 'INFO')}** `{item.get('id', 'item')}` ({item.get('status', 'ADVISORY')}) — {item.get('recommendation') or item.get('message')}",
-                    f"  - Verification: {item.get('verification') or item.get('recommendation')}",
-                ]
-            )
-    lines.extend(["### Verification", ""])
-    verification = sections.get("verification") if isinstance(sections.get("verification"), list) else []
-    lines.extend([f"- {item.get('item')}: {item.get('action')}" for item in verification if isinstance(item, dict)] or ["- None."])
-    localized = developer.get("localized_summary") if isinstance(developer.get("localized_summary"), dict) else {}
-    for language, title, labels in (
-        ("zh-TW", "中文詳細摘要", {"must_fix": "必須修復", "should_fix": "應該修復", "nice_to_have": "可改善項目"}),
-    ):
-        content = localized.get(language) if isinstance(localized.get(language), dict) else {}
-        lines.extend(["", f"## {title}", ""])
-        for key in ("must_fix", "should_fix", "nice_to_have"):
-            lines.append(f"### {labels[key]}")
-            value = content.get(key, "無。" if language == "zh-TW" else "None.")
-            if isinstance(value, list):
-                lines.extend([f"- {entry}" for entry in value] or ["- 無。" if language == "zh-TW" else "- None."])
-            else:
-                lines.append(f"- {value}")
-        lines.append("### Verification")
-        value = content.get("verification", [])
-        lines.extend([f"- {entry}" for entry in value] or ["- 無。" if language == "zh-TW" else "- None."])
-    lines.extend(
-        [
-            "",
-            "## 遠端回覆預覽",
-            "",
-            f"狀態：{report.get('remote_reply', {}).get('preview', {}).get('state', 'COMMENT')}",
-            f"摘要：{report.get('remote_reply', {}).get('preview', {}).get('summary', '-')}",
-            "說明：此處只顯示使用者可讀內容，不嵌入 JSON。",
-            "",
-        ]
-    )
-    return "\n".join(lines)
-
+    safe_report, _ = redact_structure(report, prefix="review_report_markdown")
+    if not isinstance(safe_report, dict):
+        raise ReviewError("review_report_markdown_redaction_failed_closed")
+    return _render_detailed_text(safe_report)
 
 def _zh_value(value: Any) -> str:
     mapping = {
@@ -3244,6 +2990,7 @@ def _render_detailed_text(report: dict[str, Any]) -> str:
         "報告語言：繁體中文（zh-TW）",
         "",
         "本報告用於協助開發人員理解、重現與修復問題，不是自動核准或合併決定。",
+        "本報告同時是 PR 留言內容；它是 Quality Pilot 的 advisory COMMENT，不是核准、要求修改或 merge 動作。",
         "最終的留言、要求修改或核准由 PR 擁有者決定。",
         "所有建議的重現步驟都會標示是否實際執行；沒有證據的步驟不宣稱為測試結果。",
         "",
