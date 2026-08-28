@@ -2103,10 +2103,12 @@ def _browser_evidence_records(
     """
     qa = qa_report if isinstance(qa_report, dict) else {}
     records: list[dict[str, Any]] = []
+    related_product_screenshot: Any = None
     product = qa.get("product_test") if isinstance(qa.get("product_test"), dict) else {}
     browser = product.get("browser") if isinstance(product.get("browser"), dict) else {}
     if browser:
         evidence = browser.get("evidence") if isinstance(browser.get("evidence"), dict) else {}
+        related_product_screenshot = evidence.get("screenshot")
         status = str(browser.get("status") or "NOT_RUN")
         records.append(
             {
@@ -2160,7 +2162,8 @@ def _browser_evidence_records(
                 "screenshot": regression.get("screenshot"),
                 "screenshot_sha256": regression.get("screenshot_sha256"),
                 "failure_screenshot": regression.get("screenshot"),
-                "screenshot_note": "pytest regression does not expose a browser page screenshot unless a Browser adapter case also produced one.",
+                "related_product_screenshot": related_product_screenshot,
+                "screenshot_note": "pytest regression does not expose a browser page screenshot; a related product Browser screenshot is listed separately when available.",
             }
         )
     return records
@@ -2784,6 +2787,8 @@ def _render_browser_evidence(report: dict[str, Any]) -> list[str]:
                 lines.append(f"  screenshot SHA-256：{record.get('screenshot_sha256')}")
         elif str(status or "").upper() in {"FAIL", "BLOCK"}:
             lines.append(f"  失敗截圖：未建立；{record.get('screenshot_note') or '執行在建立 Browser page 前已失敗，不能偽造截圖。'}")
+            if record.get("related_product_screenshot"):
+                lines.append(f"  相關產品 Browser screenshot：{record.get('related_product_screenshot')}（不是 local pytest failure 的同一個 page session）")
         for key in ("trace", "dom", "interaction", "diagnostics", "console", "network", "server_stdout", "server_stderr", "remote_server_stdout", "remote_server_stderr"):
             value = evidence.get(key)
             if value and key != "screenshot":
