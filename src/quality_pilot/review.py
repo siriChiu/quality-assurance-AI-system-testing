@@ -696,6 +696,10 @@ def _review_comment_body(report: dict[str, Any], inline: list[dict[str, Any]]) -
     ]
     if browser_records:
         lines.extend(["", "Browser/Playwright evidence:"])
+        if any(item.get("kind") == "supplemental_manual_playwright" and item.get("status") == "PASS" for item in browser_records) and any(item.get("kind") == "remote_product_browser" and item.get("status") == "HOLD" for item in browser_records):
+            lines.append("- 判讀：formal smoke run=HOLD；supplemental confirmed semantic run=PASS；這是兩個不同 run，不是矛盾結果。")
+        if any(item.get("kind") == "supplemental_manual_local_playwright_regression" for item in browser_records) and any(item.get("kind") == "local_playwright_pytest_regression" and item.get("status") == "BLOCK" for item in browser_records):
+            lines.append("- 判讀：formal run=BLOCK(timeout)；supplemental exact rerun=FAIL(exit 1)；以下 failure details 以 supplemental rerun 為準。")
         for item in browser_records:
             if not isinstance(item, dict):
                 continue
@@ -2770,6 +2774,16 @@ def _report_browser_records(report: dict[str, Any]) -> list[dict[str, Any]]:
 def _render_browser_evidence(report: dict[str, Any]) -> list[str]:
     records = _report_browser_records(report)
     lines = ["", "Playwright／產品測試執行證據", "-" * 80]
+    if any(item.get("kind") == "supplemental_manual_playwright" and item.get("status") == "PASS" for item in records) and any(item.get("kind") == "remote_product_browser" and item.get("status") == "HOLD" for item in records):
+        lines.extend([
+            "判讀說明：正式 review 的 Browser case 使用原始 smoke contract，因此是 HOLD；supplemental manual case 使用已確認的 semantic workflow，因此是獨立 PASS，兩者不是同一次 run。",
+            "",
+        ])
+    if any(item.get("kind") == "supplemental_manual_local_playwright_regression" for item in records) and any(item.get("kind") == "local_playwright_pytest_regression" and item.get("status") == "BLOCK" for item in records):
+        lines.extend([
+            "判讀說明：正式 review 的 local Browser command 在舊 timeout 邊界回 BLOCK；後續 supplemental exact rerun 已完成並回報 FAIL，應以 supplemental rerun 的 failure details 進行 triage。",
+            "",
+        ])
     product_evidence = report.get("product_test_evidence") if isinstance(report.get("product_test_evidence"), dict) else {}
     if product_evidence:
         lines.extend([
