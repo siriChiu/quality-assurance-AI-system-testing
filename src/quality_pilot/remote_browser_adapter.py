@@ -269,8 +269,22 @@ def _relative_or_str(path: Path, root: Path) -> str:
 
 def _redact_url(value: str) -> str:
     parsed = urlsplit(value)
-    query = "&".join(f"{key}=<redacted>" if key.lower() in {"token", "auth", "key", "secret"} else f"{key}=<redacted>" for key, _, _ in (part.partition("=") for part in parsed.query.split("&") if part))
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, query, ""))
+
+    def redact_component(component: str) -> str:
+        return "&".join(
+            f"{key}=<redacted>" if separator else key
+            for key, separator, _raw in (part.partition("=") for part in component.split("&") if part)
+        )
+
+    return urlunsplit(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            redact_component(parsed.query),
+            redact_component(parsed.fragment),
+        )
+    )
 
 
 def _redact_file(path: Path, sensitive_values: list[str] | None = None) -> str:

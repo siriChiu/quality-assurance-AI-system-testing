@@ -19,6 +19,10 @@ class RemoteBrowserAdapterTest(unittest.TestCase):
         value = _redact_url("http://172.17.23.148:46017/?token=secret-value&mode=browser")
         self.assertEqual(value, "http://172.17.23.148:46017/?token=<redacted>&mode=<redacted>")
 
+    def test_dynamic_url_redacts_fragment_values(self) -> None:
+        value = _redact_url("http://172.17.23.148:46017/#token=secret-value")
+        self.assertEqual(value, "http://172.17.23.148:46017/#token=<redacted>")
+
     def test_missing_remote_coordinates_block_without_ssh(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch("quality_pilot.remote_browser_adapter.subprocess.run") as run:

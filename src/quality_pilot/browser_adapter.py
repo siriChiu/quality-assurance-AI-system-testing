@@ -641,27 +641,56 @@ def _extract_discovered_url(value: str) -> str:
     return candidate.rstrip(".,)\"'")
 
 
-def _redact_url(value: str) -> str:
-    parsed = urlsplit(str(value or ""))
-    if not parsed.query:
-        return str(value or "")
-    query_parts: list[str] = []
-    for item in parsed.query.split("&"):
+_SENSITIVE_URL_KEYS = {
+    "token",
+    "authtoken",
+    "auth",
+    "key",
+    "secret",
+    "password",
+    "access_token",
+    "accesstoken",
+    "session",
+    "jwt",
+}
+
+
+def _redact_url_component(component: str) -> str:
+    if not component:
+        return ""
+    parts: list[str] = []
+    for item in component.split("&"):
         key, separator, _raw = item.partition("=")
         if not separator:
-            query_parts.append(key)
+            parts.append(key)
         else:
-            query_parts.append(f"{key}=<redacted>")
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "&".join(query_parts), ""))
+            parts.append(f"{key}=<redacted>")
+    return "&".join(parts)
+
+
+def _redact_url(value: str) -> str:
+    parsed = urlsplit(str(value or ""))
+    if not parsed.query and not parsed.fragment:
+        return str(value or "")
+    return urlunsplit(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            _redact_url_component(parsed.query),
+            _redact_url_component(parsed.fragment),
+        )
+    )
 
 
 def _url_sensitive_values(value: str) -> list[str]:
     parsed = urlsplit(str(value or ""))
     values: list[str] = []
-    for item in parsed.query.split("&"):
-        key, separator, raw = item.partition("=")
-        if separator and raw and key.lower() in {"token", "authtoken", "auth", "key", "secret", "password", "access_token", "accesstoken", "session", "jwt"}:
-            values.append(raw)
+    for component in (parsed.query, parsed.fragment):
+        for item in component.split("&"):
+            key, separator, raw = item.partition("=")
+            if separator and raw and key.lower() in _SENSITIVE_URL_KEYS:
+                values.append(raw)
     return values
 
 

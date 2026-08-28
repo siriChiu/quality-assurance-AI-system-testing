@@ -7,7 +7,7 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
-from quality_pilot.browser_adapter import _add_playwright_site_packages, _extract_discovered_url, _sanitize_trace, _step_locator, run_browser_test
+from quality_pilot.browser_adapter import _add_playwright_site_packages, _extract_discovered_url, _redact_url, _sanitize_trace, _step_locator, _url_sensitive_values, run_browser_test
 
 
 class BrowserAdapterTest(unittest.TestCase):
@@ -100,6 +100,16 @@ class BrowserAdapterTest(unittest.TestCase):
         self.assertEqual(
             _extract_discovered_url("Browser UI: http://172.17.23.148:46017/?token=secret-token"),
             "http://172.17.23.148:46017/?token=secret-token",
+        )
+
+    def test_url_redaction_covers_query_and_fragment_tokens(self) -> None:
+        value = "http://127.0.0.1:8000/?token=query-secret#token=fragment-secret"
+        redacted = _redact_url(value)
+        self.assertNotIn("query-secret", redacted)
+        self.assertNotIn("fragment-secret", redacted)
+        self.assertEqual(
+            _url_sensitive_values(value),
+            ["query-secret", "fragment-secret"],
         )
 
     def test_trace_is_sanitized_before_evidence(self) -> None:
