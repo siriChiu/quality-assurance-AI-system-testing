@@ -3147,40 +3147,55 @@ def _render_reproduction_playbook(report: dict[str, Any]) -> list[str]:
                         f"  - 錯誤：{detail.get('error')}",
                         f"  - 單測試命令：`{detail.get('reproduce')}`",
                     ])
+    qa = report.get("qa_review") if isinstance(report.get("qa_review"), dict) else {}
+    product = qa.get("product_test") if isinstance(qa.get("product_test"), dict) else {}
+    plan = product.get("plan") if isinstance(product.get("plan"), dict) else {}
+    web_ui = plan.get("web_ui") if isinstance(plan.get("web_ui"), dict) else {}
+    browser_contract = product.get("browser_contract") if isinstance(product.get("browser_contract"), dict) else {}
+    confirmed_steps = product.get("confirmed_browser_steps")
+    if not isinstance(confirmed_steps, list):
+        confirmed_steps = browser_contract.get("steps") if isinstance(browser_contract.get("steps"), list) else []
+    candidate_steps = web_ui.get("candidate_steps") if isinstance(web_ui.get("candidate_steps"), list) else []
+    run_operations = product.get("run_operations") if isinstance(product.get("run_operations"), list) else []
+    candidate_commands = plan.get("candidate_commands") if isinstance(plan.get("candidate_commands"), list) else []
     lines.extend([
         "",
-        "### 2. 遠端語意 Browser 流程（不保存正式環境設定）",
+        "### 2. 產品 Browser／UI 語意流程",
         "",
-        "此流程需要先有 READY 遠端前置檢查，並由 SSH tunnel 將動態 URL 交給本地 Playwright。",
-        "它使用真實 locator；不要把 body/button smoke 改回正式 oracle。",
-        "```yaml",
-        "steps:",
-        "  - action: expect_visible",
-        "    locator: {type: role, role: tab, name: PID Settings}",
-        "  - action: expect_visible",
-        "    locator: {type: role, role: tabpanel, name: PID Settings}",
-        "  - action: expect_visible",
-        "    locator: {type: label, name: CPU0-TMP throttle}",
-        "  - action: expect_visible",
-        "    locator: {type: label, name: CPU0-TMP set point}",
-        "  - action: fill",
-        "    locator: {type: label, name: CPU0-TMP set point}",
-        "    value: '120'",
-        "  - action: click",
-        "    locator: {type: role, role: button, name: Run auto_PID_tool}",
-        "  - action: expect_dialog",
-        "    expected: CPU0-TMP set point must be lower than throttle",
-        "  - action: expect_focused",
-        "    locator: {type: label, name: CPU0-TMP set point}",
-        "  - action: click",
-        "    locator: {type: role, role: tab, name: Fan Zone}",
-        "  - action: expect_visible",
-        "    locator: {type: role, role: tabpanel, name: Fan Zone}",
-        "  - action: expect_checked",
-        "    selector: 'section[aria-label=\"Zone 0\"] label.choice:has-text(\"CPU0-TMP\") input[type=\"checkbox\"]'",
-        "    expected: true",
-        "```",
-        "預期：validation dialog 出現、focus 回到錯誤欄位，且 diagnostics network 不包含 `/api/settings` POST。",
+        "Browser 必須先通過遠端前置檢查，再由 SSH tunnel 將動態 URL 交給本地 Playwright。",
+        "只有 confirmed contract／confirmed steps 才能直接當作 executable oracle；discovery candidate 只能用來設計與確認，不能宣稱測試通過。",
+    ])
+    if confirmed_steps:
+        lines.extend([
+            "",
+            "本次已確認的 Browser steps（可依 contract 重現）：",
+            "```json",
+            json.dumps(confirmed_steps, ensure_ascii=False, indent=2),
+            "```",
+        ])
+    else:
+        lines.extend([
+            "",
+            "本次沒有可直接執行的 confirmed Browser steps；以下資料若存在，僅是 candidate，不能當成 PASS：",
+        ])
+        for candidate in candidate_steps[:40]:
+            if not isinstance(candidate, dict):
+                continue
+            summary = candidate.get("summary") or candidate.get("description") or candidate.get("action") or "未命名 candidate"
+            source = candidate.get("source") or "未記錄來源"
+            line = candidate.get("line")
+            location = f"{source}:{line}" if line else str(source)
+            lines.append(f"- candidate：{summary}（來源：{location}）")
+        if run_operations:
+            lines.append("候選產品操作（仍需明確 confirmation）：")
+            for operation in run_operations[:20]:
+                lines.append(f"- `{operation}`")
+        if candidate_commands:
+            lines.append("候選命令（仍需明確 confirmation；不可直接作為 oracle）：")
+            lines.extend([f"```bash\n{command}\n```" for command in candidate_commands[:20]])
+        if not candidate_steps and not run_operations and not candidate_commands:
+            lines.append("- 未建立 candidate；請先在產品 contract 中定義 locator、操作、expected state 與 failure oracle。")
+    lines.extend([
         "",
         "### 3. 非 UI／UX 維度的補測方式",
         "- 黑箱：使用產品實際 CLI/TUI/API/UI 入口，保存命令、標準輸出／錯誤輸出、預期／實際結果與判定規則。",

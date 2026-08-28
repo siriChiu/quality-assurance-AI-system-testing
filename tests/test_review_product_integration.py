@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from quality_pilot.config import ProjectConfig, project_paths
-from quality_pilot.review import _browser_result_case, _build_report, _product_result_case, _pytest_failure_details, _render_detailed_text, _render_markdown, _run_comprehensive_review_qa, prepare_gitea_review_reply, review_gate
+from quality_pilot.review import _browser_result_case, _build_report, _product_result_case, _pytest_failure_details, _render_detailed_text, _render_markdown, _render_reproduction_playbook, _run_comprehensive_review_qa, prepare_gitea_review_reply, review_gate
 
 
 class ReviewProductIntegrationTest(unittest.TestCase):
@@ -140,6 +140,60 @@ class ReviewProductIntegrationTest(unittest.TestCase):
         comment = __import__("quality_pilot.review", fromlist=["_review_comment_body"])._review_comment_body(report, [])
         self.assertIn("PR 合併決定仍由 PR 擁有者負責", comment)
         self.assertIn("截圖=有", comment)
+
+    def test_reproduction_playbook_uses_confirmed_or_candidate_data_not_product_specific_steps(self) -> None:
+        candidate_report = {
+            "qa_review": {
+                "product_test": {
+                    "plan": {
+                        "web_ui": {
+                            "candidate_steps": [
+                                {"action": "expect_visible", "summary": "expect configured settings tab", "source": "tests/ui.py", "line": 12}
+                            ]
+                        },
+                        "candidate_commands": ["python product_entry.py --check"],
+                    }
+                }
+            }
+        }
+        candidate_text = "\n".join(_render_reproduction_playbook(candidate_report))
+        self.assertIn("expect configured settings tab", candidate_text)
+        self.assertIn("只能用來設計與確認", candidate_text)
+        self.assertNotIn("PID Settings", candidate_text)
+        self.assertNotIn("Run auto_PID_tool", candidate_text)
+
+        confirmed_report = {
+            "qa_review": {
+                "product_test": {
+                    "confirmed_browser_steps": [
+                        {"action": "expect_visible", "locator": {"role": "tab", "name": "Configured Product Tab"}}
+                    ]
+                }
+            }
+        }
+        confirmed_text = "\n".join(_render_reproduction_playbook(confirmed_report))
+        self.assertIn("Configured Product Tab", confirmed_text)
+        self.assertIn("已確認的 Browser steps", confirmed_text)
+
+    def test_detailed_text_contains_complete_qa_matrix_and_final_result(self) -> None:
+        dimensions = ("white_box", "functional", "black_box", "boundary", "stress", "documentation", "product_binary", "browser_ui", "ui", "ux")
+        report = {
+            "repo": "owner/repo",
+            "pr_number": 1,
+            "test_outcome": "NOT_RUN",
+            "product_test_outcome": "NOT_EVALUATED",
+            "browser_ui_outcome": "NOT_EVALUATED",
+            "qa_outcome": "NOT_RUN",
+            "conclusion": "HOLD_FOR_TEST_COVERAGE",
+            "qa_review": {"matrix": {dimension: {"status": "NOT_RUN", "reason": "not_configured"} for dimension in dimensions}},
+            "findings": [],
+        }
+        text = _render_detailed_text(report)
+        for dimension in dimensions:
+            self.assertIn(f"`{dimension}`", text)
+        self.assertIn("工程師可直接複製的重現手冊", text)
+        self.assertIn("最終結果（請以本節作為摘要）", text)
+        self.assertIn("PR 合併決定：由 PR 擁有者決定", text)
 
     def test_detailed_text_report_contains_reproduction_and_redacted_context(self) -> None:
         report = {
