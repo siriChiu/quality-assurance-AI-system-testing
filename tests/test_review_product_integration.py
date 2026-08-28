@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from quality_pilot.config import ProjectConfig, project_paths
-from quality_pilot.review import _browser_result_case, _build_report, _product_result_case, _render_detailed_text, _render_markdown, _run_comprehensive_review_qa, prepare_gitea_review_reply, review_gate
+from quality_pilot.review import _browser_result_case, _build_report, _product_result_case, _pytest_failure_details, _render_detailed_text, _render_markdown, _run_comprehensive_review_qa, prepare_gitea_review_reply, review_gate
 
 
 class ReviewProductIntegrationTest(unittest.TestCase):
@@ -77,6 +77,13 @@ class ReviewProductIntegrationTest(unittest.TestCase):
             self.assertTrue(request["advisory_only"])
             self.assertIn("not approval", request["body"])
             self.assertIn("product-test-contract", {item["id"] for item in request["recommendations"]})
+
+    def test_pytest_failure_details_are_single_test_reproducible(self) -> None:
+        output = """________________ test_run ________________\n\n> page.get_by_role(\"button\").click()\nE   playwright.sync_api.TimeoutError: Locator.click: Timeout 10000ms exceeded.\nE     - waiting for element to be visible, enabled and stable\n================ short test summary info ================\nFAILED tests/browser_ui/test_ui.py::test_run\n"""
+        details = _pytest_failure_details(output, ["tests/browser_ui/test_ui.py::test_run"], command=".venv/bin/python -m pytest tests/browser_ui -q")
+        self.assertEqual(len(details), 1)
+        self.assertEqual(details[0]["category"], "playwright_actionability_timeout")
+        self.assertEqual(details[0]["reproduce"], ".venv/bin/python -m pytest tests/browser_ui/test_ui.py::test_run -q")
 
     def test_detailed_text_includes_browser_evidence_and_user_owned_merge_decision(self) -> None:
         report = {

@@ -599,6 +599,7 @@ def run_selected_tests(
         safe_stdout, _ = _redact_output(stdout)
         safe_stderr, _ = _redact_output(stderr)
         pytest_summary = _pytest_result_summary(safe_stdout) if "pytest" in command else {"failed_tests": [], "summary": None}
+        failure_details = _pytest_failure_details(safe_stdout, pytest_summary.get("failed_tests", []), command=command) if "pytest" in command else []
         stdout_path = evidence_dir / f"{item.get('id', 'test')}.stdout.log"
         stderr_path = evidence_dir / f"{item.get('id', 'test')}.stderr.log"
         stdout_path.write_text(safe_stdout, encoding="utf-8")
@@ -618,6 +619,7 @@ def run_selected_tests(
                 "python_executable": argv[0],
                 "timeout_seconds": command_timeout_seconds,
                 "failed_tests": pytest_summary.get("failed_tests", []),
+                "failure_details": failure_details,
                 "pytest_summary": pytest_summary.get("summary"),
                 "stdout": _relative_or_str(stdout_path, config.root),
                 "stderr": _relative_or_str(stderr_path, config.root),
@@ -703,6 +705,38 @@ def _review_comment_body(report: dict[str, Any], inline: list[dict[str, Any]]) -
                 f"interactions={item.get('interaction_count', 'n/a')}, state_assertions={item.get('state_assertion_count', 'n/a')}, "
                 f"screenshot={'available' if screenshot else 'not available'}"
             )
+            if item.get("command"):
+                lines.append(f"  - Suite command: `{item.get('command')}`")
+            if item.get("exit_code") is not None:
+                lines.append(f"  - Suite exit code: `{item.get('exit_code')}`")
+            if item.get("evidence"):
+                lines.append("  - Suite stdout/stderr: saved in the review evidence record")
+            failure_details = item.get("failure_details") if isinstance(item.get("failure_details"), list) else []
+            for detail in failure_details[:20]:
+                if not isinstance(detail, dict):
+                    continue
+                lines.extend([
+                    f"  - Failure: {detail.get('test', 'unknown')}",
+                    f"    Classification: {detail.get('category', 'unknown')}",
+                    f"    Observed: {detail.get('observed', 'unknown')}",
+                    f"    Error: {detail.get('error', 'unknown')}",
+                    f"    Reproduce: `{detail.get('reproduce', 'unknown')}`",
+                ])
+    suite_command = next(
+        (str(item.get("command")) for item in browser_records if isinstance(item, dict) and item.get("command")),
+        None,
+    )
+    if suite_command:
+        lines.extend([
+            "",
+            "Copyable local reproduction:",
+            "Replace `$REVIEW_WORKTREE` with the pinned review worktree path recorded in the report.",
+            "```bash",
+            "cd \"$REVIEW_WORKTREE\"",
+            suite_command,
+            "```",
+            "Each failure detail above also contains a single-test command for reproducing only that test.",
+        ])
     if inline:
         lines.extend(["", f"Inline findings: {len(inline)}"])
     if recommendations:
@@ -1475,6 +1509,7 @@ def _run_browser_regression_case(
             "reason": reason,
             "timeout_seconds": existing.get("timeout_seconds"),
             "failed_tests": existing.get("failed_tests", []),
+            "failure_details": existing.get("failure_details", []),
             "pytest_summary": existing.get("pytest_summary"),
             "screenshot": existing.get("screenshot"),
             "screenshot_sha256": existing.get("screenshot_sha256"),
@@ -1523,6 +1558,7 @@ def _run_browser_regression_case(
         "reason": reason,
         "timeout_seconds": command_timeout_seconds,
         "failed_tests": pytest_summary.get("failed_tests", []),
+        "failure_details": _pytest_failure_details(safe_stdout, pytest_summary.get("failed_tests", []), command=command),
         "pytest_summary": pytest_summary.get("summary"),
         "screenshot": None,
         "screenshot_sha256": None,
@@ -2024,6 +2060,7 @@ def _build_developer_review_report(
                     "exit_code": item.get("exit_code"),
                     "timeout_seconds": item.get("timeout_seconds"),
                     "failed_tests": item.get("failed_tests", []),
+                    "failure_details": item.get("failure_details", []),
                     "pytest_summary": item.get("pytest_summary"),
                     "stdout": item.get("stdout"),
                     "stderr": item.get("stderr"),
@@ -2156,6 +2193,7 @@ def _browser_evidence_records(
                 "exit_code": command.get("exit_code") if isinstance(command, dict) else None,
                 "timeout_seconds": existing.get("timeout_seconds"),
                 "failed_tests": existing.get("failed_tests", []),
+                "failure_details": existing.get("failure_details", []),
                 "pytest_summary": existing.get("pytest_summary"),
                 "evidence": {"stdout": (regression.get("evidence") or [None, None])[0] if isinstance(regression.get("evidence"), list) else None,
                              "stderr": (regression.get("evidence") or [None, None])[1] if isinstance(regression.get("evidence"), list) and len(regression.get("evidence") or []) > 1 else None},
@@ -2774,6 +2812,18 @@ def _render_browser_evidence(report: dict[str, Any]) -> list[str]:
         failed_tests = record.get("failed_tests") if isinstance(record.get("failed_tests"), list) else []
         if failed_tests:
             lines.append(f"  失敗測試：{'; '.join(str(item) for item in failed_tests[:20])}")
+        failure_details = record.get("failure_details") if isinstance(record.get("failure_details"), list) else []
+        for detail in failure_details[:20]:
+            if not isinstance(detail, dict):
+                continue
+            lines.extend([
+                f"  失敗診斷：{detail.get('test', '未命名')}",
+                f"    分類：{detail.get('category', '未分類')}",
+                f"    位置：{detail.get('location') or '未擷取'}",
+                f"    觀察：{detail.get('observed') or '未擷取'}",
+                f"    實際錯誤：{detail.get('error') or '未擷取'}",
+                f"    可複製單測試命令：{detail.get('reproduce') or '未擷取'}",
+            ])
         source_identity = record.get("source_identity") if isinstance(record.get("source_identity"), dict) else {}
         if source_identity:
             lines.append(
@@ -3020,6 +3070,55 @@ def _pytest_result_summary(stdout: str) -> dict[str, Any]:
         "failed_tests": failed_tests[:40],
         "summary": summary_lines[-1] if summary_lines else None,
     }
+
+
+def _pytest_failure_details(stdout: str, failed_tests: list[str] | None = None, *, command: str = "") -> list[dict[str, Any]]:
+    """Extract bounded, copyable failure diagnostics from pytest output."""
+    text = str(stdout or "")
+    names = list(failed_tests or _pytest_result_summary(text).get("failed_tests", []))
+    details: list[dict[str, Any]] = []
+    for full_name in names[:40]:
+        short_name = str(full_name).rsplit("::", 1)[-1]
+        marker = re.search(rf"^_+\s*{re.escape(short_name)}\s*_+$", text, re.MULTILINE)
+        block = text[marker.start():] if marker else text
+        body_start = block.find("\n") + 1
+        next_header = re.search(r"^_{5,}\s*\S.*?_{5,}$", block[body_start:], re.MULTILINE)
+        if next_header:
+            block = block[: body_start + next_header.start()]
+        location_match = re.search(r"(?m)^\s*(tests/[^\s:]+:\d+)", block)
+        error_lines = []
+        for line in block.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("E   ") or "TimeoutError:" in stripped or "AssertionError:" in stripped:
+                error_lines.append(stripped)
+        if "element to be visible, enabled and stable" in block or "Locator.click: Timeout" in block:
+            category = "playwright_actionability_timeout"
+            observed = "Playwright located the element but could not complete click because it never became stable within the test timeout."
+        elif "Browser UI did not print an access URL" in block or "browser_url_discovery" in block:
+            category = "browser_server_startup_or_url_timeout"
+            observed = "The product test process did not expose a Browser URL before the test startup deadline."
+        elif "root.name == \"auto_PID_tool\"" in block or "AssertionError: assert root.name" in block:
+            category = "review_worktree_path_assumption"
+            observed = "The test assumes the checkout directory has the product repository name; pinned review worktrees intentionally use a PR-specific directory."
+        else:
+            category = "pytest_assertion_or_product_test_failure"
+            observed = "Pytest completed this case with an assertion or test error; inspect the bounded excerpt below."
+        if command and " -m pytest" in command:
+            pytest_command = command.split(" -m pytest", 1)[0] + " -m pytest"
+            reproduce = f"{pytest_command} {full_name} -q"
+        else:
+            reproduce = f"{command} {full_name}".strip() if command else full_name
+        details.append(
+            {
+                "test": full_name,
+                "category": category,
+                "location": location_match.group(1) if location_match else None,
+                "observed": observed,
+                "error": "; ".join(error_lines[-3:])[:1200] or "No bounded error line was extracted; inspect stdout evidence.",
+                "reproduce": reproduce,
+            }
+        )
+    return details
 
 
 def _review_test_infrastructure_reason(stdout: str, stderr: str) -> str | None:
