@@ -2856,6 +2856,7 @@ def _render_complete_qa_matrix(report: dict[str, Any]) -> list[str]:
             f"- `{case.get('case_id', '未命名')}`：{_case_title_zh(case)}",
             f"  - 結果：{_status_for_engineer(case_status, reason=case.get('reason'))}",
             f"  - 原始命令結果：{_status_for_engineer(case.get('status'), reason=case.get('reason'))}",
+            f"  - 判讀原因：`{case.get('reason')}`" if case.get('reason') else "  - 判讀原因：未記錄",
             f"  - 維度：{', '.join(str(value) for value in case.get('dimensions', [])) or '未記錄'}",
             f"  - 執行位置：{case.get('execution_target', '未記錄')}；證據來源：{case.get('evidence_origin', '未記錄')}",
             f"  - result：{case.get('result_path', '未建立')}",
