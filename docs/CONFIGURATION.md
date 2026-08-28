@@ -206,10 +206,14 @@ the pinned review worktree. The original worktree is not the build directory.
 A build artifact hash and contract identity hash are recorded in evidence.
 Exit-only/help/version probes are `HOLD`, not product `PASS`.
 
-When `web_ui.enabled` is true, Playwright is required. Install the optional
-Quality Pilot dependency and browser explicitly in the test environment, for
-example `pip install -e '.[browser]'` followed by `python -m playwright install
-chromium`; review never installs browsers automatically. The adapter launches
+When `web_ui.enabled` is true, Playwright is required. For local review, the
+review workflow first creates `<review-worktree>/.venv` and installs the product
+repository's declared dependencies through `.venv/bin/python`; it then runs
+`.venv/bin/python -m playwright install chromium`. The host interpreter is used
+only for `python3 -m venv .venv`, so Debian PEP 668 cannot redirect or block the
+local review install. Remote product/Browser pytest uses the separately confirmed
+remote product venv and is recorded as remote evidence, never as local disposable
+regression evidence. The adapter launches
 the actual product process, opens a real browser, performs the declared
 interactions, and requires at least one positive interaction and semantic UI
 assertion. It records redacted server logs, interaction JSON, screenshot/hash,

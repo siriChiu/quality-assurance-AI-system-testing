@@ -197,7 +197,19 @@ existing confirmed config → SSH config alias → git/repository metadata → a
 日常 `review pr` 若缺少 normalized contract，應直接啟動一次 discovery confirmation wizard；
 使用者拒絕時回 `CONFIGURATION_REQUIRED`，不得執行 product 或 Browser command。
 
-Contract 至少要分開描述：
+Contract 至少要分開描述。Local regression 的 pytest interpreter 不屬於 product
+browser contract；它必須在每個 disposable review worktree 內建立並使用：
+
+```text
+cd <review-worktree>
+python3 -m venv .venv
+.venv/bin/python -m pip install -r <declared-requirements>
+.venv/bin/python -m pytest ...
+```
+
+Remote product/browser pytest 若執行，必須使用 remote confirmed venv，並以
+`execution_target: remote_product_checkout`、`evidence_origin: remote` 另行記錄，
+不能與 local disposable regression result 合併。
 
 ```yaml
 execution:

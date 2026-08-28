@@ -96,8 +96,12 @@ fixed-sequence pipeline。先選使用目的，執行最短路徑，
 
 這個命令會針對 pinned branch/PR head 建立 detached worktree；若 MCP snapshot
 只有 changed files 沒有 diff，會從 pinned base/head commits 重建 diff。它會選擇
-repository regression suite，並實際執行測試。若 tests 使用 pytest，會優先使用
-host project 的 `.venv` 並執行 `python -m pytest tests -q`；否則使用 bounded unittest
+repository regression suite，並實際執行測試。若 tests 使用 pytest，會先在 disposable
+review worktree 建立 `<review-worktree>/.venv`，再使用 `.venv/bin/python -m pytest tests -q`；
+不得把 Quality Pilot checkout、host product repo 或 `/usr/bin/python3` 當成 local review
+pytest interpreter。`python3 -m venv .venv` 只負責建立隔離環境；pip、Playwright 與 pytest
+都必須透過 worktree venv 執行。Remote product/Browser pytest 若另行執行，必須標記為 remote
+product checkout evidence，不得混入 local disposable regression evidence；否則使用 bounded unittest
 discovery。預設也會透過 case-generation/case-run 模組建立 PR-scoped QA matrix，
 涵蓋 black-box、white-box、functional、boundary、stress、documentation；
 `--diff-only` 才跳過這個 comprehensive path。Comprehensive review 會依 changed files

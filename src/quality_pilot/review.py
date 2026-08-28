@@ -91,10 +91,12 @@ def review_pr(
     diff_info = _reconstruct_snapshot_diff(snapshot, worktree)
     head_sha = snapshot["head_sha"]
     diff_hash = _sha256(str(snapshot.get("diff") or ""))
+    review_worktree_path = Path(str(worktree.get("path"))) if worktree.get("path") else None
+    review_python_command = _review_python_executable(config, review_worktree_path)
     dependency_preparation = prepare_review_dependencies(
         config,
-        worktree=Path(str(worktree.get("path"))) if worktree.get("path") else None,
-        python_executable=_review_python_executable(config),
+        worktree=review_worktree_path,
+        python_executable=review_python_command,
         environment_profile=environment_profile_status(config),
         enabled=prepare_dependencies and not dry_run,
         timeout_seconds=timeout_seconds,
@@ -103,7 +105,7 @@ def review_pr(
     test_selection = select_applicable_tests(
         worktree.get("path"),
         snapshot.get("changed_files", []),
-        python_executable=_review_python_executable(config),
+        python_executable=review_python_command,
     )
     test_results = run_selected_tests(
         test_selection["selected"],
@@ -128,6 +130,7 @@ def review_pr(
             dry_run=dry_run,
             test_selection=test_selection,
             test_results=test_results,
+            python_executable=review_python_command,
         )
         if comprehensive
         else _diff_only_qa_report()
@@ -309,7 +312,13 @@ def prepare_review_dependencies(
     timeout_seconds: int,
     execution_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Prepare declared local test dependencies in the confirmed product venv."""
+    """Prepare dependencies inside the disposable review worktree only.
+
+    The host interpreter is used solely for ``python -m venv``.  All pip,
+    Playwright, and pytest operations run through ``<worktree>/.venv/bin/python``
+    so Debian's PEP 668 policy cannot block review preparation and the product
+    repository's own environment is never mutated.
+    """
     if not enabled:
         return {"status": "NOT_RUN", "reason": "disabled_or_dry_run"}
     local_pytest = bool((execution_contract or {}).get("execution", {}).get("local_pytest", True))
@@ -317,32 +326,132 @@ def prepare_review_dependencies(
         return {"status": "BLOCK", "reason": "local_environment_not_confirmed"}
     if not local_pytest:
         return {"status": "NOT_RUN", "reason": "local_pytest_disabled"}
-    python_path = Path(python_executable)
-    if not python_path.is_absolute():
-        python_path = worktree / ".venv" / "bin" / "python"
-    if not python_path.is_file():
-        return {"status": "BLOCK", "reason": "product_venv_python_missing", "python": str(python_path)}
-    commands: list[list[str]] = []
-    if (worktree / "requirements.txt").is_file():
-        commands.append([str(python_path), "-m", "pip", "install", "-r", "requirements.txt"])
-    elif (worktree / "pyproject.toml").is_file():
-        commands.append([str(python_path), "-m", "pip", "install", "-e", "."])
-    commands.append([str(python_path), "-m", "playwright", "install", "chromium"])
+
+    venv_dir = worktree / ".venv"
+    venv_path = venv_dir / "bin" / "python"
+    python_command = ".venv/bin/python"
+    bootstrap = sys.executable if Path(sys.executable).is_file() else "python3"
     evidence_dir = config.paths.evidence / "review-dependency-preparation"
     evidence_dir.mkdir(parents=True, exist_ok=True)
-    results = []
-    for index, argv in enumerate(commands):
-        completed = subprocess.run(argv, cwd=worktree, shell=False, text=True, capture_output=True, timeout=max(1, timeout_seconds), check=False)
-        stdout, _ = _redact_output(completed.stdout or "")
-        stderr, _ = _redact_output(completed.stderr or "")
+    results: list[dict[str, Any]] = []
+
+    def run_dependency_command(label: str, argv: list[str]) -> dict[str, Any]:
+        index = len(results)
+        try:
+            completed = subprocess.run(
+                argv,
+                cwd=worktree,
+                shell=False,
+                text=True,
+                capture_output=True,
+                timeout=max(1, timeout_seconds),
+                check=False,
+            )
+            stdout, _ = _redact_output(completed.stdout or "")
+            stderr, _ = _redact_output(completed.stderr or "")
+            exit_code = completed.returncode
+        except subprocess.TimeoutExpired as exc:
+            stdout, _ = _redact_output(exc.stdout if isinstance(exc.stdout, str) else "")
+            stderr, _ = _redact_output(exc.stderr if isinstance(exc.stderr, str) else "")
+            exit_code = 124
+        except OSError as exc:
+            stdout = ""
+            stderr, _ = _redact_output(str(exc))
+            exit_code = 127
         stdout_path = evidence_dir / f"install-{index}.stdout.log"
         stderr_path = evidence_dir / f"install-{index}.stderr.log"
         stdout_path.write_text(stdout, encoding="utf-8")
         stderr_path.write_text(stderr, encoding="utf-8")
-        results.append({"command": argv, "status": "PASS" if completed.returncode == 0 else "BLOCK", "exit_code": completed.returncode, "stdout": _relative_or_str(stdout_path, config.root), "stderr": _relative_or_str(stderr_path, config.root)})
-        if completed.returncode != 0:
-            return {"status": "BLOCK", "reason": "dependency_install_failed", "results": results}
-    return {"status": "PASS", "reason": "local_declared_dependencies_prepared", "results": results}
+        result = {
+            "id": label,
+            "command": argv,
+            "status": "PASS" if exit_code == 0 else "BLOCK",
+            "exit_code": exit_code,
+            "stdout": _relative_or_str(stdout_path, config.root),
+            "stderr": _relative_or_str(stderr_path, config.root),
+            "execution_target": "local_disposable_review_worktree",
+            "evidence_origin": "local",
+        }
+        results.append(result)
+        return result
+
+    if not venv_path.is_file():
+        created = run_dependency_command("create-review-venv", [bootstrap, "-m", "venv", ".venv"])
+        if created["status"] != "PASS" or not venv_path.is_file():
+            return {
+                "status": "BLOCK",
+                "reason": "review_venv_creation_failed",
+                "python": python_command,
+                "bootstrap_python": bootstrap,
+                "venv": ".venv",
+                "results": results,
+                "execution_target": "local_disposable_review_worktree",
+                "evidence_origin": "local",
+            }
+
+    requirements_path = worktree / "requirements.txt"
+    if not requirements_path.is_file():
+        fallback_requirements = config.root / "requirements.txt"
+        requirements_path = fallback_requirements if fallback_requirements.is_file() else requirements_path
+    if requirements_path.is_file():
+        requirements_arg = str(requirements_path.relative_to(worktree)) if requirements_path.is_relative_to(worktree) else str(requirements_path)
+        dependency = run_dependency_command(
+            "install-requirements",
+            [python_command, "-m", "pip", "install", "-r", requirements_arg],
+        )
+        if dependency["status"] != "PASS":
+            return {
+                "status": "BLOCK",
+                "reason": "dependency_install_failed",
+                "python": python_command,
+                "venv": ".venv",
+                "requirements_source": requirements_arg,
+                "results": results,
+                "execution_target": "local_disposable_review_worktree",
+                "evidence_origin": "local",
+            }
+    elif (worktree / "pyproject.toml").is_file():
+        dependency = run_dependency_command(
+            "install-project",
+            [python_command, "-m", "pip", "install", "-e", "."],
+        )
+        if dependency["status"] != "PASS":
+            return {
+                "status": "BLOCK",
+                "reason": "dependency_install_failed",
+                "python": python_command,
+                "venv": ".venv",
+                "requirements_source": "pyproject.toml",
+                "results": results,
+                "execution_target": "local_disposable_review_worktree",
+                "evidence_origin": "local",
+            }
+
+    browser_install = run_dependency_command(
+        "install-playwright-chromium",
+        [python_command, "-m", "playwright", "install", "chromium"],
+    )
+    if browser_install["status"] != "PASS":
+        return {
+            "status": "BLOCK",
+            "reason": "dependency_install_failed",
+            "python": python_command,
+            "venv": ".venv",
+            "requirements_source": str(requirements_path) if requirements_path.is_file() else None,
+            "results": results,
+            "execution_target": "local_disposable_review_worktree",
+            "evidence_origin": "local",
+        }
+    return {
+        "status": "PASS",
+        "reason": "local_declared_dependencies_prepared",
+        "python": python_command,
+        "venv": ".venv",
+        "requirements_source": str(requirements_path) if requirements_path.is_file() else None,
+        "results": results,
+        "execution_target": "local_disposable_review_worktree",
+        "evidence_origin": "local",
+    }
 
 
 def run_selected_tests(
@@ -357,9 +466,9 @@ def run_selected_tests(
     dry_run: bool,
 ) -> list[dict[str, Any]]:
     if dry_run:
-        return [{"id": item.get("id"), "command": item.get("command"), "status": "NOT_RUN", "reason": "dry_run"} for item in selected]
+        return [{"id": item.get("id"), "command": item.get("command"), "status": "NOT_RUN", "reason": "dry_run", "execution_target": "local_disposable_review_worktree", "evidence_origin": "local"} for item in selected]
     if not worktree:
-        return [{"id": item.get("id"), "command": item.get("command"), "status": "BLOCK", "reason": "detached_worktree_unavailable"} for item in selected]
+        return [{"id": item.get("id"), "command": item.get("command"), "status": "BLOCK", "reason": "detached_worktree_unavailable", "execution_target": "local_disposable_review_worktree", "evidence_origin": "local"} for item in selected]
     evidence_dir = config.paths.evidence / "reviews" / f"{_repo_slug(repo)}-pr-{pr_number}-{head_sha[:12]}"
     evidence_dir.mkdir(parents=True, exist_ok=True)
     results: list[dict[str, Any]] = []
@@ -376,6 +485,8 @@ def run_selected_tests(
                     "exit_code": 2,
                     "stdout": None,
                     "stderr": None,
+                    "execution_target": "local_disposable_review_worktree",
+                    "evidence_origin": "local",
                 })
                 continue
             completed = subprocess.run(
@@ -406,6 +517,12 @@ def run_selected_tests(
             stdout = exc.stdout if isinstance(exc.stdout, str) else ""
             stderr = exc.stderr if isinstance(exc.stderr, str) else ""
             exit_code = 124
+        except OSError as exc:
+            status = "BLOCK"
+            reason = "test_executable_missing"
+            stdout = ""
+            stderr = str(exc)
+            exit_code = 127
         fallback = None
         fallback_attempted = False
         if status == "BLOCK" and reason == "test_dependency_missing" and len(argv) >= 4 and argv[1:3] == ["-m", "pytest"]:
@@ -469,6 +586,9 @@ def run_selected_tests(
                 "fallback": fallback,
                 "fallback_attempted": fallback_attempted,
                 "coverage_status": "PARTIAL" if fallback_attempted else "FULL",
+                "execution_target": "local_disposable_review_worktree",
+                "evidence_origin": "local",
+                "python_executable": argv[0],
                 "stdout": _relative_or_str(stdout_path, config.root),
                 "stderr": _relative_or_str(stderr_path, config.root),
                 "reproduction": {
@@ -1008,6 +1128,7 @@ def _run_comprehensive_review_qa(
     dry_run: bool,
     test_selection: dict[str, Any] | None = None,
     test_results: list[dict[str, Any]] | None = None,
+    python_executable: str | None = None,
 ) -> dict[str, Any]:
     dimensions = ["black_box", "white_box", "functional", "boundary", "stress", "ui", "ux", "documentation"]
     if dry_run:
@@ -1059,6 +1180,7 @@ def _run_comprehensive_review_qa(
         ),
         dry_run=dry_run,
     )
+    review_python_command = python_executable or _review_python_executable(config, worktree_path)
     browser_regression_case_result = _run_browser_regression_case(
         review_config,
         worktree=worktree_path,
@@ -1066,7 +1188,7 @@ def _run_comprehensive_review_qa(
         selected_tests=test_selection or {},
         existing_test_results=test_results or [],
         environment_profile=profile,
-        python_executable=_review_python_executable(config),
+        python_executable=review_python_command,
         timeout_seconds=timeout_seconds,
     )
     product_test = product_case_result.get("product_result") if isinstance(product_case_result.get("product_result"), dict) else product_case_result
@@ -1260,6 +1382,12 @@ def _run_browser_regression_case(
         return None
     item = browser_items[0]
     command = str(item.get("command") or "")
+    try:
+        command_argv = shlex.split(command)
+        if command_argv and Path(command_argv[0]).name.lower().startswith("python") and python_executable:
+            command = shlex.join([python_executable, *command_argv[1:]])
+    except ValueError:
+        pass
     case_id = "PR-BROWSER-UI-REGRESSION"
     evidence_dir = config.paths.evidence / "reviews" / run_id / case_id
     evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -2042,6 +2170,11 @@ def _build_report(
         "execution_targets": {
             "local_review_worktree": bool((effective_execution_contract or {}).get("execution", {}).get("local_review_worktree", True)),
             "local_pytest": bool((effective_execution_contract or {}).get("execution", {}).get("local_pytest", True)),
+            "local_python": (dependency_preparation or {}).get("python", ".venv/bin/python"),
+            "local_execution_target": (dependency_preparation or {}).get("execution_target", "local_disposable_review_worktree"),
+            "local_evidence_origin": (dependency_preparation or {}).get("evidence_origin", "local"),
+            "remote_pytest": "NOT_RUN",
+            "remote_pytest_evidence_origin": "remote_separate",
             "product_target": (effective_execution_contract or {}).get("execution", {}).get("product_target", "local"),
             "playwright_target": (effective_execution_contract or {}).get("execution", {}).get("playwright_target", "local"),
             "evidence_origin_policy": "local_and_remote_explicit",
@@ -2348,6 +2481,9 @@ def _render_detailed_text(report: dict[str, Any]) -> str:
         "執行分層與證據來源",
         f"- local review worktree：{_zh_value(report.get('execution_targets', {}).get('local_review_worktree')) if isinstance(report.get('execution_targets'), dict) else '未確認'}",
         f"- local pytest：{_zh_value(report.get('execution_targets', {}).get('local_pytest')) if isinstance(report.get('execution_targets'), dict) else '未確認'}",
+        f"- local Python：{(report.get('execution_targets') or {}).get('local_python', '未確認') if isinstance(report.get('execution_targets'), dict) else '未確認'}",
+        f"- local evidence origin：{(report.get('execution_targets') or {}).get('local_evidence_origin', '未確認') if isinstance(report.get('execution_targets'), dict) else '未確認'}",
+        f"- remote pytest：{(report.get('execution_targets') or {}).get('remote_pytest', 'NOT_RUN') if isinstance(report.get('execution_targets'), dict) else 'NOT_RUN'}（remote product checkout，與 local regression 分開）",
         f"- product target：{(report.get('execution_targets') or {}).get('product_target', '未確認') if isinstance(report.get('execution_targets'), dict) else '未確認'}",
         f"- Playwright target：{(report.get('execution_targets') or {}).get('playwright_target', '未確認') if isinstance(report.get('execution_targets'), dict) else '未確認'}",
         f"- remote preflight：{((report.get('remote_preflight') or {}).get('status', 'NOT_RUN')) if isinstance(report.get('remote_preflight'), dict) else 'NOT_RUN'}",
@@ -2572,8 +2708,16 @@ def _tests_use_pytest(tests_dir: Path) -> bool:
     return False
 
 
-def _review_python_executable(config: ProjectConfig) -> str:
-    """Choose a project-owned Python environment before falling back to python3."""
+def _review_python_executable(config: ProjectConfig, worktree: Path | None = None) -> str:
+    """Return the interpreter command for the selected review execution boundary.
+
+    Once a disposable worktree exists, pytest must always be addressed through
+    its own relative ``.venv/bin/python``.  This prevents the Quality Pilot
+    checkout venv, the product repository venv, or Debian ``/usr/bin/python3``
+    from being mistaken for local review evidence.
+    """
+    if worktree is not None:
+        return ".venv/bin/python"
     candidates: list[str] = []
     runtime = config.data.get("runtime") if isinstance(config.data.get("runtime"), dict) else {}
     entrypoint = str(runtime.get("primary_entrypoint") or "").strip()
