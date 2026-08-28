@@ -2934,7 +2934,7 @@ def _render_engineer_execution_summary(report: dict[str, Any]) -> list[str]:
     lines.extend([
         f"結論：{conclusion}",
         f"Quality Pilot 建議：{_quality_pilot_recommendation(report)}",
-        "PR merge decision：USER_OWNED；Quality Pilot 只提供建議與留言，不執行 merge，也不代替你的 gate。",
+        "PR 合併決定：由 PR 擁有者決定；Quality Pilot 只提供建議與留言，不執行 merge，也不代替你的 gate。",
         "重要規則：PASS 只代表該項命令和 oracle 實際通過；BLOCK/HOLD/逾時都不能當成 PASS。",
         "分類規則：測試 FAIL 是已執行的失敗；BLOCK 是未完成或前置／工具阻擋；HOLD 是證據不足，不直接指控產品有缺陷。",
         "",
@@ -3183,13 +3183,13 @@ def _render_reproduction_playbook(report: dict[str, Any]) -> list[str]:
         "預期：validation dialog 出現、focus 回到錯誤欄位，且 diagnostics network 不包含 `/api/settings` POST。",
         "",
         "### 3. 非 UI／UX 維度的補測方式",
-        "- 黑箱：使用產品實際 CLI/TUI/API/UI 入口，保存 command、stdout/stderr、expected/actual 與 oracle。",
-        "- 功能：依 changed files 執行 targeted tests，並保存第一個失敗測試與完整輸出。",
-        "- 白箱：執行完整 regression，確認沒有把未完成 suite 當成 PASS。",
-        "- 邊界／無效輸入：建立空值、型別錯誤、範圍錯誤與硬體前置條件 case。",
-        "- 壓力／逾時：先定義 bounded duration、timeout、resource limit 與 baseline，再執行。",
-        "- 文件：重新讀取變更文件與 contract，確認命令、欄位與 workflow 描述一致。",
-        "- 產品建置：remote adapter 完成前，只能標示尚未評估，不能標示 PASS。",
+        "- 黑箱：使用產品實際 CLI/TUI/API/UI 入口，保存命令、標準輸出／錯誤輸出、預期／實際結果與判定規則。",
+        "- 功能：依變更檔案執行 targeted tests，並保存第一個失敗測試與完整輸出。",
+        "- 白箱：執行完整回歸，確認沒有把未完成的測試套件當成通過。",
+        "- 邊界／無效輸入：建立空值、型別錯誤、範圍錯誤與硬體前置條件案例。",
+        "- 壓力／逾時：先定義受限執行時間、逾時、資源上限與基準，再執行。",
+        "- 文件：重新讀取變更文件與契約，確認命令、欄位與 workflow 描述一致。",
+        "- 產品建置：遠端 adapter 完成前，只能標示尚未評估，不能標示通過。",
     ])
     return lines
 
@@ -3204,7 +3204,7 @@ def _render_final_result(report: dict[str, Any]) -> list[str]:
         "最終結果（請以本節作為摘要）",
         "=" * 80,
         f"Quality Pilot 建議：{_quality_pilot_recommendation(report)}",
-        "PR merge decision：由 PR 擁有者決定；Quality Pilot 沒有執行 merge，也沒有修改 merge gate。",
+        "PR 合併決定：由 PR 擁有者決定；Quality Pilot 沒有執行 merge，也沒有修改 merge gate。",
         f"實際通過的 Browser／Playwright case：{len(passed)} 個。",
         f"實際失敗的 Browser／Playwright case：{len(failed)} 個。",
         f"產品建置／產物：{_status_for_engineer(product.get('status'), reason=product.get('reason')) if product else '未建立'}；{_engineer_reason(product.get('status'), product.get('reason')) if product else '沒有產品建置結果。'}",

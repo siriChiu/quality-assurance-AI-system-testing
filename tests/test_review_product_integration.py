@@ -135,7 +135,7 @@ class ReviewProductIntegrationTest(unittest.TestCase):
         text = _render_detailed_text(report)
         self.assertIn("Playwright／產品測試執行證據", text)
         self.assertIn("screenshot：browser/failure.png（失敗截圖）", text)
-        self.assertIn("PR merge decision：USER_OWNED", text)
+        self.assertIn("PR 合併決定：由 PR 擁有者決定", text)
         self.assertIn("tests/browser_ui/test_settings.py::test_run", text)
         comment = __import__("quality_pilot.review", fromlist=["_review_comment_body"])._review_comment_body(report, [])
         self.assertIn("PR 合併決定仍由 PR 擁有者負責", comment)
