@@ -39,7 +39,7 @@ from .contracts import ContractError, list_contract_paths, load_contract, load_c
 from .environment import configure_environment, environment_profile_status, remote_preflight
 from .execution_contract import apply_discovered_contract, normalize_execution_contract
 from .fix_issues import FixIssueError, fix_status, plan_fix_issue, run_fix_case, run_fix_issue, submit_fix_pr
-from .review import ReviewError, complete_gitea_review_apply, pr_snapshot_path, review_pr
+from .review import ReviewError, complete_gitea_review_apply, pr_snapshot_path, review_gate, review_pr
 from .gitea import GiteaError
 from .heartbeat import (
     HEARTBEAT_DEFAULT_EVERY,
@@ -1207,7 +1207,10 @@ def cmd_review_pr(args: argparse.Namespace) -> int:
     except (QAConfigError, ReviewError) as exc:
         return _error_payload(exc)
     status = str(payload.get("status") or "")
-    return print_json(payload, exit_code=0 if status == "ok" else 4)
+    gate = payload.get("review_gate") if isinstance(payload.get("review_gate"), dict) else review_gate(payload, dry_run=bool(getattr(args, "dry_run", False)))
+    payload["review_gate"] = gate
+    exit_code = 0 if status == "ok" and gate.get("status") != "BLOCKED" else 4
+    return print_json(payload, exit_code=exit_code)
 
 
 def cmd_review_apply(args: argparse.Namespace) -> int:

@@ -40,6 +40,27 @@ class ReviewError(RuntimeError):
     pass
 
 
+def review_gate(report: dict[str, Any], *, dry_run: bool = False) -> dict[str, Any]:
+    """Return the fail-closed gate that callers must honor before proceeding."""
+    if dry_run:
+        return {
+            "status": "PREVIEW",
+            "reason": "dry_run",
+            "execution_allowed": False,
+            "merge_allowed": False,
+            "human_decision_required": True,
+        }
+    conclusion = str(report.get("conclusion") or "")
+    blocked = str(report.get("status") or "") != "ok" or conclusion != "NO_BLOCKING_FINDINGS"
+    return {
+        "status": "BLOCKED" if blocked else "HUMAN_GATE_REQUIRED",
+        "reason": conclusion or "review_status_unavailable",
+        "execution_allowed": not blocked,
+        "merge_allowed": False,
+        "human_decision_required": True,
+    }
+
+
 def review_pr(
     config: ProjectConfig,
     *,
@@ -152,6 +173,7 @@ def review_pr(
         effective_execution_contract=effective_contract,
         dry_run=dry_run,
     )
+    report["review_gate"] = review_gate(report, dry_run=dry_run)
     report_paths = write_review_report(config, report)
     report["report_paths"] = {
         key: value for key, value in report_paths.items() if key != "json_path_obj"
@@ -2487,6 +2509,7 @@ def _render_detailed_text(report: dict[str, Any]) -> str:
         f"- product target：{(report.get('execution_targets') or {}).get('product_target', '未確認') if isinstance(report.get('execution_targets'), dict) else '未確認'}",
         f"- Playwright target：{(report.get('execution_targets') or {}).get('playwright_target', '未確認') if isinstance(report.get('execution_targets'), dict) else '未確認'}",
         f"- remote preflight：{((report.get('remote_preflight') or {}).get('status', 'NOT_RUN')) if isinstance(report.get('remote_preflight'), dict) else 'NOT_RUN'}",
+        f"- review gate：{((report.get('review_gate') or {}).get('status', 'BLOCKED')) if isinstance(report.get('review_gate'), dict) else 'BLOCKED'}；原因={((report.get('review_gate') or {}).get('reason', '未建立 gate')) if isinstance(report.get('review_gate'), dict) else '未建立 gate'}",
         "- 每個 case 必須明確標示 execution target 與 evidence origin；local 與 remote 證據不得混寫。",
         "",
         "證據規則",

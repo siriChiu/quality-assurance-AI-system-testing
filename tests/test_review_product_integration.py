@@ -7,12 +7,24 @@ from pathlib import Path
 from unittest.mock import patch
 
 from quality_pilot.config import ProjectConfig, project_paths
-from quality_pilot.review import _browser_result_case, _build_report, _product_result_case, _render_detailed_text, _render_markdown, _run_comprehensive_review_qa, prepare_gitea_review_reply
+from quality_pilot.review import _browser_result_case, _build_report, _product_result_case, _render_detailed_text, _render_markdown, _run_comprehensive_review_qa, prepare_gitea_review_reply, review_gate
 
 
 class ReviewProductIntegrationTest(unittest.TestCase):
     def _config(self, root: Path) -> ProjectConfig:
         return ProjectConfig(root=root, path=root / ".quality-pilot.yaml", data={"runtime": {}}, paths=project_paths(root))
+
+    def test_review_gate_blocks_non_green_review_even_when_report_generation_succeeds(self) -> None:
+        gate = review_gate({"status": "ok", "conclusion": "TEST_FAILURE_REQUIRES_TRIAGE"})
+        self.assertEqual(gate["status"], "BLOCKED")
+        self.assertFalse(gate["execution_allowed"])
+        self.assertFalse(gate["merge_allowed"])
+
+    def test_review_gate_keeps_clean_review_human_owned(self) -> None:
+        gate = review_gate({"status": "ok", "conclusion": "NO_BLOCKING_FINDINGS"})
+        self.assertEqual(gate["status"], "HUMAN_GATE_REQUIRED")
+        self.assertTrue(gate["execution_allowed"])
+        self.assertFalse(gate["merge_allowed"])
 
     def test_product_block_is_reported_and_advisory_comment_can_be_prepared(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -123,7 +123,10 @@ allowlist 後執行。若啟用 Web UI contract，會使用真實 Playwright bro
 PR head、test result、product test、QA matrix、conclusion、finding、具體修補建議與 remote reply
 preview；不需要先打開 JSON 才能預覽內容。即使 QA 有 BLOCK/HOLD，`--confirm` 仍只會準備
 明確標示為 `COMMENT` 的 advisory Gitea review；Quality Pilot 不自動 APPROVED，最終
-COMMENT/REQUEST_CHANGES/APPROVED 由使用者決定。
+COMMENT/REQUEST_CHANGES/APPROVED 由使用者決定。若 conclusion 不是
+`NO_BLOCKING_FINDINGS`，review report 會產生 `review_gate: BLOCKED`，CLI 以 exit code 4
+阻擋後續 automation；即使沒有 blocking finding，也只會是 `HUMAN_GATE_REQUIRED`，不會
+宣稱 merge allowed。
 
 ### Local repo QA
 
